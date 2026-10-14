@@ -2,7 +2,7 @@
 
 <img src="assets/images/logo.png" width="150" alt="Jev Chat Assistant" />
 
-# Jev Chat Assistant
+# Jev Chat Assistant · Development Fork
 
 **A conversation copilot for your phone. Jev works alongside your chat apps, helps you understand what the other person means, and suggests what to say next. Tap to fill in a reply. You decide whether to send it.**
 
@@ -18,38 +18,19 @@
 
 </div>
 
-## Sponsors
+## What this branch changes
 
-> [Interested in sponsoring the project?](#community-and-feedback)
+This branch keeps developing on top of upstream v1.7, and all of that work lives in this repository. The full list is in the unreleased sections of the [changelog](../cn/CHANGELOG.md) (in Chinese):
 
-<details open>
-<summary>Show or hide sponsors</summary>
+- **Capture layer:** new Telegram and TIM adapters; WeChat runs on a read-only "screenshot + on-device OCR" path (bubble colour decides the sides); OCR grouping, speaker attribution, and recent-reply dedup.
+- **Knowledge base:** on-device document import (PDF / Word / EPUB / web pages; scanned files fall back to on-device OCR), skill packs (Agent Skills, matched against the conversation), contact profiles and ledgers.
+- **Optional injection layer:** read-only enhancements through LSPosed / Vector — off by default, enabled per app, and falling back to the accessibility path (with the reason noted in Trace) the moment it cannot read.
+- **Context and memory:** reply context window 10 → 20 messages; knowledge-base hit threshold fix (a single skill pack used to be mathematically unreachable); an explicit hint on the card when memory is not active.
+- **UI:** edge-snapping bubble capsule, tiered candidate and judgement cards with collapsible details, grouped settings page, intensity presets (auto / hold back / natural / push).
+- **APIs and generation:** a DeepSeek preset for the assessment API (switches to "OpenAI chat mode" automatically), repetition penalties, and the amber-light key on persona cards.
 
-<table>
-<tr>
-<td width="240" align="center"><a href="https://open.bocha.cn"><img src="assets/images/sponsors/bocha.png" alt="Bocha" width="200"></a></td>
-<td>Thanks to <b>Bocha</b> for sponsoring this project! Bocha is a search engine for AI, giving your applications access to information from across the web with clean, accurate, high-quality results. Its services include the Web Search API, Bocha Jev API, and other search and model APIs. <a href="https://open.bocha.cn">open.bocha.cn</a></td>
-</tr>
-<tr>
-<td width="240" align="center"><a href="https://faka.rainlanguage.top"><img src="assets/images/sponsors/xiaoyou.png" alt="Xiaoyou Store" width="200"></a></td>
-<td>Thanks to <b>Xiaoyou Store</b> for sponsoring this project! Xiaoyou Store sells digital products and account services, with a selection available to users of this project. <a href="https://faka.rainlanguage.top">Visit the store</a>.</td>
-</tr>
-<tr>
-<td width="240" align="center"><a href="https://agent.ai-tools.cn"><img src="assets/images/sponsors/vytal.jpg" alt="Vytal" width="200"></a></td>
-<td>Thanks to <b>Vytal</b> for sponsoring this project! Vytal is an AI video workflow platform with reusable workflows for batch production, making video creation more accessible to content creators, training providers, and small teams. <a href="https://agent.ai-tools.cn">Visit Vytal</a>.</td>
-</tr>
-</table>
+The upstream authors were not involved in these changes and do not endorse them; upstream's original features and docs are in the [upstream repository](https://github.com/jev-chat/jev-chat-jarvis).
 
-</details>
-
-## Screenshots
-
-<table align="center">
-<tr>
-<td align="center"><img src="assets/images/overlay.png" width="300" alt="Jev analysis panel floating over a conversation" /><br/><sub>Overlay: risk level, the other person's intent, and three ranked replies</sub></td>
-<td align="center"><img src="assets/images/settings.png" width="300" alt="Settings screen" /><br/><sub>Settings: separate API configurations for assessment, replies, and vision</sub></td>
-</tr>
-</table>
 
 ## Why Jev?
 
@@ -264,49 +245,6 @@ cd cn
 - **OCR requires system permission to take screenshots:** Xiaomi / HyperOS may deny screenshot access to the accessibility service; the panel shows the reason when capture fails. Protected windows (`FLAG_SECURE`) cannot be captured.
 - **OCR only reads what is visible:** It cannot recover the hidden portion of a truncated message, and recognition errors are possible.
 - **Larger APK:** The bundled offline Chinese ML Kit model increases the APK size from about 12 MB to about 27 MB. Builds support `arm64-v8a` only.
-
-## Community and Feedback
-
-**Please get in touch by messaging the WeChat official account.** Use it for partnerships, sponsorships, feedback, trouble joining a group, or expired QR codes. Messages sent elsewhere may be missed.
-
-<p align="center"><img src="assets/images/mp-qr.png" width="180" alt="WeChat official account QR code" /></p>
-
-We'd love to hear what you actually need. Which chat app would you most like to use Jev with? What should it pick up on, how should it alert you, and what should it never touch? Send your thoughts to the official account.
-
-<details>
-<summary>Show community group QR codes. These groups are full or their QR codes have expired; message the official account for a current code.</summary>
-
-<table align="center"><tr>
-  <td align="center"><img src="assets/images/group-1.png" width="80" alt="Group 1" /><br/><sub>Group 1</sub></td>
-  <td align="center"><img src="assets/images/group-2.png" width="80" alt="Group 2" /><br/><sub>Group 2</sub></td>
-  <td align="center"><img src="assets/images/group-3.png" width="80" alt="Group 3" /><br/><sub>Group 3</sub></td>
-  <td align="center"><img src="assets/images/group-4.png" width="80" alt="Group 4" /><br/><sub>Group 4</sub></td>
-  <td align="center"><img src="assets/images/group-5.png" width="80" alt="Group 5" /><br/><sub>Group 5</sub></td>
-  <td align="center"><img src="assets/images/group-6.png" width="80" alt="Group 6" /><br/><sub>Group 6</sub></td>
-  <td align="center"><img src="assets/images/group-7.png" width="80" alt="Group 7" /><br/><sub>Group 7</sub></td>
-  <td align="center"><img src="assets/images/group-8.png" width="80" alt="Group 8" /><br/><sub>Group 8</sub></td>
-  <td align="center"><img src="assets/images/group-9.png" width="80" alt="Group 9" /><br/><sub>Group 9</sub></td>
-</tr></table>
-
-</details>
-
-## Related Projects
-
-Also part of the [jev-chat](https://github.com/jev-chat) organization:
-
-- [Jev Chat Assistant for macOS](https://github.com/jev-chat/jev-chat-jarvis-mac): A read-only overlay that reads the screen, uses a small local model to assess intent and risk, and generates suggested replies based on conversation guidance.
-- [Jev Chat Assistant for Windows](https://github.com/jev-chat/jev-chat-windows): A reply assistant that sits beside your chat window. Uses window screenshots and local offline OCR, with three suggested replies you can insert with a click. Sending is always manual.
-
-See [PRIVACY.md](../cn/PRIVACY.md) for details on what is read, where it is sent and stored, and how to delete it.
-
-## Friend Links
-
-<table>
-<tr>
-<td width="150" align="center"><a href="https://github.com/lanyijianke"><img src="assets/images/friends/lanyijianke.jpg" width="100" alt="Lanyi Jianke" /></a><br/><b>Lanyi Jianke</b></td>
-<td>Senior AI expert and author; Volcengine Navigator KOL, Alibaba Cloud Agent Maker, and core WaytoAGI creator. Deeply experienced in software development, system architecture, and project management. Author of bestselling AI books including <i>Efficient Office Work with Doubao</i> and <i>Efficient Office Work with Kimi</i>; winner of JD Books' 2025 Super New Book award and 2025 CMPress Creation Star. He has contributed to AI standards and national-level reports, and has provided enterprise AI consulting and implementation for dozens of Fortune Global 100 companies.<br/><br/>GitHub: <a href="https://github.com/lanyijianke">@lanyijianke</a> · Email: <a href="mailto:lanyijianke@outlook.com">lanyijianke@outlook.com</a></td>
-</tr>
-</table>
 
 ## Copyright and License
 

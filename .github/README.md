@@ -2,7 +2,7 @@
 
 <img src="assets/images/logo.png" width="150" alt="Jev 聊天助手" />
 
-# Jev 聊天助手
+# Jev 聊天助手 · 二次开发分支
 
 **Jev 对话副驾：在支持的平台分析聊天并给出回复建议；各端功能见对应项目说明，发送由你决定。**
 
@@ -17,6 +17,20 @@
 
 </div>
 
+## 本分支相对上游的改动
+
+本分支在上游 v1.7 之上继续开发，全部改动都在本仓库，完整清单见[更新日志](../cn/CHANGELOG.md)的「未发布」各节：
+
+- **采集层**：新增 Telegram、TIM 适配器；微信走「截屏 + 本机 OCR」只读路径（按气泡颜色判左右）；OCR 分组、说话人归属、近期回复去重。
+- **知识库**：本机文档导入（PDF / Word / EPUB / 网页，扫描件回落本机 OCR）、技能包（Agent Skills，按对话自动命中）、联系人档案与台账。
+- **可选注入层**：基于 LSPosed / Vector 的只读增强，默认关闭、逐 App 显式开启，读不到立即回落无障碍路径并在 Trace 标明原因。
+- **上下文与记忆**：写作上下文窗口 10 → 20 条；知识库命中门槛修正（单个技能包此前在数学上不可达）；记忆未激活时卡片直接提示。
+- **界面**：悬浮卡贴边胶囊、候选与判断分级（详情可折叠）、设置页分组、推进档位（自动 / 收着 / 自然 / 加码）。
+- **接口与生成**：判断接口新增 DeepSeek 预设（自动切「OpenAI 聊天模式」）、重复惩罚参数、人设卡黄灯键。
+
+上游作者未参与这些改动，也不为其背书；上游原版功能与文档见[上游仓库](https://github.com/jev-chat/jev-chat-jarvis)。
+
+
 ## 开始使用 Jev
 
 | Android（本分支） | 上游 Windows | 上游 macOS |
@@ -26,40 +40,7 @@
 
 本分支没有自己的发布页；想装原版上游应用，请去[上游仓库](https://github.com/jev-chat/jev-chat-jarvis)，那是另一个包名的应用，和这里的构建不是同一个安装包。
 
-**安装教程 · 交流更新：**[Android 安装说明](#快速开始) · [上游 Windows 项目说明](https://github.com/jev-chat/jev-chat-windows#使用说明) · [上游 macOS 项目说明](https://github.com/jev-chat/jev-chat-jarvis-mac#用法) · [交流群与公众号](#交流群--需求收集)。
-
-## ❤️赞助商
-
-> [想出现在这里？](#交流群--需求收集)
-
-<details open>
-<summary>点击折叠</summary>
-
-<table>
-<tr>
-<td width="240" align="center"><a href="https://open.bocha.cn"><img src="assets/images/sponsors/bocha.png" alt="博查" width="200"></a></td>
-<td>感谢 <b>博查</b> 赞助了本项目！博查是一个给 AI 用的搜索引擎，让你的 AI 应用连接世界知识，获得干净、准确、高质量的搜索结果。提供 Web Search API、Bocha Jev API 等多种联网搜索和模型服务。<a href="https://open.bocha.cn">open.bocha.cn</a></td>
-</tr>
-<tr>
-<td width="240" align="center"><a href="https://faka.rainlanguage.top"><img src="assets/images/sponsors/xiaoyou.png" alt="小优店铺" width="200"></a></td>
-<td>感谢 <b>小优店铺</b> 赞助了本项目！小优店铺是一家数字商品与账号服务店铺，为本项目的用户提供选购渠道。<a href="https://faka.rainlanguage.top">点此前往</a>。</td>
-</tr>
-<tr>
-<td width="240" align="center"><a href="https://agent.ai-tools.cn"><img src="assets/images/sponsors/vytal.jpg" alt="速创猫 Vytal" width="200"></a></td>
-<td>感谢 <b>速创猫 Vytal</b> 赞助了本项目！速创猫 Vytal 是专业的 AI 视频工作流平台，提供可批量复用的视频工作流，降低内容制作门槛，服务内容创作者、培训机构及中小团队。<a href="https://agent.ai-tools.cn">点此前往</a>。</td>
-</tr>
-</table>
-
-</details>
-
-## 截图
-
-<table align="center">
-<tr>
-<td align="center"><img src="assets/images/overlay.png" width="300" alt="悬浮窗：聊天上方的 Jev 分析面板" /><br/><sub>悬浮窗：危险等级、对方真实意图、排好序的 3 条候选回复</sub></td>
-<td align="center"><img src="assets/images/settings.png" width="300" alt="设置页" /><br/><sub>设置页：判断 / 回复 / 视觉三路接口分别可配</sub></td>
-</tr>
-</table>
+**安装教程 · 交流更新：**[Android 安装说明](#快速开始) · [上游 Windows 项目说明](https://github.com/jev-chat/jev-chat-windows#使用说明) · [上游 macOS 项目说明](https://github.com/jev-chat/jev-chat-jarvis-mac#用法)。
 
 ## 为什么用它
 
@@ -267,49 +248,6 @@ cd cn
 - **OCR 只认屏幕上看得见的部分**：长消息被截断的部分读不到；识别有错字。
 - **包体变大**：ML Kit 中文离线模型让 APK 从约 12 MB 增至约 27 MB，且只打 arm64-v8a。
 - **不支持隐藏界面内容或禁止截屏的 App**：这类 App 里不读取、不截屏、不填入。
-
-## 交流群 / 需求收集
-
-**扫码关注公众号可查看项目更新；需要联系时请公众号私信。** 合作、赞助、反馈、进群失败、二维码过期，都走公众号私信，其它渠道不一定看得到。
-
-<p align="center"><img src="assets/images/mp-qr.png" width="180" alt="公众号二维码" /></p>
-
-想听真实需求：你在哪个聊天 App 上最想要这个副驾？希望它判断什么、怎么提示、什么绝对不能碰？公众号私信直接说。
-
-<details>
-<summary>点击展开交流群二维码（都已满或已过期，进群请公众号私信要新码）</summary>
-
-<table align="center"><tr>
-  <td align="center"><img src="assets/images/group-1.png" width="80" alt="1 群" /><br/><sub>1 群</sub></td>
-  <td align="center"><img src="assets/images/group-2.png" width="80" alt="2 群" /><br/><sub>2 群</sub></td>
-  <td align="center"><img src="assets/images/group-3.png" width="80" alt="3 群" /><br/><sub>3 群</sub></td>
-  <td align="center"><img src="assets/images/group-4.png" width="80" alt="4 群" /><br/><sub>4 群</sub></td>
-  <td align="center"><img src="assets/images/group-5.png" width="80" alt="5 群" /><br/><sub>5 群</sub></td>
-  <td align="center"><img src="assets/images/group-6.png" width="80" alt="6 群" /><br/><sub>6 群</sub></td>
-  <td align="center"><img src="assets/images/group-7.png" width="80" alt="7 群" /><br/><sub>7 群</sub></td>
-  <td align="center"><img src="assets/images/group-8.png" width="80" alt="8 群" /><br/><sub>8 群</sub></td>
-  <td align="center"><img src="assets/images/group-9.png" width="80" alt="9 群" /><br/><sub>9 群</sub></td>
-</tr></table>
-
-</details>
-
-## 姊妹项目
-
-同在 [jev-chat](https://github.com/jev-chat) 组织下：
-
-- [Jev 聊天助手 macOS 版](https://github.com/jev-chat/jev-chat-jarvis-mac)：消息意图识别悬浮窗，看屏 + 本地小模型判断意图和风险，再按话术生成回复候选，纯只读。
-- [Jev 聊天助手 Windows 版](https://github.com/jev-chat/jev-chat-windows)：聊天窗口旁挂的回复辅助，窗口截图 + 本地离线 OCR，3 条候选一键填入，发送永远手动。
-
-隐私政策见 [PRIVACY.md](../cn/PRIVACY.md)（说明读取了什么、发给谁、存在哪里、怎么删除）。
-
-## 友情链接
-
-<table>
-<tr>
-<td width="150" align="center"><a href="https://github.com/lanyijianke"><img src="assets/images/friends/lanyijianke.jpg" width="100" alt="蓝衣剑客" /></a><br/><b>蓝衣剑客</b></td>
-<td>资深 AI 专家、作家，火山引擎领航 KOL、阿里云 Agent 创客、WaytoAGI 核心创作者。深耕软件开发、系统架构与项目管理，著有《豆包高效办公》《Kimi 高效办公》等畅销 AI 书籍，获京东图书 2025 年度超级新书、2025 机工创作之星；曾参与多项 AI 领域标准及国家级报告起草，为数十家世界百强企业提供企业级 AI 咨询与实施。<br/><br/>GitHub：<a href="https://github.com/lanyijianke">@lanyijianke</a> · 微信：lanyijianke1992</td>
-</tr>
-</table>
 
 ## 版权与许可
 
