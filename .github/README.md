@@ -1,3 +1,5 @@
+> **Note:** This repository is a second-hand development branch of Jev Chat Assistant (package `com.jev.probe`). It is **not the upstream repository and not the original authors' release**, and it publishes no APK. What this repo is and where the fork's work lives: [root README](../README.md) and [`cn/`](../cn/). Upstream project: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis) — the original project overview is below.
+
 <div align="center">
 
 <img src="assets/images/logo.png" width="120" alt="jev-chat" />

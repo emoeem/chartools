@@ -1,3 +1,5 @@
+> **说明**：本仓库是 Jev 聊天助手的二次开发分支（包名 `com.jev.probe`）。**不是上游仓库，也不是原作者的发布**，不发布安装包。本仓库是什么、本地开发在哪：[根目录 README](../README.md) 与 [`cn/`](../cn/)。上游项目：[jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis)——下面是上游原版总览。
+
 <div align="center">
 
 <img src="assets/images/logo.png" width="120" alt="jev-chat" />
