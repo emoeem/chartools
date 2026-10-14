@@ -1,6 +1,7 @@
 # Build
 /build/
-/app/build/
+/cn/build/
+/cn/app/build/
 .gradle/
 *.apk
 *.ap_
@@ -22,8 +23,7 @@ gradle.properties.local
 
 # Dev artifacts / reports (not part of the product)
 /_reports/
-/tools/jev/report/
-/tools/jev/__pycache__/
+/cn/tools/jev/report/
 **/__pycache__/
 *.pyc
 
@@ -36,7 +36,7 @@ Thumbs.db
 secrets.*
 
 # Prebuilt APK for direct install (tracked on purpose)
-!/apk/*.apk
+!/cn/apk/*.apk
 
 # Signing material never enters the repo
 *.jks
