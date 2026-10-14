@@ -2,6 +2,8 @@
 /build/
 /cn/build/
 /cn/app/build/
+# 旧布局残留（根目录 app/ 的旧构建产物；代码已迁 cn/，此目录可随时删除）
+/app/build/
 .gradle/
 *.apk
 *.ap_
