@@ -1,0 +1,7 @@
+goutoujunshi
+https://github.com/shengjidaguai-china/goutoujunshi
+Commit: 6db7354a4002dc7c448a9c87ffdad8132570c9d3
+Copyright (c) 2026 powerycy
+MIT License. Original knowledge files preserved; Yanwai adapts the reply workflow.
+
+本副本由 jev-chat-jarvis 打包：SKILL.md 的 frontmatter 与「在本应用里怎么用」一段为本项目改写，正文与 references/ 逐字保留自上游 commit 6db7354。MIT License，原始版权见 LICENSE。

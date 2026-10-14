@@ -31,6 +31,62 @@ class KbStore private constructor(context: Context) {
     private val contactsFile: File get() = File(root, "contacts.json")
     private fun logFile(contactId: String) = File(File(root, "logs"), "$contactId.json")
     private fun screenFile(contactId: String) = File(File(root, "logs"), "$contactId.screen.json")
+    private fun summaryFile(contactId: String) = File(File(root, "logs"), "$contactId.summary.json")
+    private fun ledgerFile(contactId: String) = File(File(root, "logs"), "$contactId.ledger.json")
+
+    fun saveHistorySummary(contactId: String, summary: String, coveredUntil: Long): Boolean = synchronized(lock) {
+        if (contactId.isBlank()) return@synchronized false
+        val o = JSONObject().put("summary", summary.trim().take(200)).put("coveredUntil", coveredUntil).put("updatedAt", System.currentTimeMillis())
+        writeAtomic(summaryFile(contactId), o.toString(2))
+    }
+
+    fun historySummary(contactId: String): String? = synchronized(lock) {
+        if (contactId.isBlank()) return@synchronized null
+        runCatching {
+            val f = summaryFile(contactId)
+            if (!f.isFile) return@runCatching null
+            JSONObject(f.readText()).optString("summary", "").trim().takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun historySummaryNeedsRefresh(contactId: String, coveredUntil: Long): Boolean = synchronized(lock) {
+        if (contactId.isBlank()) return@synchronized false
+        runCatching {
+            val f = summaryFile(contactId)
+            if (!f.isFile) return@runCatching true
+            JSONObject(f.readText()).optLong("coveredUntil", 0L) < coveredUntil
+        }.getOrDefault(true)
+    }
+
+    /**
+     * S1 会话台账。与摘要同一套路（原子写 + `coveredUntil` 判断是否需要重建），
+     * 但存的是结构化 JSON 而不是一段文字，所以读回来直接就是 [Ledger]。
+     *
+     * 台账是从历史推导出来的派生数据，只在用户已经打开 `contextEnabled`
+     * 之后才会生成；[clearLog] 会把同一个联系人的台账一起删掉，不留残影。
+     */
+    fun saveLedger(contactId: String, ledger: Ledger): Boolean = synchronized(lock) {
+        if (contactId.isBlank() || ledger.isEmpty()) return@synchronized false
+        writeAtomic(ledgerFile(contactId), LedgerCheck.sanitize(ledger).encode())
+    }
+
+    fun ledger(contactId: String): Ledger? = synchronized(lock) {
+        if (contactId.isBlank()) return@synchronized null
+        runCatching {
+            val f = ledgerFile(contactId)
+            if (!f.isFile) return@runCatching null
+            Ledger.decode(f.readText())
+        }.getOrNull()
+    }
+
+    fun ledgerNeedsRefresh(contactId: String, coveredUntil: Long): Boolean = synchronized(lock) {
+        if (contactId.isBlank()) return@synchronized false
+        runCatching {
+            val f = ledgerFile(contactId)
+            if (!f.isFile) return@runCatching true
+            JSONObject(f.readText()).optLong("coveredUntil", 0L) < coveredUntil
+        }.getOrDefault(true)
+    }
 
     private var notesCache: MutableList<Note>? = null
     private var contactsCache: MutableList<Contact>? = null
@@ -54,6 +110,35 @@ class KbStore private constructor(context: Context) {
         val ok = writeAtomic(notesFile, notesJson(list))
         if (!ok) notesCache = null   // memory must not claim a write that failed
         ok
+    }
+
+    /**
+     * Insert or replace a whole batch with ONE serialisation and ONE write.
+     *
+     * [saveNote] in a loop is quadratic — every call re-serialises every note
+     * already stored — and a document import easily produces hundreds of notes,
+     * so the batch path is not an optimisation but the only usable one. All or
+     * nothing: a failed write leaves the file exactly as it was and returns
+     * false, so the caller can say so instead of counting a partial success.
+     *
+     * @return the number of notes stored, or 0 when the write did not land.
+     */
+    fun saveNotes(newNotes: List<Note>): Int = synchronized(lock) {
+        if (newNotes.isEmpty()) return@synchronized 0
+        val list = loadNotes()
+        val now = System.currentTimeMillis()
+        // Index once: looking each id up inside the loop would make the batch
+        // itself quadratic, which is the very thing this method exists to avoid.
+        val at = HashMap<String, Int>(list.size * 2)
+        list.forEachIndexed { i, n -> at[n.id] = i }
+        newNotes.forEach { note ->
+            val stamped = note.copy(updatedAt = now)
+            val i = at[note.id]
+            if (i != null) list[i] = stamped else { at[note.id] = list.size; list.add(stamped) }
+        }
+        val ok = writeAtomic(notesFile, notesJson(list))
+        if (!ok) notesCache = null   // memory must not claim a write that failed
+        if (ok) newNotes.size else 0
     }
 
     fun deleteNote(id: String): Boolean = synchronized(lock) {
@@ -92,6 +177,7 @@ class KbStore private constructor(context: Context) {
         lastScreenCache.remove(id)
         runCatching { logFile(id).delete() }
         runCatching { screenFile(id).delete() }
+        runCatching { summaryFile(id).delete() }
         ok
     }
 
@@ -220,6 +306,30 @@ class KbStore private constructor(context: Context) {
         }
     }
 
+    /**
+     * Drop remembered lines older than [days] (0 or less keeps everything) and
+     * rewrite the file only when something actually went. [now] is injectable so
+     * this is testable without a fake clock.
+     *
+     * @return how many entries were dropped.
+     */
+    fun pruneLog(contactId: String, days: Int, now: Long = System.currentTimeMillis()): Int {
+        if (days <= 0) return 0
+        synchronized(lock) {
+            val list = loadLog(contactId)
+            val cutoff = now - days.toLong() * DAY_MS
+            val before = list.size
+            list.removeAll { it.ts < cutoff }
+            val dropped = before - list.size
+            if (dropped > 0) {
+                val ok = writeAtomic(logFile(contactId), logJson(list))
+                if (!ok) logCache.remove(contactId)
+                Log.d(TAG, "pruneLog contact=$contactId dropped=$dropped days=$days kept=${list.size} ok=$ok")
+            }
+            return dropped
+        }
+    }
+
     /** The newest [n] entries, oldest first. */
     fun recentLog(contactId: String, n: Int): List<LogEntry> {
         if (n <= 0) return emptyList()
@@ -237,6 +347,10 @@ class KbStore private constructor(context: Context) {
         lastScreenCache.remove(contactId)
         runCatching { logFile(contactId).delete() }
         runCatching { screenFile(contactId).delete() }
+        runCatching { summaryFile(contactId).delete() }
+        // 台账是从历史推导出来的，历史没了它就必须一起走 —— 否则「清空聊天记录」
+        // 之后旧内容还留在提示词里。
+        runCatching { ledgerFile(contactId).delete() }
         Unit
     }
 
@@ -305,7 +419,8 @@ class KbStore private constructor(context: Context) {
                     tags = strList(o.optJSONArray("tags")),
                     alwaysOn = o.optBoolean("alwaysOn", false),
                     enabled = o.optBoolean("enabled", true),
-                    updatedAt = o.optLong("updatedAt", 0L)
+                    updatedAt = o.optLong("updatedAt", 0L),
+                    type = o.optString("type", "note")
                 ))
             }
         }
@@ -327,6 +442,7 @@ class KbStore private constructor(context: Context) {
                     apps = strList(o.optJSONArray("apps")),
                     relationship = o.optString("relationship"),
                     notes = o.optString("notes"),
+                    persona = o.optString("persona"),
                     autoSummary = o.optString("autoSummary"),
                     updatedAt = o.optLong("updatedAt", 0L)
                 ))
@@ -365,7 +481,8 @@ class KbStore private constructor(context: Context) {
                 .put("tags", JSONArray(n.tags))
                 .put("alwaysOn", n.alwaysOn)
                 .put("enabled", n.enabled)
-                .put("updatedAt", n.updatedAt))
+                .put("updatedAt", n.updatedAt)
+                .put("type", n.type))
         }
         return arr.toString()
     }
@@ -380,6 +497,7 @@ class KbStore private constructor(context: Context) {
                 .put("apps", JSONArray(c.apps))
                 .put("relationship", c.relationship)
                 .put("notes", c.notes)
+                .put("persona", c.persona)
                 .put("autoSummary", c.autoSummary)
                 .put("updatedAt", c.updatedAt))
         }
@@ -473,6 +591,7 @@ class KbStore private constructor(context: Context) {
     companion object {
         private const val TAG = "JEVASSIST"
         const val MAX_LOG = 300
+        private const val DAY_MS = 86_400_000L
 
         @Volatile private var instance: KbStore? = null
 

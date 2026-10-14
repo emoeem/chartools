@@ -11,6 +11,9 @@ local.properties
 # Machine-specific
 env.ps1
 gradle.properties.local
+# 沙箱内构建用的 GRADLE_USER_HOME 副本（~/.gradle 在沙箱里只读，见 _reports/s3-l1-telegram_report.md）
+/.gradle-home/
+/.android-home/
 
 # IDE
 .idea/

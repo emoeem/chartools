@@ -6,13 +6,13 @@
 
 **“Trợ lý đồng hành hội thoại” cài trên điện thoại: hiểu người kia trong các ứng dụng chat được hỗ trợ, cho biết nên trả lời thế nào, điền vào ô nhập bằng một chạm; bạn tự quyết định có gửi hay không.**
 
-[![Stars](https://img.shields.io/github/stars/jev-chat/jev-chat-jarvis?style=flat-square&logo=github&label=Stars)](https://github.com/jev-chat/jev-chat-jarvis/stargazers)
-[![Forks](https://img.shields.io/github/forks/jev-chat/jev-chat-jarvis?style=flat-square&logo=github&label=Forks)](https://github.com/jev-chat/jev-chat-jarvis/forks)
-[![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-v1.7-1f6feb?style=flat-square)](CHANGELOG.md)
-[![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#bắt-đầu-nhanh)
-[![License](https://img.shields.io/github/license/jev-chat/jev-chat-jarvis?style=flat-square)](LICENSE)
+> **Đây là một nhánh cục bộ được phát triển dựa trên Jev Chat Assistant** (tên gói `com.jev.probe`, phiên bản hiện tại v1.8). Đây **không phải kho gốc và không phải bản phát hành của tác giả gốc**, chỉ được build và dùng tại máy, không phát hành APK. Kho gốc: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis). Ghi nguồn theo yêu cầu của [NOTICE](NOTICE); không dùng tên hay tên miền của dự án gốc để ngụ ý tác giả gốc chứng thực.
 
-[Trang web](https://chatjevs.com) · [Chính sách quyền riêng tư](PRIVACY.md) · [Tải APK](apk/jev-assistant-v1.7-release.apk) · [Phiên bản trước](https://github.com/jev-chat/jev-chat-jarvis/releases) · [Nhật ký thay đổi](CHANGELOG.md) · [Bản macOS](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Bản Windows](https://github.com/jev-chat/jev-chat-windows)
+[![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-v1.8-1f6feb?style=flat-square)](CHANGELOG.md)
+[![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#bắt-đầu-nhanh)
+[![License](https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square)](LICENSE)
+
+[Trang web gốc](https://chatjevs.com) · [Hướng dẫn cài đặt gốc](https://chatjevs.com/guides/android-setup.html) · [Nhật ký thay đổi](CHANGELOG.md) · [Bản macOS gốc](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Bản Windows gốc](https://github.com/jev-chat/jev-chat-windows)
 
 [简体中文](README.md) · [English](README.en.md) · **Tiếng Việt**
 
@@ -56,7 +56,7 @@
 - **Nó phân tích trước, rồi mới soạn câu trả lời.** Hầu hết công cụ chỉ yêu cầu mô hình soạn thẳng một câu trả lời. Jev trước tiên dùng mô hình phân tích để xác định ý định thật của đối phương, mức độ nguy hiểm, có nên trả lời ngay hay không, rồi mới soạn câu trả lời dựa trên kết quả đó.
 - **Không can thiệp vào ứng dụng chat của bạn.** Không hook, không sửa gói, không sử dụng API hay tài khoản của bất kỳ ứng dụng nào, không đọc cơ sở dữ liệu; chỉ dùng dịch vụ trợ năng của hệ thống để đọc cuộc trò chuyện đang hiển thị trên màn hình.
 - **Quyền gửi luôn thuộc về bạn.** Ứng dụng chỉ điền câu trả lời vào ô nhập, không bao giờ tự gửi, không can thiệp vào việc chuyển tiền, lì xì hoặc thu tiền.
-- **Một lõi, nhiều nền tảng.** QQ và X đã chạy thử trên thiết bị thật; 飞书 bổ sung nội dung chính bằng OCR, WhatsApp được kiểm chứng bằng dữ liệu ghi màn hình. Thêm một ứng dụng chỉ cần viết một adapter vài chục dòng.
+- **Một lõi, nhiều nền tảng.** QQ, TIM và X đã chạy thử trên thiết bị thật; 飞书 bổ sung nội dung chính bằng OCR, WhatsApp được kiểm chứng bằng dữ liệu ghi màn hình. Thêm một ứng dụng chỉ cần viết một adapter vài chục dòng.
 - **Nó hiểu những người và việc liên quan đến bạn.** Cơ sở tri thức cục bộ và hồ sơ liên hệ tự động đưa các ghi chú phù hợp cùng lịch sử trò chuyện của người đó vào quá trình phân tích, giúp câu trả lời không mâu thuẫn với thiết lập của bạn.
 - **Bạn tự cấu hình API.** Địa chỉ, khóa và mô hình cho ba luồng phân tích, trả lời và thị giác đều có thể điền riêng. Khi phân tích, nội dung trò chuyện và thông tin nền đang bật sẽ được gửi tới nhà cung cấp mô hình mà bạn cấu hình; tác giả không vận hành máy chủ trung gian.
 - **Có thể kiểm soát dữ liệu lưu trên máy.** Khóa, cơ sở tri thức và lịch sử tùy chọn nằm trong không gian riêng của ứng dụng; ảnh chụp màn hình chỉ được OCR trên máy và không tải lên. Cách nhà cung cấp bên thứ ba xử lý nội dung nhận được tuân theo chính sách quyền riêng tư của họ.
@@ -66,6 +66,7 @@
 | Nền tảng | Trạng thái | Cách thu thập | Ghi chú |
 |---|---|---|---|
 | QQ Android | ✅ Hỗ trợ đầy đủ từ đầu đến cuối | Đọc node bằng dịch vụ trợ năng | Đã kiểm thử trên 9.3.50 (trò chuyện nhóm); 1v1 được suy luận theo cùng cấu trúc |
+| TIM (`com.tencent.tim`) | 🧪 Chưa xác minh phần đọc nội dung | Đọc node bằng dịch vụ trợ năng | Quy tắc được lấy mẫu trên thiết bị thật với TIM 4.1.0 (versionCode 4050). viewId của TIM bị AndResGuard làm rối (nội dung `9u`, bong bóng `n9e`, biệt danh `9w`, ô nhập `input`) nên có thể hỏng khi cập nhật; phân biệt bên gửi theo mép bong bóng (mép trái ≈ 13% chiều rộng màn hình = đối phương, mép phải ≈ chiều rộng màn hình − 5px = bạn); tiêu đề trò chuyện nhóm thường không lấy được vì thanh tiêu đề chỉ hiển thị emoji và số thành viên |
 | X / Twitter tin nhắn riêng | ✅ Hỗ trợ đầy đủ từ đầu đến cuối | Phân tích content-desc của node Compose | Đã kiểm thử trên 12.25, giao diện tiếng Trung; chưa xác minh giao diện tiếng Anh |
 | 飞书 / Lark | ✅ Dự phòng bằng OCR (đã xác minh trên thiết bị thật) | Đọc hình chữ nhật bong bóng bằng dịch vụ trợ năng + OCR tiếng Trung ngoại tuyến bằng ML Kit để nhận dạng nội dung chính | Nội dung chính tự vẽ không có trong cây trợ năng; từ 1.3, thực hiện OCR cho hình chữ nhật từng bong bóng; phân biệt tôi/đối phương theo trạng thái đã đọc |
 | WhatsApp | 🧪 Trò chuyện 1v1 | Đọc node bằng dịch vụ trợ năng | Chỉ đọc trò chuyện 1v1, không đọc nhóm, không chụp màn hình; trả lời theo ngôn ngữ tin nhắn mới nhất của đối phương. Quy tắc đọc của [@smgonthebeat](https://github.com/smgonthebeat) (#73), kiểm chứng với bản ghi WhatsApp 2.26.38.73 |
@@ -74,17 +75,21 @@
 
 Dự án này chỉ đọc nội dung chat trên thiết bị của chính bạn, nơi bạn có quyền xem và phiên bản hiện tại hỗ trợ; không đọc ứng dụng ẩn nội dung giao diện hoặc chặn chụp màn hình.
 
-> **Rủi ro khi sử dụng:** Dùng trợ lý trong các ứng dụng bên thứ ba như QQ, 飞书, X hoặc WhatsApp có thể không phù hợp với thỏa thuận người dùng của ứng dụng đó, tài khoản có thể bị hạn chế hoặc khóa. Hãy tự cân nhắc trước khi sử dụng.
+> **Rủi ro khi sử dụng:** Dùng trợ lý trong các ứng dụng bên thứ ba như QQ, TIM, 飞书, X hoặc WhatsApp có thể không phù hợp với thỏa thuận người dùng của ứng dụng đó, tài khoản có thể bị hạn chế hoặc khóa. Hãy tự cân nhắc trước khi sử dụng.
 
 ## Bắt đầu nhanh
 
-**1. Cài đặt.** Kho lưu trữ có gói release đã ký: [`apk/jev-assistant-v1.7-release.apk`](apk/jev-assistant-v1.7-release.apk) (Android 11+, chỉ hỗ trợ ARM64 / `arm64-v8a`). Gói cài đặt của các phiên bản khác cũng có trong [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases).
+**1. Build.** Nhánh này không phát hành APK; hãy build bản debug từ mã nguồn (Android 11 trở lên, chỉ ARM64 / `arm64-v8a`):
 
 ```bash
-adb install -r apk/jev-assistant-v1.7-release.apk
+# cần JDK 17 hoặc 21 và Android SDK (compileSdk 35)
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk bash gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**2. Nhập khóa.** Mở ứng dụng → Cài đặt → “API”, chia thành ba thẻ: API phân tích / API trả lời / API thị giác. Cách đơn giản nhất là chỉ điền [API Key của OpenRouter](https://openrouter.ai/) vào thẻ “API phân tích”; để trống hai thẻ còn lại để chúng tự động kế thừa khóa này và ứng dụng sẽ dùng được. Nếu muốn đổi mô hình trả lời (mặc định `deepseek/deepseek-chat-v3.1`; Gemini / OpenAI tại Trung Quốc sẽ bị giới hạn theo khu vực), hãy chọn một cấu hình có sẵn trong “API trả lời” (OpenRouter / DeepSeek chính thức / 通义兼容) hoặc tự nhập địa chỉ; mỗi thẻ có chức năng kiểm tra kết nối độc lập bằng một chạm.
+APK release của dự án gốc nằm ở [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases) của kho gốc. Đó là một ứng dụng khác với tên gói khác (bản gốc `jev-assistant-v1.7-release.apk`), nên hai bản không ghi đè lên nhau và không thể nâng cấp tại chỗ.
+
+**2. Nhập khóa.** Mở ứng dụng → Cài đặt → “API”, chia thành ba thẻ: API phân tích / API trả lời / API thị giác. Cách đơn giản nhất là chỉ điền [API Key của OpenRouter](https://openrouter.ai/) vào thẻ “API phân tích”; để trống hai thẻ còn lại để chúng tự động kế thừa khóa này và ứng dụng sẽ dùng được. Không dùng OpenRouter cũng được: thẻ “API phân tích” có sẵn cấu hình “DeepSeek chính thức”, chỉ cần một khóa DeepSeek là dùng được (DeepSeek không có mô hình phán đoán Jev, nên cấu hình này tự chuyển sang “chế độ chat OpenAI” và trả lời cùng bộ câu hỏi, xem bên dưới). Nếu muốn đổi mô hình trả lời (mặc định `deepseek/deepseek-chat-v3.1`; Gemini / OpenAI tại Trung Quốc sẽ bị giới hạn theo khu vực), hãy chọn một cấu hình có sẵn trong “API trả lời” (OpenRouter / DeepSeek chính thức / 通义兼容) hoặc tự nhập địa chỉ; mỗi thẻ có chức năng kiểm tra kết nối độc lập bằng một chạm.
 
 **3. Bật quyền.** Làm theo hướng dẫn trên trang chủ để bật ba quyền:
 
@@ -118,6 +123,8 @@ Tại Cài đặt → Phân tích → “Cơ sở tri thức và liên hệ”.
 - API phân tích bổ sung cấu hình tích hợp “博查 Jev”, ở vị trí thứ hai (OpenRouter / 博查 Jev / TypeSafe trực tiếp / Vercel / OpenCode Zen / Tùy chỉnh); khi chọn, ứng dụng tự điền địa chỉ dịch vụ `https://jev.bocha.cn` và mô hình `bocha-jev-v1` (giao thức giống TypeSafe), hiển thị địa chỉ chính thức trên trang và hỗ trợ sao chép bằng một chạm; hiện miễn phí trong thời gian giới hạn. Bản cài mới mặc định dùng OpenRouter; người dùng cũ đã cấu hình API phân tích không bị ảnh hưởng, provider và khóa đều không thay đổi.
 - API phân tích có thêm cấu hình tích hợp “Vercel”: địa chỉ `https://ai-gateway.vercel.sh/typesafe`, mô hình `typesafe-ai/jev`, sử dụng khóa từ [Vercel AI Gateway](https://vercel.com/ai-gateway/models/jev). Giao thức giống kết nối trực tiếp TypeSafe (`POST /v1/systemone`).
 - API phân tích có thêm cấu hình tích hợp “OpenCode Zen”: địa chỉ `https://opencode.ai/zen`, mô hình `jev-1.13` (đầu ra miễn phí, đầu vào $0.042/M, mỗi lần phân tích khoảng 1000 token đầu vào), sử dụng khóa từ [OpenCode Zen](https://opencode.ai/zen). Giao thức giống kết nối trực tiếp TypeSafe (`POST /v1/systemone`); nếu muốn dùng hoàn toàn miễn phí, có thể đổi thủ công thành `jev-1.13-free` (miễn phí trong thời gian giới hạn, chức năng bị hạn chế).
+- API phân tích cũng có thể dùng DeepSeek: cấu hình có sẵn “DeepSeek chính thức” (địa chỉ `https://api.deepseek.com/v1`, mô hình `deepseek-chat`, dùng khóa DeepSeek). DeepSeek không cung cấp mô hình phán đoán Jev, nên khi chọn, giao thức phán đoán tự chuyển sang “chế độ chat OpenAI”: cùng bộ 7 câu hỏi được viết thành prompt cho mô hình chat và trả về đúng cấu trúc JSON đó — ý định, mức độ nguy hiểm, đối phương cần gì, có nên trả lời ngay, xếp hạng câu trả lời đều hoạt động như thường.
+- API phân tích có thêm hai nút “giao thức Jev / chế độ chat OpenAI” quyết định cách giao tiếp của nhánh này. Giao thức Jev gửi câu hỏi cho mô hình phán đoán Jev (họ TypeSafe, câu trả lời đã hiệu chuẩn); chế độ chat gửi cho mô hình chat thường, xác suất và mức độ nguy hiểm do nó tự ước lượng, kém chính xác hơn Jev và mỗi lần phán đoán phải mang theo toàn bộ bộ câu hỏi (khoảng 2000–3000 token đầu vào, chậm và đắt hơn Jev). Cấu hình có sẵn tự chọn đúng giao thức (DeepSeek = chế độ chat, còn lại = giao thức Jev); địa chỉ tùy chỉnh có thể chọn. Nâng cấp từ bản cũ giữ nguyên đường đi.
 - Có sẵn các cấu hình OpenRouter / 博查 Jev / TypeSafe trực tiếp / Vercel / OpenCode Zen / DeepSeek chính thức / 通义兼容; mỗi thẻ có thể kiểm tra kết nối bằng một chạm.
 - Chỉ cần một khóa là có thể dùng: nếu API trả lời và thị giác để trống, chúng sẽ tự động kế thừa cấu hình của API phân tích.
 - Khi nâng cấp từ phiên bản cũ, khóa cũ sẽ được chuyển sang cấu trúc ba thẻ mới đúng một lần.
@@ -290,7 +297,7 @@ Xem [chính sách quyền riêng tư](PRIVACY.md) để biết nội dung nào �
 
 ## Bản quyền và giấy phép
 
-Copyright © 2026 Finderchangchang và những người đóng góp cho jev-chat. Mã nguồn được phát hành theo giấy phép mã nguồn mở [MIT](LICENSE), xem thêm [NOTICE](NOTICE).
+Bản gốc: Copyright © 2026 Finderchangchang và những người đóng góp cho jev-chat. Mã nguồn được phát hành theo giấy phép mã nguồn mở [MIT](LICENSE), xem thêm [NOTICE](NOTICE). **Kho này là một nhánh phát triển tiếp của dự án đó** (dùng cục bộ, tên gói `com.jev.probe`, phiên bản v1.8); tác giả gốc không tham gia và không chứng thực cho bất kỳ thay đổi nào trong nhánh này.
 
 - **Có thể sử dụng thương mại**: cả cá nhân và công ty đều có thể sử dụng, chỉnh sửa, phân phối lại hoặc tích hợp vào sản phẩm của mình mà không cần trả phí hoặc xin phép trước.
 - **Bắt buộc ghi nguồn**: khi phân phối hoặc sử dụng thương mại, phải giữ lại LICENSE và NOTICE, đồng thời ghi nguồn trong trang “Giới thiệu”, tài liệu hoặc trang phát hành của sản phẩm. Cách ghi được khuyến nghị: `Dựa trên Jev 聊天助手（https://github.com/jev-chat/jev-chat-jarvis） để phát triển tiếp`.

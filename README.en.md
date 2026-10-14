@@ -6,13 +6,13 @@
 
 **A conversation copilot for your phone. Jev works alongside your chat apps, helps you understand what the other person means, and suggests what to say next. Tap to fill in a reply. You decide whether to send it.**
 
-[![Stars](https://img.shields.io/github/stars/jev-chat/jev-chat-jarvis?style=flat-square&logo=github&label=Stars)](https://github.com/jev-chat/jev-chat-jarvis/stargazers)
-[![Forks](https://img.shields.io/github/forks/jev-chat/jev-chat-jarvis?style=flat-square&logo=github&label=Forks)](https://github.com/jev-chat/jev-chat-jarvis/forks)
-[![Version](https://img.shields.io/badge/Version-v1.7-1f6feb?style=flat-square)](CHANGELOG.md)
-[![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#quick-start)
-[![License](https://img.shields.io/github/license/jev-chat/jev-chat-jarvis?style=flat-square)](LICENSE)
+> **This is a local fork built on Jev Chat Assistant second-hand** (package `com.jev.probe`, currently v1.8). It is **not the upstream repository and not the original authors' release**, it is only built and used locally, and it publishes no APK. Upstream: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis). Credit is given as [NOTICE](NOTICE) requires; upstream names and domains are not used to imply endorsement by the original authors.
 
-[Website](https://chatjevs.com) · [Download APK](apk/jev-assistant-v1.7-release.apk) · [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases) · [Changelog](CHANGELOG.md) · [macOS](https://github.com/jev-chat/jev-chat-mac) · [Windows](https://github.com/jev-chat/jev-chat-windows)
+[![Version](https://img.shields.io/badge/Version-v1.8-1f6feb?style=flat-square)](CHANGELOG.md)
+[![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#quick-start)
+[![License](https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square)](LICENSE)
+
+[Upstream website](https://chatjevs.com) · [Upstream setup guide](https://chatjevs.com/guides/android-setup.html) · [Changelog](CHANGELOG.md) · [Upstream macOS](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Upstream Windows](https://github.com/jev-chat/jev-chat-windows)
 
 [简体中文](README.md) · **English** · [Tiếng Việt](README.vi.md)
 
@@ -56,7 +56,7 @@
 - **It assesses the conversation before drafting a reply.** Most tools simply ask a model to write a response. Jev first uses an assessment model to identify the other person's intent, gauge the risk, and decide whether a reply can wait. That assessment guides its suggestions.
 - **It leaves your chat apps alone.** No hooking, modified app packages, access to app APIs or accounts, or database reads. Jev uses Android's accessibility service to read the conversation currently visible on your screen.
 - **You're always in control of sending.** Jev only fills in the text field. It never sends messages automatically or interacts with transfers, red packets, or payment collection.
-- **One core, multiple platforms.** Tested on real devices with QQ and X; Feishu uses OCR to read message text; WhatsApp is verified against screen recordings. Adding another app takes an adapter of just a few dozen lines.
+- **One core, multiple platforms.** Tested on real devices with QQ, TIM, and X; Feishu uses OCR to read message text; WhatsApp is verified against screen recordings. Adding another app takes an adapter of just a few dozen lines.
 - **It has context about your contacts and your life.** A local knowledge base and contact profiles supply relevant notes and conversation history during analysis, keeping replies consistent with the background you've provided.
 - **Choose your own APIs.** Configure assessment, reply generation, and vision separately, using your own keys and API allowances. Requests go directly to your chosen providers.
 - **Local privacy controls.** API keys stay in the app's private storage. Chat content is sent to your configured APIs only during analysis and is neither saved to disk nor written to logs by default.
@@ -66,6 +66,7 @@
 | Platform | Status | How messages are captured | Notes |
 |---|---|---|---|
 | QQ for Android | Full workflow supported | Accessibility nodes | Tested with version 9.3.50 in group chats; one-to-one support is inferred from the same UI structure |
+| TIM (`com.tencent.tim`) | Beta — message parsing unverified | Accessibility nodes | Rules sampled on a real device with TIM 4.1.0 (versionCode 4050). TIM's view IDs are obfuscated by AndResGuard (text `9u`, bubble `n9e`, nickname `9w`, input `input`) and may change between versions; sides are decided by bubble edge alignment (left edge ≈ 13% of screen width = the other person, right edge ≈ screen width − 5px = you); group chat titles are often unavailable because the title bar renders only an emoji and a member count |
 | X / Twitter DMs | Full workflow supported | Parses `content-desc` on Compose nodes | Tested with version 12.25 in Chinese; the English UI has not been verified |
 | Feishu / Lark | OCR fallback verified on a real device | Reads message bubble bounds through accessibility, then extracts text with offline ML Kit OCR | Message text is custom-rendered and absent from the accessibility tree. Since v1.3, each bubble is processed with OCR; read status is used to identify the sender |
 | WhatsApp | One-to-one chats (beta) | Accessibility nodes | One-to-one chats only; group chats are not read and WhatsApp is never screenshotted; replies follow the language of the other person's latest message. Reading rules by [@smgonthebeat](https://github.com/smgonthebeat) (#73), verified against WhatsApp 2.26.38.73 recordings |
@@ -74,17 +75,21 @@
 
 Jev only reads conversations on your own device that you are authorized to view. It is not designed to target any particular platform.
 
-> **Use at your own risk:** Using Jev inside third-party apps such as QQ, Feishu, X, or WhatsApp may not comply with those apps' terms of service, and your account could be restricted or banned. Decide for yourself whether to use it.
+> **Use at your own risk:** Using Jev inside third-party apps such as QQ, TIM, Feishu, X, or WhatsApp may not comply with those apps' terms of service, and your account could be restricted or banned. Decide for yourself whether to use it.
 
 ## Quick Start
 
-**1. Install the app.** A signed release APK is included in the repository: [`apk/jev-assistant-v1.7-release.apk`](apk/jev-assistant-v1.7-release.apk). Requires Android 11 or later and an ARM64 (`arm64-v8a`) device. Downloads for other versions are available under [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases).
+**1. Build it.** This fork publishes no APK; build a debug one from source (Android 11 or later, ARM64 / `arm64-v8a` only):
 
 ```bash
-adb install -r apk/jev-assistant-v1.7-release.apk
+# needs JDK 17 or 21 plus the Android SDK (compileSdk 35)
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk bash gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**2. Add your API key.** Open the app, go to Settings, and find the API section. It has three cards: Assessment API, Reply API, and Vision API. For the simplest setup, enter an [OpenRouter](https://openrouter.ai/) API key under Assessment API and leave the other two blank; they will inherit the same key. To change the reply model (the default is `deepseek/deepseek-chat-v3.1`; Gemini and OpenAI are subject to regional restrictions in mainland China), choose a preset under Reply API, such as OpenRouter, DeepSeek, or Tongyi-compatible, or enter a custom URL. Each card has its own connection test.
+The original upstream release APK lives in the upstream repository's [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases). It is a different application under a different package name (upstream `jev-assistant-v1.7-release.apk`), so the two never overwrite each other and cannot upgrade in place.
+
+**2. Add your API key.** Open the app, go to Settings, and find the API section. It has three cards: Assessment API, Reply API, and Vision API. For the simplest setup, enter an [OpenRouter](https://openrouter.ai/) API key under Assessment API and leave the other two blank; they will inherit the same key. OpenRouter is not required: the Assessment API also has a "DeepSeek" preset, and a DeepSeek key works there on its own. DeepSeek serves no Jev judgment model, so that preset switches the assessment route to OpenAI chat mode, answering the same question set as a prompt (see below). To change the reply model (the default is `deepseek/deepseek-chat-v3.1`; Gemini and OpenAI are subject to regional restrictions in mainland China), choose a preset under Reply API, such as OpenRouter, DeepSeek, or Tongyi-compatible, or enter a custom URL. Each card has its own connection test.
 
 **3. Enable permissions.** Follow the guide on the home screen to enable:
 
@@ -118,6 +123,8 @@ Open Settings, then Analysis, then "Knowledge Base and Contacts."
 - The built-in "Bocha Jev" assessment preset appears first as of v1.4, ahead of OpenRouter, TypeSafe Direct, and Custom. Selecting it fills in `https://jev.bocha.cn` and model `bocha-jev-v1`, which uses the same protocol as TypeSafe. The settings screen displays the official URL with a copy button. The service is currently free for a limited time. Fresh installs default to Bocha Jev; existing assessment configurations retain their provider and key.
 - The "Vercel" assessment preset uses `https://ai-gateway.vercel.sh/typesafe` and model `typesafe-ai/jev`. Supply a [Vercel AI Gateway](https://vercel.com/ai-gateway/models/jev) key. It uses the same protocol as TypeSafe Direct (`POST /v1/systemone`).
 - The "OpenCode Zen" assessment preset uses `https://opencode.ai/zen` and model `jev-1.13`, with free output and input at $0.042 per million tokens. An assessment uses roughly 1,000 input tokens. Supply an [OpenCode Zen](https://opencode.ai/zen) key. This also uses the TypeSafe Direct protocol (`POST /v1/systemone`). For free input as well, manually switch to `jev-1.13-free`, a limited-time option with restricted functionality.
+- The Assessment API can also run on DeepSeek: the "DeepSeek" preset uses `https://api.deepseek.com/v1` and model `deepseek-chat` with a DeepSeek key. DeepSeek serves no Jev judgment model, so selecting it switches the assessment protocol to OpenAI chat mode: the same seven questions are rendered into a prompt and the chat model answers in the same JSON shape, so intent, danger level, what they need, whether to reply now, and candidate ranking all keep working.
+- The Assessment API now has a "Jev protocol / OpenAI chat mode" pair of pills that decides how the route speaks. The Jev protocol sends the questions to a Jev judgment model (TypeSafe family, calibrated answers); chat mode sends them to an ordinary chat model, whose probabilities and danger levels are its own estimates — less accurate than Jev, and each judgment carries the whole question set (roughly 2,000–3,000 input tokens, slower and costlier than Jev). Presets pick the right one for you (DeepSeek = chat mode, the rest = Jev protocol); a custom address can be either. Upgrading leaves the old route untouched.
 - Built-in presets include OpenRouter, TypeSafe Direct, Vercel, OpenCode Zen, DeepSeek, and Tongyi-compatible services. Each card has a connection test.
 - A single key is enough: leave the reply and vision settings blank to inherit the assessment API configuration.
 - On upgrade from an older version, your existing key is migrated to the new three-card layout once.
@@ -301,7 +308,7 @@ See [PRIVACY.md](PRIVACY.md) for details on what is read, where it is sent and s
 
 ## Copyright and License
 
-Copyright © 2026 Finderchangchang and the jev-chat contributors. The code is available under the [MIT License](LICENSE). See also [NOTICE](NOTICE).
+Upstream copyright © 2026 Finderchangchang and the jev-chat contributors. The code is available under the [MIT License](LICENSE). See also [NOTICE](NOTICE). **This repository is a derivative fork of that project** (local use, package `com.jev.probe`, version v1.8); the upstream authors took no part in, and do not endorse, any of the changes in this fork.
 
 - **Commercial use is allowed:** Individuals and companies may use, modify, redistribute, or integrate the code into their own products without payment or prior permission.
 - **Attribution is required:** Keep LICENSE and NOTICE when distributing or using the project commercially, and credit the source in your product's About page, documentation, or release page. Suggested wording: `Based on Jev Chat Assistant (https://github.com/jev-chat/jev-chat-jarvis)`.

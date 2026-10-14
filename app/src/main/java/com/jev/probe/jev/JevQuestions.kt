@@ -56,7 +56,9 @@ object JevQuestions {
                 "If they are checking whether you remember something or still care, choose confirm_you_care " +
                 "even if the words look like a request to 'say it' or to do something. " +
                 "If they already accepted and closed the matter peacefully, choose close_topic. " +
-                "Ending the relationship, deleting you, or 'don't talk to me' is vent_anger, never close_topic.",
+                "Ending the relationship, deleting you, or 'don't talk to me' is vent_anger, never close_topic. " +
+                "If they are plainly continuing an intimate or role-play scene the two of you already set up, " +
+                "choose intimate_roleplay.",
             linkedMapOf(
                 "confirm_you_care" to ("They are testing whether you remember, pay attention, or still care. " +
                     "Signals: 'did you forget again', 'then say it', 'you better', sarcastic 'busy person', " +
@@ -71,6 +73,12 @@ object JevQuestions {
                 "casual_chat" to ("Light talk, banter, sharing, teasing with a laugh, or friendly logistics " +
                     "with no emotional test and no conflict. A friend suggesting a meal time can be this " +
                     "if the thread is warm."),
+                "intimate_roleplay" to ("They are continuing a private, consensual intimate or role-play scene " +
+                    "the two of you already agreed on: an established pet name or dynamic, an in-scene " +
+                    "instruction, or an escalating description that expects you to play along. " +
+                    "Only choose this when the relationship note or the earlier thread has already set the " +
+                    "scene up. Never choose it for a stranger's sexual message, and never when the thread " +
+                    "mentions being underage, unwilling, coerced, threatened, or drunk."),
                 "close_topic" to ("Peaceful wrap-up only: they accepted an apology, confirmed a happy plan, said thanks, " +
                     "or clearly signaled they need nothing more. " +
                     "Not a breakup, not 'don't contact me', not sarcastic 'I'm used to it'.")
@@ -117,7 +125,9 @@ object JevQuestions {
             "What type of next action is best? Do not decide whether to send a message immediately. " +
                 "Ignore timing. Choose only the action type. " +
                 "If they asked you to recall a specific past message or event and you have not shown that you actually remember it, " +
-                "choose check_history - do not apologize or invent a plan instead.",
+                "choose check_history - do not apologize or invent a plan instead. " +
+                "For an intimate or role-play scene that is already set up and clearly consensual, " +
+                "choose play_along rather than explain, acknowledge, or make_plan.",
             linkedMapOf(
                 "check_history" to ("Look up prior chat or facts before taking a position. " +
                     "Use when they ask you to repeat, recall, or prove you remember something specific."),
@@ -131,7 +141,11 @@ object JevQuestions {
                 "say_less" to ("Keep it short or add nothing. Extra words would over-explain, reopen a closed topic, " +
                     "or pour fuel on an ultimatum that told you not to talk."),
                 "make_plan" to ("Propose or confirm logistics (time, place, task) for a non-conflict request " +
-                    "such as a meal or a meeting.")
+                    "such as a meal or a meeting."),
+                "play_along" to ("Continue the scene they just moved forward: answer in the voice and dynamic " +
+                    "already established, stay inside the agreed boundaries, and do not steer back to small " +
+                    "talk, advice, or an apology. Use only for an intimate or role-play thread that is already " +
+                    "set up and clearly consensual.")
             )
         ))
         put("she_needs", choice(
@@ -151,7 +165,11 @@ object JevQuestions {
                     "not yet a plan or an apology. Sarcastic 'I am used to it' belongs here, not nothing."),
                 "nothing" to ("They need nothing further. Genuine acceptance, a peaceful closed topic, " +
                     "warm casual chat with no ask, or a rupture where they told you not to reply. " +
-                    "Not sarcasm pretending to be fine.")
+                    "Not sarcasm pretending to be fine."),
+                "engagement" to ("They need you to be present inside the scene or the playful exchange that is " +
+                    "already running - to answer in kind, keep the dynamic, and give them something to play " +
+                    "off. Not an apology, not an explanation, not a plan, not a summary of what they said. " +
+                    "Only for an intimate or role-play thread that is clearly consensual and already set up.")
             )
         ))
         put("tension_resolved", noul(
@@ -192,6 +210,15 @@ object JevQuestions {
             .put("relationship", relationship)
             .put("messages", msgs)
             .put("latest_from", last10.lastOrNull()?.side ?: "other")
+        // How the sides were read. When a snapshot came from a flat-screen OCR
+        // read, some or all of these "other" labels may be guesses; the judge has
+        // to know that, or it answers a question about who said what that the
+        // capture step could not actually answer.
+        val unknownCount = last10.count { it.side != "me" && it.side != "other" }
+        if (unknownCount > 0) {
+            chat.put("sides_unclear", unknownCount)
+        }
+        snapshot.note?.takeIf { it.isNotBlank() }?.let { chat.put("note", it) }
         val state = JSONObject().put("chat", chat)
         if (background.isNotBlank()) state.put("background", background)
         if (history.isNotEmpty()) {

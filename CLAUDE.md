@@ -4,7 +4,11 @@
 
 ## 硬约束（所有人必须遵守）
 
-1. **不 hook、不 Xposed、不改目标 App、不读其数据库**。只用系统无障碍服务与截屏。
+1. **默认不 hook、不注入**：无障碍服务 + 截屏/OCR 是默认路径，也是永远可用的兜底；框架未启用或未授权作用域时，功能与完全不开注入一致。注入层（LSPosed / Vector）为**可选增强**，按 App 显式开启、**默认关闭**。
+   - **绝不修改或写入目标 App 的任何数据**：不写数据库、不发消息、不点发送按钮。
+   - 读目标 App 数据**只允许复用宿主已打开的句柄**做只读查询（`ReplyDatabaseHistory` 姿势：只 observe 句柄，**绝不自行打开文件、获取密钥、写入或关闭宿主数据库**）。
+   - 注入层**永不阻塞**：读不到 / 超时 / 类定位失败就立刻回落无障碍路径，并在 `Trace` 里标注降级原因，不静默。
+   - 注入有**账号风险**，设置页必须原文呈现：微信协议 8.2.1.4–8.2.1.7 限制未授权插件接入与对运行数据的读取，8.5.1 的处置包含功能限制与账号封禁；**「只读、不发消息」不能推导出不会封号**。方案见 `docs/lsposed-enhancement-plan.md`。
 2. **绝不自动发送消息**，绝不点任何 App 的发送按钮。填入输入框后停手。
 3. **只读目标 App 正常开放给无障碍服务的内容**：服务类名用本项目自己的包名；`accessibility_service_config.xml` 不加 `isAccessibilityTool`（本 App 不是辅助功能工具）；目标 App 隐藏控件树或开了防截屏，就视为不支持。
 4. **不碰钱**：不触碰转账、红包、收款码相关任何界面元素。
@@ -18,7 +22,7 @@
 - Kotlin，传统 View + XML，**不用 Compose**
 - minSdk 30，compileSdk / targetSdk 35
 - JDK 17（`H:\android\jdk`），Android SDK 在 `H:\android\sdk`，Gradle 缓存 `H:\android\gradle-home`
-- 目标机：小米 14（houji / 23127PN0CC），HyperOS 3.0 / Android 16 (SDK 36)
+- 目标机（2026-10-06 实测）：OPPO PJE110 / Android 16 (SDK 36) / 1200×2670；KernelSU root 可用（`su -c id` → `context=u:r.ksu:s0`），注入框架 = **Vector 2.2**（LSPosed 现代分支，API 102，兼容旧 `de.robv.android.xposed` API），框架 CLI 在 `/data/adb/lspd/cli`（`modules enable|disable|ls` / `scope add|ls|rm`，支持 `--json`），设备**没有 `sqlite3`**。历史目标机：小米 14（houji / 23127PN0CC），HyperOS 3.0 / Android 16。
 - 模型客户端分三路：`jev/JudgeClient`（判断）、`jev/ReplyClient`（回复）、`jev/VisionClient`（视觉，OCR 用），共用 `jev/HttpJson`；配置在 `core/Prefs`（`judge*` / `reply*` / `vision*` 字段），旧密钥一次性迁移，标记位 `prefs_migrated_v13`。
 - ML Kit `com.google.mlkit:text-recognition-chinese:16.0.1`（bundled，不是 play-services 版），`ndk.abiFilters` 只留 `arm64-v8a`。
 

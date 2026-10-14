@@ -25,6 +25,9 @@ object KbSelfCheck {
     private const val PADDED = "  测试群  "
     private const val OLD_LINE = "上周说好周五交自检稿"
 
+    /** 自检用的主题名：故意不可能撞上真实知识库里的标签。 */
+    private const val TOPIC = "自检主题"
+
     /** @return a one-line human-readable pass/fail summary. */
     fun run(context: Context): String {
         val failures = ArrayList<String>()
@@ -46,6 +49,7 @@ object KbSelfCheck {
         val store = KbStore.get(context)
         val noteId = KbStore.newId()
         val contactId = KbStore.newId()
+        val topicNoteId = KbStore.newId()
         val prefs = scratchPrefs(context)
         try {
             prefs.contextEnabled = true
@@ -108,10 +112,37 @@ object KbSelfCheck {
             prefs.contextEnabled = false
             if (ContextBuilder.build(context, snapshot, "com.jev.probe", prefs).history.isNotEmpty())
                 failures.add("contextEnabled=false 时仍注入了历史")
+
+            // 7. 人设卡的主题接管知识库。三种状态都要试，因为收窄有两条"退回全库"
+            //    的路（主题为空、主题没有笔记标过），只测命中那一条会把整个后退逻辑
+            //    留成没测过的分支 —— 而它恰好是"知识库突然闭嘴"的唯一防线。
+            prefs.contextEnabled = true
+            store.saveNote(Note(
+                id = topicNoteId,
+                title = "自检主题笔记",
+                content = "自检用的主题内容：自检暗号是青鸟。",
+                tags = listOf(TOPIC),
+                alwaysOn = false,
+                enabled = true
+            ))
+            prefs.style = "称呼：测试\n主题：$TOPIC"
+            val ctx3 = ContextBuilder.build(context, snapshot, "com.jev.probe", prefs)
+            if (ctx3.notes.none { it.id == topicNoteId })
+                failures.add("人设主题命中失败：标了「$TOPIC」的笔记没进注入")
+            if (ctx3.notes.any { it.id == noteId })
+                failures.add("人设主题没生效：没标「$TOPIC」的笔记仍被注入")
+
+            prefs.style = "主题：没有笔记标过的主题"
+            val ctx4 = ContextBuilder.build(context, snapshot, "com.jev.probe", prefs)
+            if (ctx4.notes.none { it.id == noteId })
+                failures.add("主题无命中时应退回全库，但笔记不再被注入（知识库被静默关掉了）")
+
+            prefs.style = ""
         } catch (e: Exception) {
             failures.add("异常：${e.javaClass.simpleName} ${e.message ?: ""}")
         } finally {
             runCatching { store.deleteNote(noteId) }
+            runCatching { store.deleteNote(topicNoteId) }
             runCatching { store.deleteContact(contactId) }
             runCatching {
                 context.getSharedPreferences(SCRATCH_PREFS, Context.MODE_PRIVATE)
@@ -119,8 +150,21 @@ object KbSelfCheck {
             }
         }
         val counts = store.counts()
+        // 报告的是**用户真实的那份设置**（scratch 文件刚被清掉），因为这一行的用处
+        // 就是回答「我设的人设到底生效没有」。
+        val real = PersonaCard.parse(runCatching { Prefs(context).style }.getOrDefault(""))
+        val live = store.notes().filter { it.enabled }
+        val pool = live.filter { !it.alwaysOn && it.type != NOTE_TYPE_STYLE_SAMPLE }
+        val persona = when {
+            !real.hasContent() -> "人设未设置（回复不带人设，知识库也不按主题收窄）"
+            !real.structured -> "人设已填但没认出任何键：只当一段文本注入，主题/硬边界/语域都不生效"
+            else -> "人设已启用 · 主题「${real.topic.ifBlank { "未填" }}」"
+        }
         return if (failures.isEmpty())
-            "自检通过：联系人匹配 / 笔记命中 / 历史去重 / 预算注入都正常。" +
+            "自检通过：联系人匹配 / 笔记命中 / 历史去重 / 人设主题作用域 / 预算注入都正常。" +
+                "$persona。" +
+                PersonaStatus.scopeLine(TopicScope.scopeOf(pool, real.topic),
+                    live.count { it.alwaysOn && it.type != NOTE_TYPE_STYLE_SAMPLE }) +
                 "当前知识库 ${counts.notes} 条笔记、${counts.contacts} 个联系人、${counts.logLines} 条历史。"
         else "自检失败（${failures.size}）：" + failures.joinToString("；")
     }

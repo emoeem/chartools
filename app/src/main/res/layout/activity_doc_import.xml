@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Document import screen.
+
+  Laid out top to bottom: what this screen does, the button that picks a file,
+  the result of the pick, a preview of the extracted text, and the two actions
+  that matter — save it to the knowledge base, or throw it away. The root view
+  carries an id because the activity pads it for the system bars (see
+  Insets.padForSystemBars); the padding declared here is the baseline that insets
+  are added on top of.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/docRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F2F3F5"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="导入文档"
+        android:textColor="#111827"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="PDF / DOCX / ODT / EPUB / PPTX / XLSX / HTML / Markdown / TXT。文字会在本机解析，不上传。"
+        android:textColor="#6B7280"
+        android:textSize="13sp" />
+
+    <Button
+        android:id="@+id/docPick"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:backgroundTint="#3A7AFE"
+        android:text="选择文件"
+        android:textColor="#FFFFFF" />
+
+    <Button
+        android:id="@+id/docUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:backgroundTint="#E8EEFB"
+        android:text="粘贴网页链接"
+        android:textColor="#1B4FD8" />
+
+    <ProgressBar
+        android:id="@+id/docProgress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:indeterminate="true"
+        android:visibility="gone" />
+
+    <!--
+      The report and the preview are BOTH content, so both live inside the one
+      scrolling region. Keeping the report outside it was a real bug: one line
+      per file with no ceiling meant a 20-file import grew this area to ~1500px,
+      the weighted ScrollView was squeezed to zero, and the save row below it was
+      pushed off the bottom of the screen — where nothing could scroll to it, so
+      the import could not be saved at all.
+
+      The action row stays OUTSIDE on purpose: "保存到知识库" must be reachable
+      no matter how much text the import produced.
+    -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1"
+        android:background="#FFFFFF"
+        android:padding="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/docStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="还没有选择文件"
+                android:textColor="#6B7280"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/docPreview"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textColor="#111827"
+                android:textSize="14sp"
+                android:textIsSelectable="true" />
+        </LinearLayout>
+    </ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/docSave"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:backgroundTint="#3A7AFE"
+            android:enabled="false"
+            android:text="保存到知识库"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/docClear"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:layout_weight="1"
+            android:backgroundTint="#EEF1F5"
+            android:text="清空"
+            android:textColor="#111827" />
+    </LinearLayout>
+
+</LinearLayout>

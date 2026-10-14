@@ -1,6 +1,7 @@
 package com.jev.probe
 
 import android.graphics.Bitmap
+import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -21,14 +22,27 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.jev.probe.bridge.BridgeStore
+import com.jev.probe.bridge.HookTargets
+import com.jev.probe.core.Analysis
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.core.Choice
 import com.jev.probe.core.Msg
+import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.Score
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
+import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
+import com.jev.probe.core.kb.Note
+import com.jev.probe.core.kb.PersonaCard
+import com.jev.probe.core.kb.PersonaPresets
+import com.jev.probe.core.kb.PersonaStatus
+import com.jev.probe.core.kb.TopicScope
 import com.jev.probe.jev.JudgeClient
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.jev.VisionClient
+import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
@@ -38,10 +52,18 @@ class SettingsActivity : AppCompatActivity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
-    private val accent = Color.parseColor("#3A7AFE")
+    private val accent = Palette.brand()
     private val ink = Color.parseColor("#111827")
     private val sub = Color.parseColor("#6B7280")
+    private val warn = Color.parseColor("#B45309")
     private val pillOff = Color.parseColor("#EEF1F5")
+
+    /** 参与检索的候选笔记与常驻条数，后台线程载入一次给「人设」区做作用域预告。 */
+    private var kbPool: List<Note> = emptyList()
+    private var kbAlwaysOn = 0
+
+    /** 回到这个页面时重算人设区（用户可能刚从知识库页补完主题标签）。 */
+    private var personaReload: (() -> Unit)? = null
 
     /** Selected provider index per card, held so Save can read it back. */
     private var judgeProviderIdx = 0
@@ -67,12 +89,13 @@ class SettingsActivity : AppCompatActivity() {
         root.addView(header("设置"))
 
         // =================== 接口 ===================
-        root.addView(section("接口"))
+        val connBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(foldSection("连接接口（必填）", defaultOpen = true, connBody))
 
         // --- 判断接口（Jev） ---
         val judgeCard = card()
-        judgeCard.addView(cardTitle("判断接口（Jev）"))
-        judgeCard.addView(text("读对方消息、给意图判断和候选排序。必须配置。", 12f, sub))
+        judgeCard.addView(cardTitle("判断接口（Jev / 聊天模型）"))
+        judgeCard.addView(text("读对方消息、给意图判断和候选排序。必须配置。默认让 Jev 判断模型来答；也可以让 DeepSeek 这类聊天模型用提示词来答。", 12f, sub))
 
         val judgeBaseEdit = edit(prefs.judgeBaseUrl, Prefs.DEFAULT_JUDGE_BASE_OPENROUTER)
         val judgeModelEdit = edit(prefs.judgeModel, Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER)
@@ -82,7 +105,8 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.PROVIDER_TYPESAFE -> 2
             Prefs.PROVIDER_VERCEL -> 3
             Prefs.PROVIDER_ZEN -> 4
-            Prefs.PROVIDER_CUSTOM -> 5
+            Prefs.PROVIDER_DEEPSEEK -> 5
+            Prefs.PROVIDER_CUSTOM -> 6
             else -> 0
         }
         // Bocha promo block — official address + one-tap copy (limited-time free).
@@ -114,8 +138,18 @@ class SettingsActivity : AppCompatActivity() {
         bochaBox.addView(text("去 jev.bocha.cn 领取限时免费 API Key", 11f, sub))
         bochaBox.visibility = if (judgeProviderIdx == 1) View.VISIBLE else View.GONE
 
+        // How the judge route SPEAKS is a second choice, separate from its
+        // address: Jev's question protocol, or one OpenAI chat turn over the same
+        // question set. Built before the provider row (which drives it) but added
+        // after it, so the presets still read first.
+        var judgeProtoChat = prefs.effectiveJudgeProtocol() == Prefs.PROTO_CHAT
+        val protoRow = pillRow(
+            listOf("Jev 判断协议", "OpenAI 聊天模式"),
+            if (judgeProtoChat) 1 else 0
+        ) { i -> judgeProtoChat = i == 1 }
+
         judgeCard.addView(pills(
-            listOf("OpenRouter", "博查 Jev", "TypeSafe 直连", "Vercel", "OpenCode Zen", "自定义"), judgeProviderIdx) { idx ->
+            listOf("OpenRouter", "博查 Jev", "TypeSafe 直连", "Vercel", "OpenCode Zen", "DeepSeek 官方", "自定义"), judgeProviderIdx) { idx ->
             judgeProviderIdx = idx
             when (idx) {
                 0 -> {
@@ -138,16 +172,28 @@ class SettingsActivity : AppCompatActivity() {
                     judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_ZEN)
                     judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_ZEN)
                 }
+                // DeepSeek serves no Jev judgment model; this preset answers the
+                // question set as a chat prompt instead, so it also picks the chat
+                // protocol. Its key is a DeepSeek key — paste one in the box below.
+                5 -> {
+                    judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_DEEPSEEK)
+                    judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_DEEPSEEK)
+                }
                 // Custom POSTs the box verbatim, so a preset HOST left in the box
                 // would hit the API root. Expand it into the full endpoint the
                 // preset would have used; anything hand-typed is left alone.
-                5 -> judgeBaseEdit.setText(expandJudgeUrl(judgeBaseEdit.text.toString()))
+                6 -> judgeBaseEdit.setText(expandJudgeUrl(judgeBaseEdit.text.toString()))
             }
+            // A preset speaks the protocol it was built for. Custom keeps whatever
+            // the user chose: only they know what is behind that address.
+            if (idx in 0..4) protoRow.second(0) else if (idx == 5) protoRow.second(1)
             bochaBox.visibility = if (idx == 1) View.VISIBLE else View.GONE
         })
+        judgeCard.addView(protoRow.first)
+        judgeCard.addView(text("「Jev 判断协议」把 7 道题发给 Jev 判断模型（TypeSafe 系），答案经过校准；「OpenAI 聊天模式」把同一套题写成提示词发给普通聊天模型（如 DeepSeek），由它自己估概率和危险等级，不如 Jev 准。", 11f, sub))
         judgeCard.addView(label("Base URL"))
         judgeCard.addView(judgeBaseEdit)
-        judgeCard.addView(text("OpenRouter 拼 /alpha/decisions；博查 Jev / TypeSafe / Vercel / OpenCode Zen 拼 /v1/systemone；自定义按原样 POST。Vercel 用 AI Gateway 的密钥，OpenCode Zen 用 Zen 的密钥。",
+        judgeCard.addView(text("OpenRouter 拼 /alpha/decisions；博查 Jev / TypeSafe / Vercel / OpenCode Zen 拼 /v1/systemone；DeepSeek 官方拼 /chat/completions；聊天模式一律拼 /chat/completions；自定义按原样 POST。Vercel 用 AI Gateway 的密钥，OpenCode Zen 用 Zen 的密钥。",
             11f, sub))
         judgeCard.addView(bochaBox)
         judgeCard.addView(label("密钥"))
@@ -174,6 +220,9 @@ class SettingsActivity : AppCompatActivity() {
             }
             val probe = draftPrefs(SCRATCH_JUDGE) {
                 judgeProvider = provider
+                // The pill wins here: the box may hold any address, but which
+                // protocol the route speaks is exactly what the user picked.
+                judgeProtocol = if (judgeProtoChat) Prefs.PROTO_CHAT else Prefs.PROTO_DECISIONS
                 judgeBaseUrl = base.ifBlank { defaultJudgeBase(provider) }
                 judgeKey = key
                 judgeModel = model.ifBlank { defaultJudgeModel(provider) }
@@ -192,7 +241,7 @@ class SettingsActivity : AppCompatActivity() {
             }
         })
         judgeCard.addView(judgeResult)
-        root.addView(judgeCard)
+        connBody.addView(judgeCard)
 
         // --- 回复接口 ---
         val replyCard = card()
@@ -247,7 +296,7 @@ class SettingsActivity : AppCompatActivity() {
             }
         })
         replyCard.addView(replyResult)
-        root.addView(replyCard)
+        connBody.addView(replyCard)
 
         // --- 视觉接口 ---
         val visionCard = card()
@@ -305,14 +354,91 @@ class SettingsActivity : AppCompatActivity() {
             }
         })
         visionCard.addView(visionResult)
-        root.addView(visionCard)
+        connBody.addView(visionCard)
+
+        // =================== 人设 ===================
+        // 这一段是用户找不到的那一块。原来人设只是「分析」卡里一个叫
+        // 「想要的语气 / 人设（可选）」的空文本框：没有模板、没有回显，用户
+        // 写下的东西要么被识别成结构化卡、要么被静默当成散文，界面上看不出
+        // 区别；而「主题」是唯一能让人设和知识库联动的键，谁也不会猜得到要手
+        // 写一行「主题：网调」。所以这里独立成区：模板一键套、认出什么就写什么。
+        val personaBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(foldSection("人设与语气", defaultOpen = true, personaBody))
+        val personaWrap = card()
+        personaWrap.addView(text("人设决定回复的语气、称呼和分寸。选一个模板做起点，再改成你自己的话。",
+            12f, sub))
+        val styleEdit = edit(prefs.style, "例：网调关系，我定规矩你执行；语气短句、命令式；主题：网调").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 4; gravity = Gravity.TOP
+        }
+        val personaLine = text("", 12f, ink)
+        val personaScopeLine = text("知识库：读取中…", 11f, sub)
+
+        fun refreshPersonaStatus() {
+            val card = PersonaCard.parse(styleEdit.text.toString())
+            personaLine.text = PersonaStatus.line(card)
+            personaLine.setTextColor(if (card.hasContent() && !card.structured) warn else ink)
+            personaScopeLine.text = PersonaStatus.scopeLine(
+                TopicScope.scopeOf(kbPool, card.topic), kbAlwaysOn)
+        }
+
+        personaWrap.addView(styleEdit)
+        personaWrap.addView(personaTemplateRow(styleEdit) { refreshPersonaStatus() })
+        personaWrap.addView(personaLine.apply { setPadding(0, dp(10), 0, 0) })
+        personaWrap.addView(personaScopeLine.apply { setPadding(0, dp(5), 0, 0) })
+        personaWrap.addView(text("人设卡认这些键：称呼／关系／语气／语域／主题／情境／硬边界／安全词／示例。" +
+            "写「主题」才会把知识库收窄到同一个领域（比如主题：网调 → 只捞标了「网调」的笔记）；" +
+            "硬边界写双字关键词（家人、前任），会逐字拦住对方那条消息。",
+            11f, sub).apply { setPadding(0, dp(8), 0, 0) })
+        styleEdit.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) = refreshPersonaStatus()
+        })
+        refreshPersonaStatus()
+        personaBody.addView(personaWrap)
+
+        // 参与检索的笔记要读盘，不能压在输入框的回显路径上：先载入一次，之后
+        // 打字只做纯字符串的解析。
+        fun loadKbPool() {
+            worker.execute {
+                val notes = runCatching { KbStore.get(this).notes() }.getOrDefault(emptyList())
+                    .filter { it.enabled }
+                val pool = notes.filter { !it.alwaysOn && it.type != NOTE_TYPE_STYLE_SAMPLE }
+                val on = notes.count { it.alwaysOn && it.type != NOTE_TYPE_STYLE_SAMPLE }
+                main.post { kbPool = pool; kbAlwaysOn = on; refreshPersonaStatus() }
+            }
+        }
+        // 用户可能刚在知识库页补完主题标签再回到设置页：数字得跟着走，否则这一区
+        // 会一直报着进页面时的旧条数，看着就像"补标签没生效"。
+        personaReload = { loadKbPool() }
+        loadKbPool()
 
         // =================== 分析 ===================
-        root.addView(section("分析"))
+        val behaviorBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(foldSection("行为与外观", defaultOpen = true, behaviorBody))
+        val advancedBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(foldSection("高级参数与注入增强", defaultOpen = false, advancedBody))
         val card2 = card()
         card2.addView(label("关系描述（给 Jev 判断用）"))
         val relEdit = edit(prefs.relationship, Prefs.DEFAULT_REL)
         card2.addView(relEdit)
+
+        card2.addView(label("回复语言"))
+        var pickedLanguage = when (prefs.replyLanguage) {
+            Prefs.LANG_ZH -> 1
+            Prefs.LANG_EN -> 2
+            else -> 0
+        }
+        card2.addView(pills(listOf("跟随对方", "强制中文", "强制英文"), pickedLanguage) { pickedLanguage = it })
+
+        card2.addView(label("回复长度"))
+        var pickedLength = when (prefs.replyLength) {
+            Prefs.LENGTH_SHORT -> 0
+            Prefs.LENGTH_DETAILED -> 2
+            else -> 1
+        }
+        card2.addView(pills(listOf("短", "标准", "详细"), pickedLength) { pickedLength = it })
         card2.addView(label("会话白名单（每行一个关键词，空=所有会话）"))
         val wlEdit = edit(prefs.whitelist.joinToString("\n"), "留空则对所有会话生效").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
@@ -320,33 +446,95 @@ class SettingsActivity : AppCompatActivity() {
         card2.addView(wlEdit)
         val autoRow = toggleRow("对方发消息时自动分析", prefs.autoAnalyze)
         card2.addView(autoRow)
-        card2.addView(label("候选回复条数"))
+        card2.addView(text("想只对某一个应用关掉自动分析：长按悬浮卡片，选「这个应用不再自动分析」。" +
+            "关掉后那个应用里点卡片仍可手动分析。", 11f, sub))
+        val streamRow = toggleRow("边生成边显示（流式）", prefs.streamReplies)
+        card2.addView(streamRow)
+        card2.addView(text("打开后候选回复会随着模型输出逐字出现，不用等整段生成完。" +
+            "若服务商或中间代理不支持流式，这一轮会自动退回普通方式，速度略慢一点。", 11f, sub))
+        // card2 从这里拆成两张：上面是行为，下面（card2b）全进「高级参数」组。
+        val card2b = card()
+        card2b.addView(label("高级回复温度"))
+        val tempEdit = edit(String.format(java.util.Locale.US, "%.1f", prefs.replyTemperature), "0.0–1.5").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        }
+        card2b.addView(tempEdit)
+        card2b.addView(label("重复惩罚（频率）"))
+        val freqPenaltyEdit = edit(
+            String.format(java.util.Locale.US, "%.1f", prefs.replyFrequencyPenalty), "-2.0–2.0，0=不启用").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                InputType.TYPE_NUMBER_FLAG_SIGNED
+        }
+        card2b.addView(freqPenaltyEdit)
+        card2b.addView(label("重复惩罚（新话题）"))
+        val presPenaltyEdit = edit(
+            String.format(java.util.Locale.US, "%.1f", prefs.replyPresencePenalty), "-2.0–2.0，0=不启用").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                InputType.TYPE_NUMBER_FLAG_SIGNED
+        }
+        card2b.addView(presPenaltyEdit)
+        card2b.addView(text("两个都保持 0 时不发这两个字段，请求和以前完全一样。调高（如 0.3 / 0.3）能从采样层面" +
+            "压住「同一批词翻来覆去用」；只作用于候选回复的生成，摘要、台账、复查不受影响。", 11f, sub))
+        card2b.addView(label("请求超时"))
+        var pickedTimeout = if (prefs.requestTimeoutSeconds >= 60) 1 else 0
+        card2b.addView(pills(listOf("30 秒", "60 秒"), pickedTimeout) { pickedTimeout = it })
+
+        card2b.addView(label("候选回复条数"))
         var pickedCount = prefs.candidateCount
-        card2.addView(pills(listOf("1 条", "2 条", "3 条"), pickedCount - 1) { pickedCount = it + 1 })
-        card2.addView(text("只要 1 条时不做排序，出得更快；不满意可以在卡片里点「换一组」。", 11f, sub))
+        card2b.addView(pills(listOf("1 条", "2 条", "3 条"), pickedCount - 1) { pickedCount = it + 1 })
+        card2b.addView(text("只要 1 条时不做排序，出得更快；不满意可以在卡片里点「换一组」。", 11f, sub))
 
         // --- OCR 兜底（B 阶段）---
         val ocrFallbackRow = toggleRow("树读不到正文时用 OCR 兜底", prefs.ocrFallback)
-        card2.addView(ocrFallbackRow)
-        card2.addView(text("飞书正文是画上去的，节点树里读不到，这时截一次屏本地识别（不上传）。", 11f, sub))
+        card2b.addView(ocrFallbackRow)
+        card2b.addView(text("飞书正文是画上去的，节点树里读不到，这时截一次屏本地识别（不上传）。" +
+            "微信不给第三方无障碍树（整棵树只有一个空节点），所以微信一直走这条路：" +
+            "截屏 → 按气泡颜色分左右 → 本地 OCR，同样不上传、不点发送。", 11f, sub))
         val ocrAutoRow = toggleRow("OCR 模式自动分析", prefs.ocrAutoAnalyze)
-        card2.addView(ocrAutoRow)
-        card2.addView(text("关闭时 OCR 认完只亮悬浮球，点一下再分析。", 11f, sub))
+        card2b.addView(ocrAutoRow)
+        card2b.addView(label("OCR 轮询间隔"))
+        var pickedOcrInterval = when (prefs.ocrPollIntervalSeconds) { 5 -> 1; 10 -> 2; else -> 0 }
+        card2b.addView(pills(listOf("3 秒", "5 秒", "10 秒"), pickedOcrInterval) { pickedOcrInterval = it })
+        card2b.addView(text("关闭时 OCR 认完只亮悬浮球，点一下再分析。", 11f, sub))
 
         // --- 知识库 / 关联上下文（D 阶段） ---
         val ctxRow = toggleRow("记录聊天历史（只存本机，用于关联上下文）", prefs.contextEnabled)
-        card2.addView(ctxRow)
-        card2.addView(text("关闭时不写任何聊天内容到磁盘；笔记与联系人匹配仍然照常工作。", 11f, sub))
-        card2.addView(label("注入最近历史条数（0–100）"))
+        card2b.addView(ctxRow)
+        card2b.addView(text("关闭时不写任何聊天内容到磁盘；笔记与联系人匹配仍然照常工作。", 11f, sub))
+        card2b.addView(label("注入最近历史条数（0–100）"))
         val ctxCountEdit = edit(prefs.contextHistoryCount.toString(), "30").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
-        card2.addView(ctxCountEdit)
-        card2.addView(cardBtn("知识库与联系人") {
+        card2b.addView(ctxCountEdit)
+        card2b.addView(label("历史保留天数"))
+        var pickedRetention = Prefs.RETENTION_CHOICES.indexOf(prefs.logRetentionDays).coerceAtLeast(0)
+        card2b.addView(pills(listOf("永久", "7 天", "30 天", "90 天"), pickedRetention) { pickedRetention = it })
+        card2b.addView(text("超期的聊天记录在下次分析时清掉。只动本机 history 文件，不影响笔记和联系人。", 11f, sub))
+
+        // --- S1 会话台账 / 证据复查 ---
+        val ledgerRow = toggleRow("会话台账（把整段历史预扫成称呼 / 关系 / 边界卡片）", prefs.ledgerEnabled)
+        card2b.addView(ledgerRow)
+        card2b.addView(text("只在上面「记录聊天历史」打开后才有数据：台账是从已经存下来的历史整理" +
+            "出来的，不额外记录任何东西。整理好之后每轮都带上，称呼、在办的事和已经说过的" +
+            "边界不会因为滚出窗口而丢；重建失败时保留上一版，不影响这一轮。", 11f, sub))
+
+        val reviewRow = toggleRow("证据复查（排序后再逐条核验，站不住的重写）", prefs.reviewEnabled)
+        card2b.addView(reviewRow)
+        card2b.addView(text("比排序多一次模型调用，所以默认关。复查会指出哪条没接住对方、和已知" +
+            "称呼或边界冲突、或编造了对话里没有的事实，然后只重写那几条；复查失败时保持排序结果不动。", 11f, sub))
+        card2b.addView(label("复查接口（三项都留空＝沿用回复接口）"))
+        val reviewBaseEdit = edit(prefs.reviewBaseUrl, "留空沿用回复接口")
+        card2b.addView(reviewBaseEdit)
+        val reviewModelEdit = edit(prefs.reviewModel, "留空沿用回复模型")
+        card2b.addView(reviewModelEdit)
+        val reviewKeyEdit = edit(prefs.reviewKey, "留空沿用回复密钥", password = true)
+        card2b.addView(reviewKeyEdit)
+
+        card2b.addView(cardBtn("知识库与联系人") {
             startActivity(android.content.Intent(this, KnowledgeActivity::class.java))
         })
         val kbResult = resultText()
-        card2.addView(cardBtn("清空知识库与历史") {
+        card2b.addView(cardBtn("清空知识库与历史") {
             val c = KbStore.get(this).counts()
             androidx.appcompat.app.AlertDialog.Builder(this)
                 .setTitle("清空知识库与历史")
@@ -360,7 +548,7 @@ class SettingsActivity : AppCompatActivity() {
                 .show()
         })
         // Deliberately low-key: a developer aid, not a user feature.
-        card2.addView(text("自检", 12f, sub).apply {
+        card2b.addView(text("自检", 12f, sub).apply {
             setPadding(dp(2), dp(12), dp(8), dp(2))
             setOnClickListener {
                 kbResult.text = "自检中…"
@@ -371,11 +559,12 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
         })
-        card2.addView(kbResult)
-        root.addView(card2)
+        card2b.addView(kbResult)
+        behaviorBody.addView(card2)
+        advancedBody.addView(card2b)
 
         // =================== 外观 ===================
-        root.addView(section("外观"))
+        behaviorBody.addView(section("外观"))
         val card3 = card()
         val opacityLabel = label("悬浮窗不透明度：${prefs.overlayOpacity}%")
         card3.addView(opacityLabel)
@@ -391,7 +580,73 @@ class SettingsActivity : AppCompatActivity() {
             })
         }
         card3.addView(seek)
-        root.addView(card3)
+        behaviorBody.addView(card3)
+
+        // =================== 注入增强（可选，默认关闭） ===================
+        advancedBody.addView(section("注入增强（可选，默认关闭）"))
+        val injCard = card()
+        injCard.addView(text(
+            "不打开这里，App 就是一个纯粹的无障碍助手：读屏幕上的字、把草稿填进输入框，绝不发送。" +
+                "\n\n" +
+                "打开之后，在装了 Vector/LSPosed 的手机上，本 App 能以模块身份进入目标 App 的进程，" +
+                "直接读到聊天窗口里真正的消息（带消息 ID、时间和发送者），而不是靠节点树和 OCR 去猜。" +
+                "注入层只读：不发送、不修改、不写入目标 App 的任何数据；只在你正打开的聊天页上、" +
+                "每秒一次、只看最近 60 条。读不到、超时或定位不到，立刻回落无障碍路径，" +
+                "并把原因写进诊断日志 —— 降级是可见的，不是静默的。" +
+                "\n\n" +
+                "必须逐 App 单独打开；默认全部关闭。",
+            12f, sub))
+
+        val injectStatusViews = ArrayList<Pair<String, TextView>>()
+        HookTargets.SCOPED.forEach { pkg ->
+            injCard.addView(toggleRow("${appLabel(pkg)}（$pkg）", prefs.injectionEnabled(pkg)) { on ->
+                prefs.setInjectionEnabled(pkg, on)
+                Toast.makeText(
+                    this,
+                    if (on) "已开启 $pkg 的注入增强（下次该 App 启动时生效）"
+                    else "已关闭 $pkg 的注入增强",
+                    Toast.LENGTH_SHORT
+                ).show()
+            })
+            val line = text(injectStatusLine(pkg), 11.5f, sub)
+            injectStatusViews.add(pkg to line)
+            injCard.addView(line)
+        }
+        injCard.addView(cardBtn("刷新模块状态") {
+            injectStatusViews.forEach { (pkg, tv) -> tv.text = injectStatusLine(pkg) }
+        })
+        injCard.addView(label("诊断"))
+        injCard.addView(toggleRow("注入对拍（写诊断日志）", prefs.compareSources()) { on ->
+            prefs.setCompareSources(on)
+        })
+        injCard.addView(text(
+            "同一个聊天页同时用无障碍和注入层各读一遍，把两层的差别写成一行诊断日志 —— " +
+                "只记条数和错位位置，不记聊天内容。用来验证注入层读得对不对，不额外调用模型。" +
+                "排查完就关掉：开着每次采集会多读一遍屏幕。",
+            11.5f, sub
+        ))
+        injCard.addView(text(
+            "没装框架、模块没启用、或者目标 App 没在跑，这里都会显示「未连接」，注入增强不生效 —— " +
+                "其余功能完全不受影响。",
+            11.5f, sub
+        ))
+
+        injCard.addView(label("账号风险（原文）"))
+        injCard.addView(text(
+            "微信官方协议 8.2.1.4–8.2.1.7 限制未经授权的插件接入、对运行数据和客户端的读取或干预；" +
+                "8.5.1 的处理包括功能限制、账号封禁等。不能由“只读、不发消息”推导出不会封号。" +
+                "现有 LSPosed 版本同样存在此风险，绘制开关不能消除已注入模块的风险。" +
+                "没有可靠材料可给出具体封禁概率，也不能声称一定是高概率。" +
+                "\n\n" +
+                "若优先保护日常主账号，不建议继续以 LSPosed 注入方式推进此功能。" +
+                "\n\n" +
+                "同一类风险适用于任何被注入的 App，不止微信。" +
+                "\n\n" +
+                "（以上为前置评估文档原文；其中「绘制」指把分析直接画进对方气泡里，" +
+                "本版本不做这件事，保留原句是为了不改动原文。）",
+            12f, sub
+        ))
+        advancedBody.addView(injCard)
 
         // =================== 关于与隐私 ===================
         root.addView(section("关于与隐私"))
@@ -421,6 +676,7 @@ class SettingsActivity : AppCompatActivity() {
                 else -> defaultJudgeBase(judgeProv)
             }
             prefs.judgeKey = judgeKeyEdit.text.toString()
+            prefs.judgeProtocol = if (judgeProtoChat) Prefs.PROTO_CHAT else Prefs.PROTO_DECISIONS
             prefs.judgeModel = when {
                 judgeModelTyped.isNotBlank() -> judgeModelTyped
                 judgeProv == Prefs.PROVIDER_CUSTOM -> ""
@@ -436,20 +692,112 @@ class SettingsActivity : AppCompatActivity() {
             prefs.visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
 
             prefs.relationship = relEdit.text.toString()   // blank stays blank, on purpose
+            prefs.style = styleEdit.text.toString()
+            prefs.replyLanguage = when (pickedLanguage) {
+                1 -> Prefs.LANG_ZH
+                2 -> Prefs.LANG_EN
+                else -> Prefs.LANG_FOLLOW
+            }
+            prefs.replyLength = when (pickedLength) {
+                0 -> Prefs.LENGTH_SHORT
+                2 -> Prefs.LENGTH_DETAILED
+                else -> Prefs.LENGTH_STANDARD
+            }
             prefs.whitelist = wlEdit.text.toString().split("\n")
                 .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
             prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
+            prefs.streamReplies = (streamRow.tag as? Boolean) ?: false
+            prefs.replyTemperature = tempEdit.text.toString().toDoubleOrNull() ?: 0.8
+            prefs.replyFrequencyPenalty = freqPenaltyEdit.text.toString().toDoubleOrNull() ?: 0.0
+            prefs.replyPresencePenalty = presPenaltyEdit.text.toString().toDoubleOrNull() ?: 0.0
+            prefs.requestTimeoutSeconds = if (pickedTimeout == 1) 60 else 30
             prefs.candidateCount = pickedCount
             prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
             prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
+            prefs.ocrPollIntervalSeconds = when (pickedOcrInterval) {
+                1 -> 5
+                2 -> 10
+                else -> 3
+            }
             prefs.contextEnabled = (ctxRow.tag as? Boolean) ?: false
             prefs.contextHistoryCount =
                 ctxCountEdit.text.toString().trim().toIntOrNull()?.coerceIn(0, 100) ?: 30
+            prefs.logRetentionDays =
+                Prefs.RETENTION_CHOICES.getOrElse(pickedRetention) { 0 }
+            prefs.ledgerEnabled = (ledgerRow.tag as? Boolean) ?: true
+            prefs.reviewEnabled = (reviewRow.tag as? Boolean) ?: false
+            prefs.reviewBaseUrl = reviewBaseEdit.text.toString()
+            prefs.reviewModel = reviewModelEdit.text.toString()
+            prefs.reviewKey = reviewKeyEdit.text.toString()
             prefs.overlayOpacity = seek.progress + 60
             Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
         })
 
         setContentView(scroll)
+
+        // Debug-only acceptance hook. The drafting prompt is the thing the user
+        // judged ("给的建议也很不太对", and a grovelling role-play line in a
+        // flirting thread), and it can only be judged against a real model.
+        //   adb shell am start -n com.jev.probe/.SettingsActivity \
+        //       --ez tone_check true
+        // runs the REAL drafting path once over a fixed, synthetic thread and
+        // writes the candidates to files/jev-tone-check.txt. It never reads a
+        // real conversation, and it is not compiled into release builds.
+        if (((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) &&
+            intent?.getBooleanExtra("tone_check", false) == true
+        ) {
+            runToneCheck()
+        }
+    }
+
+    /**
+     * 回到这一页时重算人设区。
+     *
+     * 用户很可能是「设置里选人设 → 去知识库页补标签 → 再回设置页」这条动线，回来
+     * 时那个「参与检索 N 条」必须是新的；停在进页面那一刻的数字，看着就像补标签
+     * 没生效，而这恰恰是这一区存在的意义。
+     */
+    override fun onResume() {
+        super.onResume()
+        personaReload?.invoke()
+    }
+
+    private fun runToneCheck() {
+        val probe = draftPrefs(SCRATCH_REPLY) {
+            judgeBaseUrl = prefs.judgeBaseUrl
+            judgeProtocol = prefs.judgeProtocol
+            judgeModel = prefs.judgeModel
+            judgeKey = prefs.judgeKey
+            replyBaseUrl = prefs.replyBaseUrl
+            replyKey = prefs.replyKey
+            replyModel = prefs.replyModel
+            contextHistoryCount = prefs.contextHistoryCount
+        }
+        worker.execute {
+            val demo = ChatSnapshot("试写", listOf(
+                Msg("other", "你今天怎么这么晚才回我？"),
+                Msg("me", "刚忙完，想你了"),
+                Msg("other", "切，谁信啊，说好的周末陪我去看电影呢")
+            ))
+            // A light teasing thread: the judgment says so, and the drafter has to
+            // follow it instead of writing for an imagined crisis.
+            val judgment = Analysis(
+                trueIntent = Choice("casual_chat", 0.7, emptyMap()),
+                dangerLevel = Score(1.0, 0.8, 9),
+                sheNeeds = Choice("nothing", 0.5, emptyMap()),
+                shouldReplyNow = 0.9,
+                bestAction = Choice("make_plan", 0.5, emptyMap()),
+                tensionResolved = 0.2, literalQuestion = 0.8,
+                rankedReplies = emptyList(), latencyMs = 0
+            )
+            val out = try {
+                ReplyClient(probe).draft(demo, prefs.relationship, null, 3, emptyList(), judgment, prefs.style)
+            } catch (e: Exception) {
+                listOf("FAILED: ${e.message}")
+            }
+            runCatching { File(filesDir, "jev-tone-check.txt").writeText(out.joinToString("\n---\n")) }
+            main.post { Toast.makeText(this, "试写完成：${out.size} 条", Toast.LENGTH_LONG).show() }
+        }
     }
 
     // Held as fields because several test buttons read each other's key box.
@@ -462,7 +810,8 @@ class SettingsActivity : AppCompatActivity() {
         2 -> Prefs.PROVIDER_TYPESAFE
         3 -> Prefs.PROVIDER_VERCEL
         4 -> Prefs.PROVIDER_ZEN
-        5 -> Prefs.PROVIDER_CUSTOM
+        5 -> Prefs.PROVIDER_DEEPSEEK
+        6 -> Prefs.PROVIDER_CUSTOM
         else -> Prefs.PROVIDER_OPENROUTER
     }
 
@@ -479,16 +828,22 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.DEFAULT_JUDGE_BASE_TYPESAFE -> Prefs.PROVIDER_TYPESAFE
             Prefs.DEFAULT_JUDGE_BASE_VERCEL -> Prefs.PROVIDER_VERCEL
             Prefs.DEFAULT_JUDGE_BASE_ZEN -> Prefs.PROVIDER_ZEN
+            Prefs.DEFAULT_JUDGE_BASE_DEEPSEEK -> Prefs.PROVIDER_DEEPSEEK
             else -> providerOf(idx)
         }
 
-    /** The full endpoint a preset host would have been expanded to. */
+    /**
+     * The full endpoint a preset host would have been expanded to. DeepSeek has
+     * no Jev judgment path — its preset runs the chat protocol, so its expansion
+     * is the chat completions URL, not a decisions one.
+     */
     private fun expandJudgeUrl(base: String): String = when (base.trim().trimEnd('/')) {
         Prefs.DEFAULT_JUDGE_BASE_BOCHA -> Prefs.DEFAULT_JUDGE_BASE_BOCHA + "/v1/systemone"
         Prefs.DEFAULT_JUDGE_BASE_OPENROUTER -> Prefs.DEFAULT_JUDGE_BASE_OPENROUTER + "/alpha/decisions"
         Prefs.DEFAULT_JUDGE_BASE_TYPESAFE -> Prefs.DEFAULT_JUDGE_BASE_TYPESAFE + "/v1/systemone"
         Prefs.DEFAULT_JUDGE_BASE_VERCEL -> Prefs.DEFAULT_JUDGE_BASE_VERCEL + "/v1/systemone"
         Prefs.DEFAULT_JUDGE_BASE_ZEN -> Prefs.DEFAULT_JUDGE_BASE_ZEN + "/v1/systemone"
+        Prefs.DEFAULT_JUDGE_BASE_DEEPSEEK -> Prefs.DEFAULT_JUDGE_BASE_DEEPSEEK + Prefs.CHAT_COMPLETIONS_PATH
         else -> base.trim()
     }
 
@@ -497,6 +852,7 @@ class SettingsActivity : AppCompatActivity() {
         Prefs.PROVIDER_TYPESAFE -> Prefs.DEFAULT_JUDGE_BASE_TYPESAFE
         Prefs.PROVIDER_VERCEL -> Prefs.DEFAULT_JUDGE_BASE_VERCEL
         Prefs.PROVIDER_ZEN -> Prefs.DEFAULT_JUDGE_BASE_ZEN
+        Prefs.PROVIDER_DEEPSEEK -> Prefs.DEFAULT_JUDGE_BASE_DEEPSEEK
         else -> Prefs.DEFAULT_JUDGE_BASE_OPENROUTER
     }
 
@@ -505,6 +861,7 @@ class SettingsActivity : AppCompatActivity() {
         Prefs.PROVIDER_TYPESAFE -> Prefs.DEFAULT_JUDGE_MODEL_TYPESAFE
         Prefs.PROVIDER_VERCEL -> Prefs.DEFAULT_JUDGE_MODEL_VERCEL
         Prefs.PROVIDER_ZEN -> Prefs.DEFAULT_JUDGE_MODEL_ZEN
+        Prefs.PROVIDER_DEEPSEEK -> Prefs.DEFAULT_JUDGE_MODEL_DEEPSEEK
         else -> Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER
     }
 
@@ -549,12 +906,69 @@ class SettingsActivity : AppCompatActivity() {
     private fun pct(d: Double?): String =
         if (d == null) "?" else "${(d * 100).roundToInt()}%"
 
+    /** 一句确认框：套模板这类会盖掉用户手写内容的动作都得先问。 */
+    private fun confirm(title: String, msg: String, onYes: () -> Unit) {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(title).setMessage(msg)
+            .setPositiveButton("确定") { _, _ -> onYes() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 人设模板行：点一下把整张卡填进 [target]。
+     *
+     * 模板本身就是这套键的示范 —— 用户不需要先学会「主题／语域／硬边界」是干什么
+     * 的，看一遍模板就知道哪个字段管什么。已经有内容时先问一句：静默覆盖用户写
+     * 的人设是最让人恼火的一种失败。
+     */
+    private fun personaTemplateRow(target: EditText, onApplied: () -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(10), 0, 0)
+        }
+        PersonaPresets.ALL.forEach { (name, body) ->
+            row.addView(TextView(this).apply {
+                text = name; textSize = 13f; gravity = Gravity.CENTER
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(accent)
+                background = round(dp(10), Color.WHITE, stroke = true)
+                setPadding(dp(6), dp(9), dp(6), dp(9))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { rightMargin = dp(8) }
+                setOnClickListener {
+                    if (target.text.isNullOrBlank()) {
+                        target.setText(body.trim()); onApplied()
+                    } else {
+                        confirm("套用「$name」模板", "会用模板覆盖现在写着的人设，确定？") {
+                            target.setText(body.trim()); onApplied()
+                        }
+                    }
+                }
+            })
+        }
+        return row
+    }
+
     /** Horizontal selectable pills; calls [onPick] with the chosen index. */
-    private fun pills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View {
+    private fun pills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View =
+        pillRow(options, initial, onPick).first
+
+    /**
+     * [pills] plus a programmatic selector. One row has to be able to drive
+     * another: picking the DeepSeek judge preset also picks the protocol that
+     * preset speaks, and a row built by [pills] cannot be re-painted from
+     * outside.
+     */
+    private fun pillRow(options: List<String>, initial: Int, onPick: (Int) -> Unit): Pair<View, (Int) -> Unit> {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
         val views = ArrayList<TextView>()
+        val select: (Int) -> Unit = { i ->
+            views.forEachIndexed { j, v -> paintPill(v, j == i) }
+            onPick(i)
+        }
         options.forEachIndexed { i, opt ->
             val pill = TextView(this).apply {
                 text = opt; textSize = 12.5f; gravity = Gravity.CENTER
@@ -564,10 +978,7 @@ class SettingsActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(7) }
             }
             views.add(pill)
-            pill.setOnClickListener {
-                views.forEachIndexed { j, v -> paintPill(v, j == i) }
-                onPick(i)
-            }
+            pill.setOnClickListener { select(i) }
             row.addView(pill)
         }
         views.forEachIndexed { j, v -> paintPill(v, j == initial) }
@@ -578,7 +989,7 @@ class SettingsActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) }
         }
-        return scroller
+        return scroller to select
     }
 
     private fun paintPill(v: TextView, on: Boolean) {
@@ -587,7 +998,11 @@ class SettingsActivity : AppCompatActivity() {
         v.background = round(dp(9), if (on) accent else pillOff)
     }
 
-    private fun toggleRow(labelText: String, initial: Boolean): LinearLayout {
+    private fun toggleRow(
+        labelText: String,
+        initial: Boolean,
+        onChange: ((Boolean) -> Unit)? = null,
+    ): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(12), 0, dp(2)); tag = initial
@@ -607,14 +1022,67 @@ class SettingsActivity : AppCompatActivity() {
             sw.text = if (now) "开" else "关"
             sw.setTextColor(if (now) Color.WHITE else sub)
             sw.background = round(dp(10), if (now) accent else Color.parseColor("#E5E7EB"))
+            onChange?.invoke(now)
         }
         row.addView(lab); row.addView(sw)
         return row
     }
 
+    /** 目标 App 的显示名；没装就退回包名。只是查一下，不触发任何加载。 */
+    private fun appLabel(pkg: String): String = runCatching {
+        @Suppress("DEPRECATION")
+        val info = packageManager.getApplicationInfo(pkg, 0)
+        packageManager.getApplicationLabel(info).toString()
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: pkg
+
+    /**
+     * 注入层此刻连没连上。心跳带时间戳，超过两分钟就算过期（目标 App 被杀、
+     * 模块崩了、手机重启都会走到这条路上），所以这里不会把一次很久以前的
+     * 连接说成「已连接」。
+     */
+    private fun injectStatusLine(pkg: String): String {
+        val alive = BridgeStore.alive(pkg)
+            ?: return "状态：未连接（框架未装 / 模块未启用 / 目标 App 未启动）"
+        val age = ((System.currentTimeMillis() - alive.at) / 1000L).coerceAtLeast(0L)
+        return "状态：已连接 · 模块 v${alive.version} · ${age} 秒前心跳"
+    }
+
     // atoms
     private fun header(t: String) = text(t, 24f, ink, bold = true).apply { setPadding(0, 0, 0, dp(4)) }
     private fun section(t: String) = text(t, 12f, sub, bold = true).apply { setPadding(dp(2), dp(16), 0, dp(6)) }
+
+    /**
+     * 折叠组：38 个控件块平铺一页、真机要滚六屏以上（ui-overhaul 考察 P1），
+     * 按「连接 / 人设 / 行为 / 高级」分四组，默认只展开前面的组。控件本身
+     * 一行不动，只是从 root 换进组容器。
+     */
+    private fun foldSection(title: String, defaultOpen: Boolean, body: LinearLayout): View {
+        var open = defaultOpen
+        val chev = TextView(this).apply {
+            textSize = 15f; setTextColor(Color.parseColor("#6B7280")); setPadding(dp(8), 0, 0, 0)
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(12), dp(2), dp(12))
+            setOnClickListener {
+                open = !open
+                chev.text = if (open) "▾" else "▸"
+                body.visibility = if (open) View.VISIBLE else View.GONE
+            }
+        }
+        head.addView(TextView(this).apply {
+            text = title; textSize = 16f; setTextColor(Color.parseColor("#111827"))
+            setTypeface(typeface, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        head.addView(chev)
+        chev.text = if (open) "▾" else "▸"
+        body.visibility = if (open) View.VISIBLE else View.GONE
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(head); addView(body)
+        }
+    }
     private fun label(t: String) = text(t, 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) }
     private fun cardTitle(t: String) = text(t, 16f, ink, bold = true).apply { setPadding(0, dp(10), 0, dp(4)) }
     private fun resultText() = text("", 12.5f, sub).apply { setPadding(0, dp(10), 0, dp(2)) }

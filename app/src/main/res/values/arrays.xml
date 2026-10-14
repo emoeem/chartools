@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      框架在哪些 App 里加载本模块。这份清单只是「允许被注入的范围」，
+      真正的开关是设置页里每个 App 一行、默认关闭的 opt-in。
+
+      试点只有 Telegram：它的无障碍适配器已经存在，L0 与 L1 能逐条对拍
+      （S3 的验收就是同一聊天页两臂比对）。微信的 L0 最弱（空树），但它
+      的注入同时也是账号风险最高的一条，等 Telegram 这条路走通再说。
+
+      这份清单必须与 com.jev.probe.bridge.HookTargets.SCOPED 一致，
+      后者是运行期判定、可以被单测覆盖的那一份。
+    -->
+    <string-array name="xposed_scope">
+        <item>org.telegram.messenger</item>
+    </string-array>
+</resources>

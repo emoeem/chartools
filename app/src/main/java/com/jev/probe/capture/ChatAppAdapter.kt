@@ -148,6 +148,147 @@ class QQAdapter : ChatAppAdapter {
     }
 }
 
+/**
+ * Tencent TIM (com.tencent.tim) — the office edition of QQ and, despite sharing
+ * the launcher activity name `com.tencent.mobileqq.activity.SplashActivity`, a
+ * DIFFERENT codebase: its resource ids are obfuscated by AndResGuard and NOT
+ * ONE of QQ's three ids exists here (sampled 2026-10-06, TIM 4.1.0 /
+ * OnePlus PJE110, 1080x2376: `mjn`, `mjq` and `371` all absent). So TIM needs
+ * its own id table rather than a reused QQAdapter.
+ *
+ * Sampled structure of one open group chat (class/id/bounds/text LENGTH only —
+ * message content was never read):
+ * ```
+ * RecyclerView
+ *   ViewGroup#root                          one message row
+ *     FrameLayout#f24 > TextView            time separator ("10:00")
+ *     FrameLayout#pt5 > RelativeLayout#80
+ *                     > ImageView#82        sender avatar — first message of a
+ *                                           run only; later ones collapse to
+ *                                           height 1 while staying in the tree
+ *     FrameLayout#pyf > TextView#9w          sender nickname (group chats)
+ *     LinearLayout#n9e > ... > TextView#9u   the bubble wrapping it (#n9e) and
+ *                                           the message body (#9u)
+ * ```
+ * Collecting only `id/9u` therefore drops nicknames (`9w`), timestamps (`f24`)
+ * and the collapsed slivers for free.
+ *
+ * Side is geometry, the same idea as QQ: incoming bubbles hang off the left
+ * gutter (sampled `n9e` left edge 134 of 1080 ≈ 12.4%, right edge ≤ 809) and
+ * outgoing ones snap flush right (sampled right edge 1075 = width − 5). See
+ * [timSide] for why the right-edge snap has to be tested first.
+ */
+class TimAdapter : ChatAppAdapter {
+    override val pkg = "com.tencent.tim"
+
+    override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
+        val width = res.displayMetrics.widthPixels
+        val bubbles = ArrayList<Bubble>()
+        val nickRows = ArrayList<IntArray>()   // top/bottom of each `id/9w` nickname line
+        var firstContentTop = Int.MAX_VALUE
+        var hasInput = false
+        var hasComposer = false
+
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        var guard = 0
+        while (stack.isNotEmpty() && guard < 5000) {
+            guard++
+            val node = stack.removeLast()
+            when (node.viewIdResourceName) {
+                BUBBLE_ID -> {
+                    val text = node.text?.toString()
+                    val b = Rect(); node.getBoundsInScreen(b)
+                    // Rows scrolled out of the RecyclerView keep their node but
+                    // collapse to a 1px sliver; a real bubble is never degenerate.
+                    if (!text.isNullOrBlank() && b.width() > 0 && b.height() > 0) {
+                        bubbles.add(Bubble(b.top, b.left, b.right, text))
+                        if (b.top < firstContentTop) firstContentTop = b.top
+                    }
+                }
+                NICK_ID -> {
+                    val b = Rect(); node.getBoundsInScreen(b)
+                    if (b.height() > 0) {
+                        if (b.top < firstContentTop) firstContentTop = b.top
+                        nickRows.add(intArrayOf(b.top, b.bottom))
+                    }
+                }
+                INPUT_ID -> hasInput = true
+                SEND_PLUS_ID -> hasComposer = true
+            }
+            for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
+        }
+        // The composer is the proof of "this is a chat window": `id/input` alone
+        // is not enough, because an unknown list screen's search box may reuse
+        // that id and a misfire there would fire the OCR fallback on a list.
+        // Bubbles are proof on their own.
+        if (bubbles.isEmpty() && !(hasInput && hasComposer)) return null
+
+        val title = findTitleInActionBar(root, firstContentTop, width, res)
+        if (bubbles.isEmpty()) return ChatSnapshot(title, emptyList())
+
+        bubbles.sortBy { it.top }
+        // A nickname line is drawn only above SOMEONE ELSE's message (TIM hides it
+        // for your own), so the bubble a nick sits directly above is "other". That
+        // is proof that beats the geometry, and a group row is exactly where the
+        // pinned-edge test has the least to work with.
+        val msgs = bubbles.map { b ->
+            val nickAbove = nickRows.any { it[1] <= b.top && b.top - it[1] <= NICK_GAP_MAX }
+            Msg(if (nickAbove) "other" else timSide(b.left, b.right, width), b.text)
+        }
+        return ChatSnapshot(title, msgs)
+    }
+
+    private data class Bubble(val top: Int, val left: Int, val right: Int, val text: String)
+
+    companion object {
+        // Obfuscated by AndResGuard — these names change with the TIM build.
+        private const val BUBBLE_ID = "com.tencent.tim:id/9u"
+        private const val NICK_ID = "com.tencent.tim:id/9w"
+        private const val INPUT_ID = "com.tencent.tim:id/input"
+        private const val SEND_PLUS_ID = "com.tencent.tim:id/fun_btn"
+        /** How far below a nickname line its bubble may start. */
+        private const val NICK_GAP_MAX = 60
+    }
+}
+
+/**
+ * Which side one TIM bubble sits on, from its `id/n9e` bounds.
+ *
+ * TIM lays a conversation out as two gutters: incoming bubbles are pinned to
+ * the left one (sampled `n9e` left edge 134 of 1080 ≈ 12.4%, the avatar column)
+ * and outgoing ones are pinned to the right screen edge (sampled right edge
+ * 1075 = width − 5). We classify by *which edge is pinned*, not by where the
+ * bubble's centre falls: a long incoming paragraph reaches past mid-screen and
+ * would be called outgoing, and a long outgoing one starts inside the left
+ * gutter and would be called incoming. Only the pinned edge is stable for both.
+ *
+ * A bubble wide enough to touch both gutters cannot happen under TIM's max
+ * bubble width; if it ever does, fall back to the centre.
+ *
+ * When NEITHER edge lands on its gutter — the node bounds sit inside the bubble
+ * and its padding shifts the edge by a few px, which is normal — the nearer
+ * gutter decides. The centre test used to decide that case, and a long incoming
+ * paragraph whose left edge sat ~30px right of the sampled avatar column was
+ * therefore filed as MINE: "left+right past mid-screen" with no pin to contradict
+ * it. That is the misread this fallback removes.
+ */
+internal fun timSide(left: Int, right: Int, width: Int): String {
+    val gutter = (width * 0.13).toInt()
+    val rightPin = width - (width * 0.005).toInt()
+    val tol = (width * 0.01).toInt()
+    val atLeft = kotlin.math.abs(left - gutter) <= tol
+    val atRight = kotlin.math.abs(right - rightPin) <= tol
+    return when {
+        atLeft && !atRight -> "other"
+        atRight && !atLeft -> "me"
+        // Both pinned (a bubble spanning the whole width): use the centre.
+        atLeft && atRight -> if (left + right < width) "other" else "me"
+        kotlin.math.abs(left - gutter) <= kotlin.math.abs(right - rightPin) -> "other"
+        else -> "me"
+    }
+}
+
 /** Only my own Feishu bubbles carry the sent/read strip. */
 private const val FEISHU_READ_STATE_ID = "time_read_state_container_align_bubble"
 

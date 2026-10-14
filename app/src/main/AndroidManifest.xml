@@ -6,6 +6,29 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+      root 自愈（可选增强，见 root/RootFix.kt）。声明它 ONLY 是为了让 `pm grant`
+      认得这个权限名 —— 它本身不授予任何东西，普通安装拿不到、系统也不会给。
+      没有 root 的用户路径完全不受影响。
+      拿到之后，改「无障碍」那一格只需要直接写 Settings.Secure，不必每次 spawn su。
+    -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
+    <!--
+      跨进程桥的鉴权说明（真机实测的结论，别照抄常规做法）：
+      注入代码跑在目标 App 的进程里，用的是**目标 App 的 uid 和 Context**。
+      于是签名级 permission 在这里没用 —— 它挡的是发送方，而发送方恰恰不可能
+      持有本 App 的签名；加在接收端只会把模块自己挡在外面。真正的门是
+      BridgeSender 在 onReceive 里按发送方 uid 判（Android 14+ 的
+      getSentFromUid），判不出来就拒。SenderUid 认不出的老系统上只有 L0 能力栈。
+    -->
+    <!-- 目标 App 的包可见性（Android 11+）：本 App 侧要能解析到目标 App，
+         设置页才能显示它是否在跑。方向反过来是不通的 —— 见下面 receiver 的注释。 -->
+    <queries>
+        <package android:name="org.telegram.messenger" />
+    </queries>
 
     <application
         android:allowBackup="false"
@@ -31,6 +54,10 @@
             android:name=".KnowledgeActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".DocImportActivity"
+            android:exported="false" />
+
         <service
             android:name=".capture.ChatCaptureService"
             android:exported="true"
@@ -51,6 +78,75 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep the accessibility reader alive on aggressive OEM power management" />
         </service>
+
+        <!--
+          可选注入层（S2）。真机上唯一走得通的方向是**广播**：目标 App 进程里
+          的模块用的是目标 App 的 uid，包可见性把 com.jev.probe 对它整个挡掉了
+          （Provider 取不到、Service 绑不上、getPackageInfo 抛 NameNotFound）。
+          广播的投递由系统完成，不需要发送方解析出接收方。
+
+          所以默认通道是这条 receiver：exported=true、**不加 android:permission**
+          （见文件顶部注释），方法名放在 extra 里，答复走 setResultExtras。
+        -->
+        <receiver
+            android:name=".bridge.BridgeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.jev.probe.bridge.CALL" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          兜底通道：同步、能直接拿答复，给**不**受可见性限制的调用方用（本 App
+          自己、root 调试）。它也是真机上证明「Provider 本身没坏、只是被可见性
+          挡住」的对照手段 —— 上面那次 root 调用就是靠它确认的。
+        -->
+        <provider
+            android:name=".bridge.BridgeProvider"
+            android:authorities="com.jev.probe.bridge"
+            android:exported="true" />
+
+        <service
+            android:name=".bridge.BridgeConnectionService"
+            android:exported="true" />
+
+        <!--
+          root 自愈的触发点。两条广播缺一不可：
+           - MY_PACKAGE_REPLACED：覆盖安装后系统会把本 App 的无障碍服务关掉，
+             这条才是天天用的那条（开发期间一天装十几次）。
+           - BOOT_COMPLETED：能收到是因为 App 被启动过一次，这是 Android 的
+             既定规则，不试图绕。
+          两条都只在 `prefs.rootAuto` 打开时才动手（receiver 里自己判，默认关）。
+        -->
+        <receiver
+            android:name=".root.RootFixReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          同一个 APK 的第二张面孔：Xposed 模块。旧的 legacy API 只认这三个
+          meta-data 加 assets/xposed_init；现代 Module API 走 META-INF/xposed/，
+          Vector 两种都认，这里选 legacy 是因为 `de.robv.android.xposed:api:82`
+          能直接编译（YukiHookAPI 1.3.2 声明 minCompileSdk=37，装不上）。
+        -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_description" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
     </application>
 
 </manifest>

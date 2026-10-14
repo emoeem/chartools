@@ -1,4 +1,7 @@
 <resources>
-    <string name="app_name">Jev助手</string>
+    <string name="app_name">小助手</string>
     <string name="a11y_desc">读取当前聊天窗口文字，用于生成回复建议。不会自动发送消息。</string>
+    <!-- 框架设置页里显示的模块说明。只描述能力，不承诺安全：风险原文在
+         App 自己的设置页里逐条呈现（见 SettingsActivity 的「注入增强」段）。 -->
+    <string name="xposed_description">可选注入增强：读取聊天窗口的真实消息，只读、不发送、不写入目标 App 数据。默认关闭，需在 App 设置里逐个开启。</string>
 </resources>

@@ -31,14 +31,15 @@ class VisionClient(private val prefs: Prefs) {
      *
      * @param imageBase64Jpeg base64 of a JPEG, without the `data:` prefix.
      */
-    fun extractDialog(imageBase64Jpeg: String): String = ask(
+    fun extractDialog(imageBase64Jpeg: String, scope: HttpScope? = null): String = ask(
         imageBase64Jpeg,
         "你是聊天截图转写助手。把图中聊天气泡按从上到下的顺序转写成文本，" +
-            "每行一条，格式 `我：正文` 或 `对方：正文`。只输出转写结果，不要解释。"
+            "每行一条，格式 `我：正文` 或 `对方：正文`。只输出转写结果，不要解释。",
+        scope
     )
 
     /** Generic single-question call against the image (used by the settings test). */
-    fun ask(imageBase64Jpeg: String, prompt: String): String {
+    fun ask(imageBase64Jpeg: String, prompt: String, scope: HttpScope? = null): String {
         val url = prefs.visionEndpoint()
         // Image first, then text: DashScope compatible-mode requires this order.
         val content = JSONArray()
@@ -53,7 +54,8 @@ class VisionClient(private val prefs: Prefs) {
             .put("messages", messages)
             .put("temperature", 0.0)
             .put("stream", false)
-        val resp = HttpJson.post(url, prefs.effectiveVisionKey(), body, Route.VISION, HttpJson.headersFor(url))
+        val resp = HttpJson.post(
+            url, prefs.effectiveVisionKey(), body, Route.VISION, HttpJson.headersFor(url), scope)
         return resp.optJSONArray("choices")?.optJSONObject(0)
             ?.optJSONObject("message")?.optString("content") ?: ""
     }

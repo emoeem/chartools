@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
+import com.jev.probe.core.Trace
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,8 +32,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   (>= 1s between attempts) and back off 1s -> 2s -> 4s ... 30s while failing,
  *   so a chat app whose tree reads empty on every content-changed event can
  *   never turn into a screenshot machine gun.
- * - Our own floating overlay is part of the display and would be baked into the
- *   picture, so the caller hands us hide/restore callbacks.
+ * - Our own floating overlay is part of the display and would be baked into a
+ *   whole-display shot, so the caller hands us hide/restore callbacks. They are
+ *   used on that fallback only: a window shot cannot contain the panel, and
+ *   hiding it there blinked the card on every auto capture.
  */
 class ScreenCapture(
     private val service: AccessibilityService,
@@ -91,14 +94,12 @@ class ScreenCapture(
             }
         }
 
-        // Hide the bubble, give the compositor a frame to drop it, then shoot.
-        runCatching { hideOverlay() }
-        main.postDelayed({
-            // The foreground can change while the overlay settles. Do not shoot
-            // the next app and label its pixels as the original conversation.
+        main.post {
+            // The foreground can change between the request and the shot. Do not
+            // shoot the next app and label its pixels as the original conversation.
             if (shouldCapture()) shoot(finish, done)
             else finish(Result.Failed(CODE_CANCELLED, "会话已变化，已取消截屏"))
-        }, HIDE_SETTLE_MS)
+        }
     }
 
     private fun shoot(finish: (Result) -> Unit, done: AtomicBoolean) {
@@ -142,6 +143,7 @@ class ScreenCapture(
                     r
                 }.getOrNull()?.takeIf { it.width() > 0 && it.height() > 0 }
                 try {
+                    Trace.log("shot route=window")
                     service.takeScreenshotOfWindow(windowId, exec, cb)
                     main.postDelayed(timeout, TIMEOUT_MS)
                     return
@@ -151,12 +153,21 @@ class ScreenCapture(
                 }
             }
         }
-        try {
-            service.takeScreenshot(Display.DEFAULT_DISPLAY, exec, cb)
-            main.postDelayed(timeout, TIMEOUT_MS)
-        } catch (e: Throwable) {
-            finish(Result.Failed(CODE_INTERNAL, "截屏失败：${e.javaClass.simpleName}"))
-        }
+        // Whole-display fallback. THIS shot contains our own floating panel, so
+        // hide it and give the compositor a frame to drop it. The window shot
+        // above is a different window and never contains the panel — hiding it
+        // there made the card blink on every auto capture ("悬浮显示的内容一会
+        // 出现一会没有"), so that route leaves the panel alone.
+        runCatching { hideOverlay() }
+        main.postDelayed({
+            Trace.log("shot route=display hide=1")
+            try {
+                service.takeScreenshot(Display.DEFAULT_DISPLAY, exec, cb)
+                main.postDelayed(timeout, TIMEOUT_MS)
+            } catch (e: Throwable) {
+                finish(Result.Failed(CODE_INTERNAL, "截屏失败：${e.javaClass.simpleName}"))
+            }
+        }, HIDE_SETTLE_MS)
     }
 
     /**

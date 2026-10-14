@@ -8,6 +8,15 @@ package com.jev.probe.core.kb
  * settings ("清空知识库与历史"), which deletes that directory and nothing else.
  */
 
+/**
+ * [Note.type] marking a few-shot sample of the user's own writing voice rather
+ * than a fact. The reply prompt quotes such a note as `<user_style_examples>`;
+ * it is deliberately kept OUT of [ChatContext.background], because the judge
+ * reads the background to understand the situation and a style sample is not
+ * something anyone actually said.
+ */
+const val NOTE_TYPE_STYLE_SAMPLE = "style_sample"
+
 /** One free-text knowledge note the user maintains by hand. */
 data class Note(
     val id: String,
@@ -17,7 +26,8 @@ data class Note(
     /** Always injected regardless of what the conversation is about. */
     val alwaysOn: Boolean = false,
     val enabled: Boolean = true,
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val type: String = "note"
 )
 
 /**
@@ -33,6 +43,7 @@ data class Contact(
     val apps: List<String> = emptyList(),
     val relationship: String = "",
     val notes: String = "",
+    val persona: String = "",
     /** Reserved for the (deferred) auto-summary; never written in v1.3. */
     val autoSummary: String = "",
     val updatedAt: Long = System.currentTimeMillis()
@@ -48,7 +59,28 @@ data class LogEntry(val side: String, val text: String, val ts: Long, val app: S
 data class ChatContext(
     val contact: Contact?,
     val history: List<LogEntry>,
-    val notes: List<Note>
+    val notes: List<Note>,
+    /**
+     * Skills pulled in for THIS round (normally zero or one), already scored —
+     * see [com.jev.probe.core.skill.SkillMatcher]. The always-on L1 catalogue
+     * travels separately, in the reply prompt, since every enabled skill
+     * contributes to it.
+     */
+    val skills: List<com.jev.probe.core.skill.SkillHit> = emptyList(),
+    /**
+     * The L1 catalogue (`<available_skills>…`) of every enabled skill, or "".
+     * Always-on for the reply prompt, never part of [background] — Jev judges
+     * the conversation, it has no business reading instructions for the writer.
+     */
+    val catalogue: String = "",
+    /**
+     * S1 会话台账：整段对话预扫出来的结构化卡片（称呼 / 关系 / 语气基线 /
+     * 在办的事 / 已明确的边界 / 固定说法），见 [Ledger]。
+     *
+     * 只进**回复**提示词，不进 Jev 的 state：台账是给写手看的既定情况，
+     * 判断侧读的是 [background] 与 [history] 两份原始事实。
+     */
+    val ledger: Ledger? = null
 ) {
 
     /** True when there is nothing extra to inject (then no field is sent at all). */
@@ -77,7 +109,7 @@ data class ChatContext(
             if (c.autoSummary.isNotBlank()) sb.append("过往摘要：")
                 .append(c.autoSummary.trim()).append('\n')
         }
-        notes.forEach { n ->
+        notes.filter { it.type != NOTE_TYPE_STYLE_SAMPLE }.forEach { n ->
             sb.append(n.title.trim()).append(": ").append(n.content.trim()).append('\n')
         }
         return sb.toString().trim()
