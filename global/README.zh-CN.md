@@ -11,7 +11,7 @@
 [![WhatsApp](https://img.shields.io/badge/WhatsApp-2.26.38.73%20%E5%AE%9E%E6%B5%8B-25D366?style=flat-square&logo=whatsapp&logoColor=white)](#支持范围)
 [![License](https://img.shields.io/github/license/jev-chat/jev-chat-jarvis?style=flat-square)](../LICENSE)
 
-[English](README.md) · **中文** · [隐私说明（英文）](PRIVACY.md) · [更新日志](CHANGELOG.md) · [架构说明（英文）](ARCHITECTURE.md)
+[English](README.md) · **中文** · [隐私说明](PRIVACY.zh-CN.md) · [隐私说明（英文）](PRIVACY.md) · [更新日志](CHANGELOG.md) · [架构说明（英文）](ARCHITECTURE.md)
 
 </div>
 
@@ -24,7 +24,7 @@
 
 这是 Jev 的英文版，只支持 WhatsApp。它和同一仓库里的国内版 [Jev 聊天助手](../cn/README.md)（`cn/`：QQ、X、飞书、WhatsApp）是两个独立的 App：包名不同（`com.jev.overseas`），引擎和构建也各自独立，可以同时装在一台手机上。
 
-App 界面是英文的，因为它面向的是用英文聊天的用户。
+App 默认界面为英文，系统语言设为简体中文时会显示中文界面。它主要面向用英文聊天的用户。
 
 如果项目对你有帮助，欢迎点仓库右上角的 **Star**。下载和使用不需要先加星。
 
@@ -151,7 +151,7 @@ adb install -r jev-whatsapp-v0.1.0-release.apk
 ### 诊断
 
 - 本机记录每一步的计数、分数和耗时，不记聊天内容。
-- 在 Goal & analysis 里点「Report a problem」，或者在 Jev App › Diagnostics › Share report，生成一份报告，可以贴进 GitHub issue。详见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)（英文）。
+- 在 Goal & analysis 里点「Report a problem」，或者在 Jev App › Diagnostics › Share report，生成一份报告，可以贴进 GitHub issue。详见[诊断与问题报告](docs/DIAGNOSTICS.zh-CN.md)。
 
 ## 常见问题
 
