@@ -225,13 +225,13 @@ open class MainActivity : AppCompatActivity() {
             spellingRow.addView(ui.chip(getString(label), settings.spelling == value) { settings.spelling = value; refresh() })
         }
         diagRow.removeAllViews()
-        diagRow.addView(ui.chip("Keep log", settings.keepDiagnostics) { settings.keepDiagnostics = true; refresh() })
-        diagRow.addView(ui.chip("Off", !settings.keepDiagnostics) { settings.keepDiagnostics = false; refresh() })
+        diagRow.addView(ui.chip(getString(R.string.diagnostics_keep_log), settings.keepDiagnostics) { settings.keepDiagnostics = true; refresh() })
+        diagRow.addView(ui.chip(getString(R.string.toggle_off), !settings.keepDiagnostics) { settings.keepDiagnostics = false; refresh() })
         diagCount.text = getString(R.string.diagnostics_count, diagnostics.lineCount())
         chatsCount.text = getString(R.string.remembered_chats, settings.rememberedChats)
         autoRow.removeAllViews()
-        autoRow.addView(ui.chip("On", settings.analyseWhenOpened) { settings.analyseWhenOpened = true; refresh() })
-        autoRow.addView(ui.chip("Off", !settings.analyseWhenOpened) { settings.analyseWhenOpened = false; refresh() })
+        autoRow.addView(ui.chip(getString(R.string.toggle_on), settings.analyseWhenOpened) { settings.analyseWhenOpened = true; refresh() })
+        autoRow.addView(ui.chip(getString(R.string.toggle_off), !settings.analyseWhenOpened) { settings.analyseWhenOpened = false; refresh() })
     }
 
     /** The saved key as "sk-or-…" plus its last four characters, or null. */

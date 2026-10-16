@@ -11,7 +11,7 @@
 [![WhatsApp](https://img.shields.io/badge/WhatsApp-2.26.38.73%20%E5%AE%9E%E6%B5%8B-25D366?style=flat-square&logo=whatsapp&logoColor=white)](#支持范围)
 [![License](https://img.shields.io/github/license/jev-chat/jev-chat-jarvis?style=flat-square)](../LICENSE)
 
-[English](README.md) · **中文** · [隐私说明](PRIVACY.zh-CN.md) · [隐私说明（英文）](PRIVACY.md) · [更新日志](CHANGELOG.md) · [架构说明（英文）](ARCHITECTURE.md)
+[English](README.md) · **中文** · [隐私说明](PRIVACY.zh-CN.md) · [更新日志](CHANGELOG.zh-CN.md) · [架构说明](ARCHITECTURE.zh-CN.md) · [测试说明](docs/TESTING.zh-CN.md) · [诊断指南](docs/DIAGNOSTICS.zh-CN.md) · [隐私说明（英文）](PRIVACY.md) · [架构说明（英文）](ARCHITECTURE.md)
 
 </div>
 

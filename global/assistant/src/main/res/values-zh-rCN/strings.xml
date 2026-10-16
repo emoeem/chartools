@@ -50,6 +50,8 @@
     <string name="delivery">表达方式</string>
     <string name="delivery_only">无需决策，仅对表达方式评分</string>
     <string name="checking">正在评分…</string>
+    <string name="scoring">正在评分</string>
+    <string name="score_accessibility">满分 5 分，得分 %1$.1f</string>
     <string name="checks_passed">%1$d 项检查通过，共 %2$d 项</string>
     <string name="one_to_check">有 1 项需要检查</string>
     <string name="checked_by_you">已由你检查</string>
@@ -135,6 +137,9 @@
     <string name="diagnostics_title">诊断信息</string>
     <string name="diagnostics_detail">Jev 会在此设备上记录每个步骤的处理情况（数量、评分、耗时和错误；绝不记录聊天文本）。你可以随问题报告一起分享，以便定位问题。除非你主动分享，否则不会发送任何内容。</string>
     <string name="diagnostics_count">日志中有 %1$d 条事件</string>
+    <string name="diagnostics_keep_log">保留日志</string>
+    <string name="toggle_on">开启</string>
+    <string name="toggle_off">关闭</string>
     <string name="share_report">分享报告</string>
     <string name="clear_log">清除日志</string>
     <string name="round_cost">耗时 %1$s · 费用 $%2$s · %3$d 次请求</string>

@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.provider.Settings
 import android.view.View
 import android.view.animation.DecelerateInterpolator
+import com.jev.overseas.assistant.R
 import java.util.Locale
 
 /**
@@ -62,7 +63,7 @@ class ScoreRing(context: Context, private val ui: Ui, private val sizeDp: Int) :
     fun setScoring() {
         stop()
         scoring = true
-        caption = "Scoring"
+        caption = context.getString(R.string.scoring)
         target = null
         arc.color = ui.accent
         if (animationsOn()) {
@@ -135,8 +136,8 @@ class ScoreRing(context: Context, private val ui: Ui, private val sizeDp: Int) :
             }
         }
         contentDescription = when {
-            scoring -> "Scoring"
-            target != null -> String.format(Locale.US, "Score %.1f out of 5", target)
+            scoring -> context.getString(R.string.scoring)
+            target != null -> context.getString(R.string.score_accessibility, target)
             else -> caption
         }
     }
