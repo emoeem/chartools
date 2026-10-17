@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import java.io.File
+import java.io.InputStream
 
 /**
  * Import a document the user picked into plain-text chunks.
@@ -188,10 +189,28 @@ object DocImport {
     }
 
     private fun looksLikeHtml(file: File): Boolean {
-        val head = String(file.inputStream().use { it.readNBytes(2048) }, Charsets.UTF_8)
+        val head = String(file.inputStream().use { readPrefix(it, 2048) }, Charsets.UTF_8)
             .trimStart().lowercase()
         return head.startsWith("<!doctype html") || head.startsWith("<html") ||
             head.contains("<head") || head.contains("<body")
+    }
+
+    internal fun readPrefix(input: InputStream, maxBytes: Int): ByteArray {
+        require(maxBytes >= 0) { "maxBytes must not be negative" }
+        val buffer = ByteArray(maxBytes)
+        var count = 0
+        while (count < buffer.size) {
+            val read = input.read(buffer, count, buffer.size - count)
+            if (read < 0) break
+            if (read == 0) {
+                val next = input.read()
+                if (next < 0) break
+                buffer[count++] = next.toByte()
+            } else {
+                count += read
+            }
+        }
+        return if (count == buffer.size) buffer else buffer.copyOf(count)
     }
 
     /**

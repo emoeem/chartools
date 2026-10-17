@@ -110,6 +110,10 @@ class MainActivity : AppCompatActivity() {
 
         // Readiness card
         container.addView(statusCard(ready, a11y, a11yLive, overlay, key))
+        prefs.keyStorageError?.let {
+            container.addView(text("$it 请到设置页清除失效密钥后重新录入。", 13f, sub)
+                .apply { setPadding(dp(4), dp(4), dp(4), dp(12)) })
+        }
         container.addView(privacyHint())
         container.addView(platformRiskHint())
 
