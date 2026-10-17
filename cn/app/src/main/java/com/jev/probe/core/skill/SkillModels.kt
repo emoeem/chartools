@@ -37,7 +37,7 @@ data class Skill(
     /** Files next to SKILL.md, relative paths, sorted — the L3 layer. */
     fun resources(): List<String> = dir.walkTopDown()
         .filter { it.isFile && it.name != SkillMd.FILE_NAME }
-        .map { it.relativeTo(dir).path }
+        .map { it.relativeTo(dir).path.replace(File.separatorChar, '/') }
         .filterNot { it.startsWith(".") }
         .sorted()
         .toList()

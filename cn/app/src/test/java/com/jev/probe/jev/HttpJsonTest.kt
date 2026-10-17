@@ -80,7 +80,7 @@ class HttpJsonTest {
 
     @Test
     fun aRejectedKeyIsNotRetriedAndReportsTheRealStatus() {
-        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"bad key"}}"""))
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"bad test-key"}}"""))
 
         val e = failure { post() }
 
@@ -90,7 +90,8 @@ class HttpJsonTest {
         assertEquals(Route.JUDGE, api.route)
         // The user has to see WHY, not a generic "request failed".
         assertTrue(api.message!!, api.message!!.contains("判断接口 HTTP 401"))
-        assertTrue(api.message!!, api.message!!.contains("bad key"))
+        assertTrue(api.message!!, api.message!!.contains("bad [key]"))
+        assertTrue(api.message!!, !api.message!!.contains("test-key"))
         assertEquals(1, server.requestCount)
     }
 

@@ -87,6 +87,25 @@ class SettingsActivity : AppCompatActivity() {
         scroll.addView(root)
 
         root.addView(header("设置"))
+        prefs.keyStorageError?.let { error ->
+            val recoveryCard = card()
+            recoveryCard.addView(text(error, 13f, sub))
+            recoveryCard.addView(cardBtn("清除本机密钥并重新录入") {
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("重新录入 API 密钥")
+                    .setMessage("这会清除本机保存的所有 API 密钥，其他设置不会改变。请确认你仍能从服务商处找回密钥。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("清除并继续") { _, _ ->
+                        if (prefs.clearApiKeysForRecovery()) {
+                            recreate()
+                        } else {
+                            Toast.makeText(this, "无法清除密钥，请检查设备存储后重试", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    .show()
+            })
+            root.addView(recoveryCard)
+        }
 
         // =================== 接口 ===================
         val connBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -661,6 +680,10 @@ class SettingsActivity : AppCompatActivity() {
 
         // =================== 保存 ===================
         root.addView(primaryBtn("保存全部设置") {
+            if (prefs.keyStorageError != null) {
+                Toast.makeText(this, "请先恢复无法读取的密钥，再保存设置", Toast.LENGTH_LONG).show()
+                return@primaryBtn
+            }
             // Address wins over the pill: a preset HOST in the box means that
             // preset's provider (and so its path), whatever the pill last said.
             val judgeBaseTyped = judgeBaseEdit.text.toString().trim()
@@ -730,7 +753,12 @@ class SettingsActivity : AppCompatActivity() {
             prefs.reviewModel = reviewModelEdit.text.toString()
             prefs.reviewKey = reviewKeyEdit.text.toString()
             prefs.overlayOpacity = seek.progress + 60
-            Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
+            if (prefs.keyStorageError == null) {
+                Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "设置已保存，但密钥加密失败，请重新录入", Toast.LENGTH_LONG).show()
+                recreate()
+            }
         })
 
         setContentView(scroll)

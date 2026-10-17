@@ -29,11 +29,9 @@ import com.jev.probe.core.safety.SafetyBlockedException
 import com.jev.probe.jev.HttpScope
 import com.jev.probe.jev.JevClient
 import com.jev.probe.overlay.OverlayController
-import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 /**
@@ -54,48 +52,7 @@ open class ChatCaptureService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newFixedThreadPool(2)
 
-    /** Judge/reply HTTP runs here under a hard watchdog (see [withHardTimeout]).
-     *  Cached, so a straggler that outlives its round cannot starve the next one:
-     *  the watchdog cancels its socket, but the pool never has to wait for it. */
-    private val analysisPool = Executors.newCachedThreadPool { r ->
-        Thread(r, "jev-http").apply { isDaemon = true }
-    }
-
-    /**
-     * Run [body] on [analysisPool] but never wait longer than [ms], then abandon
-     * the attempt: its [HttpScope] is cancelled first so the socket is really
-     * closed, and only then is the thread interrupted.
-     *
-     * Why both: `Future.cancel(true)` only sets an interrupt flag, which a thread
-     * parked in a socket read never sees — the request kept holding a connection
-     * (and the caller's quota) until the read timeout, so an abandoned round
-     * stayed parked on the pool while the round's [analyzing] flag was cleared.
-     * Cancel-then-interrupt tears the connection down *and* stops any remaining
-     * backoff sleep. Past the ceiling the caller surfaces a plain, retryable
-     * error instead of waiting on a request that is already lost.
-     *
-     * Each guarded call gets its OWN scope: a judge timeout must not take the
-     * concurrently running draft down with it.
-     *
-     * The ceiling is [Prefs.requestTimeoutSeconds] (default 30s), deliberately
-     * shorter than [HttpJson]'s own worst retry tail (3 attempts × 40s read plus
-     * backoff ≈ 123s): past the ceiling the user would rather see "生成超时" with
-     * a retry than keep waiting on a request whose result is already late.
-     */
-    private fun <T> withHardTimeout(ms: Long, what: String, body: (HttpScope) -> T): T {
-        val scope = HttpScope()
-        liveScopes.add(scope)
-        val f = analysisPool.submit(Callable { body(scope) })
-        return try {
-            f.get(ms, TimeUnit.MILLISECONDS)
-        } catch (e: TimeoutException) {
-            scope.cancel()
-            f.cancel(true)
-            throw java.io.IOException("$what 超时（${ms / 1000}秒），请检查网络后重试")
-        } finally {
-            liveScopes.remove(scope)
-        }
-    }
+    private val analysisCalls = AnalysisCallRunner()
 
     /** Adapted chat apps, keyed by package name. Apps in [BLOCKED_PKGS] are
      *  never read at all (see [maybeCapture] / [onAccessibilityEvent]). */
@@ -141,14 +98,6 @@ open class ChatCaptureService : AccessibilityService() {
     private var emptySinceAt = 0L
     private val analysisTasks = ArrayList<Future<*>>()
 
-    /**
-     * The [HttpScope] of every HTTP call currently in flight. Interrupting a
-     * thread does not close its socket, so dropping a round has to cancel these
-     * too or the abandoned request keeps a connection until its read timeout.
-     * Concurrent because a worker registers a scope while the main thread may be
-     * cancelling the round.
-     */
-    private val liveScopes = java.util.concurrent.ConcurrentHashMap.newKeySet<HttpScope>()
     private var destroyed = false
     private val preferencesListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "enabled" || key == "whitelist") {
@@ -185,9 +134,11 @@ open class ChatCaptureService : AccessibilityService() {
 
     /** Close the sockets of every in-flight HTTP call of the round being dropped. */
     private fun cancelScopes() {
-        liveScopes.forEach { it.cancel() }
-        liveScopes.clear()
+        analysisCalls.cancelActiveCalls()
     }
+
+    private fun <T> withHardTimeout(ms: Long, what: String, body: (HttpScope) -> T): T =
+        analysisCalls.withHardTimeout(ms, what, body)
 
     private fun observeTarget(target: ConversationSession.Target?) {
         if (session.observe(target)) {
@@ -1355,6 +1306,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.hide()
         overlay = null
         worker.shutdownNow()
+        analysisCalls.close()
     }
 
     companion object {

@@ -50,6 +50,8 @@
     <string name="delivery">Delivery</string>
     <string name="delivery_only">Nothing to decide here, scored on delivery only</string>
     <string name="checking">Scoring…</string>
+    <string name="scoring">Scoring</string>
+    <string name="score_accessibility">%1$.1f out of 5</string>
     <string name="checks_passed">%1$d of %2$d checks passed</string>
     <string name="one_to_check">Check 1 thing</string>
     <string name="checked_by_you">Checked by you</string>
@@ -135,6 +137,9 @@
     <string name="diagnostics_title">Diagnostics</string>
     <string name="diagnostics_detail">Jev keeps a log of what each step did (counts, scores, timings, errors; never chat text) on this phone. Share it with a bug report so the problem can be traced. Nothing is sent unless you share it.</string>
     <string name="diagnostics_count">%1$d events in the log</string>
+    <string name="diagnostics_keep_log">Keep log</string>
+    <string name="toggle_on">On</string>
+    <string name="toggle_off">Off</string>
     <string name="share_report">Share report</string>
     <string name="clear_log">Clear log</string>
     <string name="round_cost">Took %1$s · cost $%2$s · %3$d requests</string>

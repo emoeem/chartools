@@ -251,7 +251,8 @@ object HttpJson {
                 // transport failure.
                 val text = resp.body?.string().orEmpty()
                 if (code !in 200..299) {
-                    throw ApiException(route, code, text.ifBlank { "（响应体为空）" })
+                    val safeText = if (key.isBlank()) text else text.replace(key, "[key]")
+                    throw ApiException(route, code, safeText.ifBlank { "（响应体为空）" })
                 }
                 if (text.isBlank()) throw ApiException(route, code, "响应体为空")
                 return JSONObject(text)
