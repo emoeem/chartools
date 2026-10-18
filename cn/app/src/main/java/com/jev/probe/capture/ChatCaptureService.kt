@@ -53,6 +53,7 @@ open class ChatCaptureService : AccessibilityService() {
     private val worker = Executors.newFixedThreadPool(2)
 
     private val analysisCalls = AnalysisCallRunner()
+    private val conversationState = CaptureConversationState()
 
     /** Adapted chat apps, keyed by package name. Apps in [BLOCKED_PKGS] are
      *  never read at all (see [maybeCapture] / [onAccessibilityEvent]). */
@@ -72,30 +73,25 @@ open class ChatCaptureService : AccessibilityService() {
     private lateinit var prefs: Prefs
     private var overlay: OverlayController? = null
 
-    private var lastSignature: String = ""
-    private var activePkg: String? = null
-    private var analyzing = false
+    private var lastSignature by conversationState::lastSignature
+    private var activePkg by conversationState::activePkg
+    private var analyzing by conversationState::analyzing
     /** A "换一组" redraft is in flight (candidates only; the judgment stays). */
-    private var regenerating = false
+    private var regenerating by conversationState::regenerating
+    private val gate = conversationState.gate
+    private val recentReplies = conversationState.recentReplies
+    private var lastIntensity by conversationState::lastIntensity
+    private var lastAnalyzed by conversationState::lastAnalyzed
+    private var lastCtx by conversationState::lastContext
+    private var lastJudgment by conversationState::lastJudgment
+    private var lastNonEmptyTarget by conversationState::lastNonEmptyTarget
+    private var emptySinceTarget by conversationState::emptySinceTarget
+    private var emptySinceAt by conversationState::emptySinceAt
+    private var lastOcrSignature by conversationState::lastOcrSignature
+    private var lastWeChatShotAt by conversationState::lastWeChatShotAt
+    private var weChatTitle by conversationState::weChatTitle
+
     private val session = ConversationSession()
-    /** Tells new incoming messages apart from scrolling through history. */
-    private val gate = NewMessageGate()
-
-    /** 最近几轮展示过的候选，喂给每轮起草的 avoid —— 跨轮反重复。 */
-    private val recentReplies = RecentReplies()
-
-    /** 分析卡上的推进档位（自动/收着/自然/加码），随会话切换重置。 */
-    private var lastIntensity = Intensity.AUTO
-    /** The snapshot and knowledge context of the last analysis, reused by "换一组". */
-    private var lastAnalyzed: ChatSnapshot? = null
-    private var lastCtx: com.jev.probe.core.kb.ChatContext? = null
-    /** The judgment that belongs to [lastAnalyzed]; reused by "换一组" so a redraft keeps the register. */
-    private var lastJudgment: com.jev.probe.core.Analysis? = null
-    /** Last target whose adapter read real bubbles; an empty read after it is suspect. */
-    private var lastNonEmptyTarget: ConversationSession.Target? = null
-    /** When the current target first read empty (see the OCR gate in [maybeCapture]). */
-    private var emptySinceTarget: ConversationSession.Target? = null
-    private var emptySinceAt = 0L
     private val analysisTasks = ArrayList<Future<*>>()
 
     private var destroyed = false
@@ -144,15 +140,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (session.observe(target)) {
             cancelAnalysis()
             currentSnapshot = null
-            activePkg = null
-            lastSignature = ""
-            lastOcrSignature = ""
-            gate.reset()
-            lastAnalyzed = null
-            lastCtx = null
-            lastJudgment = null
-            recentReplies.clear()
-            lastIntensity = Intensity.AUTO
+            conversationState.resetConversation()
             overlay?.setIntensity(Intensity.AUTO)
         }
     }
@@ -251,20 +239,6 @@ open class ChatCaptureService : AccessibilityService() {
     }
     private val ocr = MlKitOcr()
     private var ocrBusy = false
-
-    /** What the screen looked like the last time we fired an automatic shot.
-     *  See [ocrSignature]: this is the brake on the OCR path. */
-    private var lastOcrSignature: String = ""
-
-    /** Time of the last automatic WeChat shot — WeChat has no tree signature to
-     *  dedupe on before the picture, so its brake is time-based. */
-    private var lastWeChatShotAt = 0L
-
-    /** Chat title OCR read off WeChat's top band. WeChat exposes no nodes, so this
-     *  is the only source of a conversation title — and [targetFor] must keep
-     *  serving it back or the session would invalidate itself on every capture.
-     *  The stability rule lives in [WeChatTitleState], where it is unit tested. */
-    private var weChatTitle = WeChatTitleState()
 
     /** Last package written to [Trace], so foreground churn does not spam it. */
     private var lastTraceForeground: String? = null

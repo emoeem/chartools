@@ -257,7 +257,7 @@ Release 签名 properties 需包含 `storeFile`、`storePassword`、`keyAlias` �
   - `jev/` Jev 客户端与题目集 · `overlay/` 悬浮窗 · `core/` 配置与数据模型（含 `core/kb/` 知识库存储与上下文构建）
   - `KnowledgeActivity` 知识库管理页（笔记 / 联系人）
 - `cn/tools/jev/` — Jev 题目集与校准脚手架（Python）
-- `cn/docs/` — 设计与验收文档
+- `cn/docs/` — 设计与验收文档；[国内版产品范围与验收基线](../cn/docs/product-scope.md)
 - `cn/apk/` — 签好名的 release 包
 
 </details>

@@ -14,4 +14,5 @@
 - 功能说明、平台支持、Windows/macOS/Linux 构建与安装步骤：见[总览 README 的快速开始](../.github/README.md#快速开始)
 - 更新日志（含本分支相对上游的全部改动）：[CHANGELOG.md](CHANGELOG.md)
 - 工程约定与开发须知：[CLAUDE.md](CLAUDE.md)
+- 产品范围与验收基线：[docs/product-scope.md](docs/product-scope.md)
 - Python 校准脚手架：[tools/jev/](tools/jev/) · 设计与验收文档：[docs/](docs/)
