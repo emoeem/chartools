@@ -87,6 +87,25 @@ class SettingsActivity : AppCompatActivity() {
         scroll.addView(root)
 
         root.addView(header("设置"))
+        prefs.keyStorageError?.let { error ->
+            val recoveryCard = card()
+            recoveryCard.addView(text(error, 13f, sub))
+            recoveryCard.addView(cardBtn("清除本机密钥并重新录入") {
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("重新录入 API 密钥")
+                    .setMessage("这会清除本机保存的所有 API 密钥，其他设置不会改变。请确认你仍能从服务商处找回密钥。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("清除并继续") { _, _ ->
+                        if (prefs.clearApiKeysForRecovery()) {
+                            recreate()
+                        } else {
+                            Toast.makeText(this, "无法清除密钥，请检查设备存储后重试", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    .show()
+            })
+            root.addView(recoveryCard)
+        }
 
         // =================== 接口 ===================
         val connBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -148,7 +167,7 @@ class SettingsActivity : AppCompatActivity() {
             if (judgeProtoChat) 1 else 0
         ) { i -> judgeProtoChat = i == 1 }
 
-        judgeCard.addView(pills(
+        judgeCard.addView(wrappedPills(
             listOf("OpenRouter", "博查 Jev", "TypeSafe 直连", "Vercel", "OpenCode Zen", "DeepSeek 官方", "自定义"), judgeProviderIdx) { idx ->
             judgeProviderIdx = idx
             when (idx) {
@@ -661,6 +680,10 @@ class SettingsActivity : AppCompatActivity() {
 
         // =================== 保存 ===================
         root.addView(primaryBtn("保存全部设置") {
+            if (prefs.keyStorageError != null) {
+                Toast.makeText(this, "请先恢复无法读取的密钥，再保存设置", Toast.LENGTH_LONG).show()
+                return@primaryBtn
+            }
             // Address wins over the pill: a preset HOST in the box means that
             // preset's provider (and so its path), whatever the pill last said.
             val judgeBaseTyped = judgeBaseEdit.text.toString().trim()
@@ -730,7 +753,12 @@ class SettingsActivity : AppCompatActivity() {
             prefs.reviewModel = reviewModelEdit.text.toString()
             prefs.reviewKey = reviewKeyEdit.text.toString()
             prefs.overlayOpacity = seek.progress + 60
-            Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
+            if (prefs.keyStorageError == null) {
+                Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "设置已保存，但密钥加密失败，请重新录入", Toast.LENGTH_LONG).show()
+                recreate()
+            }
         })
 
         setContentView(scroll)
@@ -953,6 +981,53 @@ class SettingsActivity : AppCompatActivity() {
     /** Horizontal selectable pills; calls [onPick] with the chosen index. */
     private fun pills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View =
         pillRow(options, initial, onPick).first
+
+    /** Two-column selectable pills so presets remain visible on a phone screen. */
+    private fun wrappedPills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View {
+        var selected = initial
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val views = ArrayList<TextView>()
+        options.forEachIndexed { index, option ->
+            val pill = TextView(this).apply {
+                text = option
+                textSize = 12.5f
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(9), dp(8), dp(9))
+                layoutParams = LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                ).apply { leftMargin = dp(3); rightMargin = dp(3) }
+                setOnClickListener {
+                    selected = index
+                    views.forEachIndexed { viewIndex, view -> paintPill(view, viewIndex == selected) }
+                    onPick(index)
+                }
+            }
+            views.add(pill)
+        }
+        options.indices.step(2).forEach { start ->
+            rows.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(views[start])
+                if (start + 1 < views.size) {
+                    addView(views[start + 1])
+                } else {
+                    addView(View(this@SettingsActivity).apply {
+                        layoutParams = LinearLayout.LayoutParams(0, 1, 1f).apply {
+                            leftMargin = dp(3)
+                            rightMargin = dp(3)
+                        }
+                    })
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(6) }
+            })
+        }
+        views.forEachIndexed { index, view -> paintPill(view, index == selected) }
+        return rows
+    }
 
     /**
      * [pills] plus a programmatic selector. One row has to be able to drive

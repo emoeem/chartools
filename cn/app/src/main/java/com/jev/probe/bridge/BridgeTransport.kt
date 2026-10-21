@@ -168,6 +168,10 @@ internal object BridgeTransport {
         extras: Bundle,
         log: (String) -> Unit,
     ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            log("broadcast method=$method skipped=no_identity sdk=${Build.VERSION.SDK_INT}")
+            return false
+        }
         val options = identityOptions()
         if (options == null) {
             log("broadcast method=$method skipped=no_identity sdk=${Build.VERSION.SDK_INT}")
@@ -193,6 +197,10 @@ internal object BridgeTransport {
         extras: Bundle,
         log: (String) -> Unit,
     ): Bundle? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            log("ordered method=$method skipped=no_identity sdk=${Build.VERSION.SDK_INT}")
+            return null
+        }
         val options = identityOptions()
         if (options == null) {
             log("ordered method=$method skipped=no_identity sdk=${Build.VERSION.SDK_INT}")

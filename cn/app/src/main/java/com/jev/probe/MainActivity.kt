@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     /** True while a root fix is in flight — the button reads it, so a double tap can't queue two. */
     private var fixing = false
+    private var showAdvancedSetup = false
     private val a11yComponent =
         "com.jev.probe/com.jev.probe.capture.ChatCaptureService"
 
@@ -110,42 +111,14 @@ class MainActivity : AppCompatActivity() {
 
         // Readiness card
         container.addView(statusCard(ready, a11y, a11yLive, overlay, key))
+        prefs.keyStorageError?.let {
+            container.addView(text("$it 请到设置页清除失效密钥后重新录入。", 13f, sub)
+                .apply { setPadding(dp(4), dp(4), dp(4), dp(12)) })
+        }
         container.addView(privacyHint())
         container.addView(platformRiskHint())
 
-        // Permission checklist
-        //
-        // Every one of these is a *system* screen, and they all have to be given
-        // FLAG_ACTIVITY_NEW_TASK. Without it Android pushes the settings activity
-        // onto this app's own task, and since this activity is then finished the
-        // settings page becomes the task's root — so tapping the launcher icon
-        // reopens the accessibility page instead of the app, and `am start
-        // com.jev.probe/.MainActivity` answers "intent has been delivered to
-        // currently running top-most instance" forever.
-        container.addView(sectionLabel("权限设置"))
-        container.addView(permCard(
-            "无障碍权限",
-            if (a11y && !a11yLive)
-                "设置里开着，但服务没在跑。进系统设置把它关掉再打开一次，或用下面的「一键修复」"
-            else "读取当前聊天窗口的消息文字",
-            a11y && a11yLive
-        ) {
-            systemScreen(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        })
-        container.addView(permCard("悬浮窗权限", "在聊天窗口上方显示分析卡片", overlay) {
-            systemScreen(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-        })
-        container.addView(permCard("自启动 + 省电无限制", "小米/HyperOS 必做，否则服务被冻结、读不到消息", null) {
-            runCatching {
-                systemScreen(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
-            }
-        })
-
-        // root 增强（可选）。上面三行的终点都是一个系统页面，而**每次覆盖安装系统
-        // 都会把无障碍服务关掉**，于是用户每次重装后都要再点一遍。root 能把这三件
-        // 事直接做掉。没有 root 时这一区照常显示并明说，上面任何一行都不依赖它。
-        container.addView(sectionLabel("root 增强（可选）"))
-        container.addView(rootCard())
+        container.addView(setupCard(a11y, a11yLive, overlay, key))
 
         // Actions
         container.addView(sectionLabel("其他"))
@@ -160,9 +133,84 @@ class MainActivity : AppCompatActivity() {
             build()
         }
         container.addView(toggle)
+
+        val advanced = TextView(this).apply {
+            text = if (showAdvancedSetup) "收起兼容性设置 ▲" else "更多设置：国产手机省电与 root 增强 ▾"
+            textSize = 13f
+            setTextColor(sub)
+            setPadding(dp(2), dp(18), dp(2), dp(10))
+            setOnClickListener {
+                showAdvancedSetup = !showAdvancedSetup
+                build()
+            }
+        }
+        container.addView(advanced)
+        if (showAdvancedSetup) {
+            container.addView(sectionLabel("兼容性设置（按需）"))
+            container.addView(permCard("自启动 + 省电无限制", "小米 / HyperOS 等国产手机可能需要，避免系统冻结后台服务", null) {
+                systemScreen(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            })
+            container.addView(sectionLabel("root 增强（可选）"))
+            container.addView(rootCard())
+        }
     }
 
     // ---------------------------------------------------------------- cards
+
+    private fun setupCard(a11y: Boolean, a11yLive: Boolean, overlay: Boolean, key: Boolean): View {
+        val c = cardBox()
+        val a11yReady = a11y && a11yLive
+        val step = when {
+            !a11yReady -> 1
+            !overlay -> 2
+            !key -> 3
+            else -> 0
+        }
+        val (title, description, actionLabel, action) = when (step) {
+            1 -> Quadruple(
+                if (a11y && !a11yLive) "重新开启无障碍服务" else "开启无障碍权限",
+                if (a11y && !a11yLive)
+                    "系统权限还在，但服务没有运行。请在列表中找到「小助手 - 聊天读取服务」，关闭后重新开启。"
+                else "在无障碍服务列表中找到「小助手 - 聊天读取服务」并开启，确认系统提示后返回。",
+                "去开启"
+            ) { systemScreen(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+            2 -> Quadruple(
+                "开启悬浮窗权限",
+                "允许分析卡片显示在聊天应用上方。开启后返回此页继续。",
+                "去开启"
+            ) {
+                systemScreen(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            }
+            3 -> Quadruple(
+                "配置 API Key",
+                "只需先配置判断接口。回复和视觉接口可按需使用默认继承设置。",
+                "去设置"
+            ) { startActivity(Intent(this, SettingsActivity::class.java)) }
+            else -> Quadruple(
+                "准备完成，可以开始使用",
+                "打开受支持的聊天应用即可。发送候选内容始终由你手动确认。",
+                ""
+            ) {}
+        }
+
+        c.addView(text(if (step == 0) title else "$title（$step/3）", 17f, ink, bold = true))
+        c.addView(text(description, 13f, sub).apply { setPadding(0, dp(5), 0, dp(12)) })
+        if (actionLabel.isNotEmpty()) {
+            c.addView(btn(actionLabel, true, action).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            })
+        }
+        return c
+    }
+
+    private data class Quadruple(
+        val title: String,
+        val description: String,
+        val actionLabel: String,
+        val action: () -> Unit
+    )
 
     private fun statusCard(
         ready: Boolean, a11y: Boolean, a11yLive: Boolean, overlay: Boolean, key: Boolean
@@ -459,15 +507,12 @@ class MainActivity : AppCompatActivity() {
         return enabled.contains(a11yComponent)
     }
 
-    /**
-     * Open a system settings screen *outside* this app's task.
-     *
-     * See the comment on the permission checklist: without NEW_TASK the settings
-     * activity lands in our own task and outlives this activity, which makes the
-     * launcher icon reopen it instead of the app.
-     */
+    /** Open system settings outside this app's task and explain if the device has no matching screen. */
     private fun systemScreen(intent: Intent) {
         runCatching { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure {
+                Toast.makeText(this, "无法打开系统设置，请在系统设置中手动查找对应权限", Toast.LENGTH_LONG).show()
+            }
     }
 
     companion object {

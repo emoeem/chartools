@@ -29,11 +29,9 @@ import com.jev.probe.core.safety.SafetyBlockedException
 import com.jev.probe.jev.HttpScope
 import com.jev.probe.jev.JevClient
 import com.jev.probe.overlay.OverlayController
-import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 /**
@@ -54,48 +52,8 @@ open class ChatCaptureService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newFixedThreadPool(2)
 
-    /** Judge/reply HTTP runs here under a hard watchdog (see [withHardTimeout]).
-     *  Cached, so a straggler that outlives its round cannot starve the next one:
-     *  the watchdog cancels its socket, but the pool never has to wait for it. */
-    private val analysisPool = Executors.newCachedThreadPool { r ->
-        Thread(r, "jev-http").apply { isDaemon = true }
-    }
-
-    /**
-     * Run [body] on [analysisPool] but never wait longer than [ms], then abandon
-     * the attempt: its [HttpScope] is cancelled first so the socket is really
-     * closed, and only then is the thread interrupted.
-     *
-     * Why both: `Future.cancel(true)` only sets an interrupt flag, which a thread
-     * parked in a socket read never sees — the request kept holding a connection
-     * (and the caller's quota) until the read timeout, so an abandoned round
-     * stayed parked on the pool while the round's [analyzing] flag was cleared.
-     * Cancel-then-interrupt tears the connection down *and* stops any remaining
-     * backoff sleep. Past the ceiling the caller surfaces a plain, retryable
-     * error instead of waiting on a request that is already lost.
-     *
-     * Each guarded call gets its OWN scope: a judge timeout must not take the
-     * concurrently running draft down with it.
-     *
-     * The ceiling is [Prefs.requestTimeoutSeconds] (default 30s), deliberately
-     * shorter than [HttpJson]'s own worst retry tail (3 attempts × 40s read plus
-     * backoff ≈ 123s): past the ceiling the user would rather see "生成超时" with
-     * a retry than keep waiting on a request whose result is already late.
-     */
-    private fun <T> withHardTimeout(ms: Long, what: String, body: (HttpScope) -> T): T {
-        val scope = HttpScope()
-        liveScopes.add(scope)
-        val f = analysisPool.submit(Callable { body(scope) })
-        return try {
-            f.get(ms, TimeUnit.MILLISECONDS)
-        } catch (e: TimeoutException) {
-            scope.cancel()
-            f.cancel(true)
-            throw java.io.IOException("$what 超时（${ms / 1000}秒），请检查网络后重试")
-        } finally {
-            liveScopes.remove(scope)
-        }
-    }
+    private val analysisCalls = AnalysisCallRunner()
+    private val conversationState = CaptureConversationState()
 
     /** Adapted chat apps, keyed by package name. Apps in [BLOCKED_PKGS] are
      *  never read at all (see [maybeCapture] / [onAccessibilityEvent]). */
@@ -115,40 +73,27 @@ open class ChatCaptureService : AccessibilityService() {
     private lateinit var prefs: Prefs
     private var overlay: OverlayController? = null
 
-    private var lastSignature: String = ""
-    private var activePkg: String? = null
-    private var analyzing = false
+    private var lastSignature by conversationState::lastSignature
+    private var activePkg by conversationState::activePkg
+    private var analyzing by conversationState::analyzing
     /** A "换一组" redraft is in flight (candidates only; the judgment stays). */
-    private var regenerating = false
+    private var regenerating by conversationState::regenerating
+    private val gate = conversationState.gate
+    private val recentReplies = conversationState.recentReplies
+    private var lastIntensity by conversationState::lastIntensity
+    private var lastAnalyzed by conversationState::lastAnalyzed
+    private var lastCtx by conversationState::lastContext
+    private var lastJudgment by conversationState::lastJudgment
+    private var lastNonEmptyTarget by conversationState::lastNonEmptyTarget
+    private var emptySinceTarget by conversationState::emptySinceTarget
+    private var emptySinceAt by conversationState::emptySinceAt
+    private var lastOcrSignature by conversationState::lastOcrSignature
+    private var lastWeChatShotAt by conversationState::lastWeChatShotAt
+    private var weChatTitle by conversationState::weChatTitle
+
     private val session = ConversationSession()
-    /** Tells new incoming messages apart from scrolling through history. */
-    private val gate = NewMessageGate()
-
-    /** 最近几轮展示过的候选，喂给每轮起草的 avoid —— 跨轮反重复。 */
-    private val recentReplies = RecentReplies()
-
-    /** 分析卡上的推进档位（自动/收着/自然/加码），随会话切换重置。 */
-    private var lastIntensity = Intensity.AUTO
-    /** The snapshot and knowledge context of the last analysis, reused by "换一组". */
-    private var lastAnalyzed: ChatSnapshot? = null
-    private var lastCtx: com.jev.probe.core.kb.ChatContext? = null
-    /** The judgment that belongs to [lastAnalyzed]; reused by "换一组" so a redraft keeps the register. */
-    private var lastJudgment: com.jev.probe.core.Analysis? = null
-    /** Last target whose adapter read real bubbles; an empty read after it is suspect. */
-    private var lastNonEmptyTarget: ConversationSession.Target? = null
-    /** When the current target first read empty (see the OCR gate in [maybeCapture]). */
-    private var emptySinceTarget: ConversationSession.Target? = null
-    private var emptySinceAt = 0L
     private val analysisTasks = ArrayList<Future<*>>()
 
-    /**
-     * The [HttpScope] of every HTTP call currently in flight. Interrupting a
-     * thread does not close its socket, so dropping a round has to cancel these
-     * too or the abandoned request keeps a connection until its read timeout.
-     * Concurrent because a worker registers a scope while the main thread may be
-     * cancelling the round.
-     */
-    private val liveScopes = java.util.concurrent.ConcurrentHashMap.newKeySet<HttpScope>()
     private var destroyed = false
     private val preferencesListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "enabled" || key == "whitelist") {
@@ -185,23 +130,17 @@ open class ChatCaptureService : AccessibilityService() {
 
     /** Close the sockets of every in-flight HTTP call of the round being dropped. */
     private fun cancelScopes() {
-        liveScopes.forEach { it.cancel() }
-        liveScopes.clear()
+        analysisCalls.cancelActiveCalls()
     }
+
+    private fun <T> withHardTimeout(ms: Long, what: String, body: (HttpScope) -> T): T =
+        analysisCalls.withHardTimeout(ms, what, body)
 
     private fun observeTarget(target: ConversationSession.Target?) {
         if (session.observe(target)) {
             cancelAnalysis()
             currentSnapshot = null
-            activePkg = null
-            lastSignature = ""
-            lastOcrSignature = ""
-            gate.reset()
-            lastAnalyzed = null
-            lastCtx = null
-            lastJudgment = null
-            recentReplies.clear()
-            lastIntensity = Intensity.AUTO
+            conversationState.resetConversation()
             overlay?.setIntensity(Intensity.AUTO)
         }
     }
@@ -300,20 +239,6 @@ open class ChatCaptureService : AccessibilityService() {
     }
     private val ocr = MlKitOcr()
     private var ocrBusy = false
-
-    /** What the screen looked like the last time we fired an automatic shot.
-     *  See [ocrSignature]: this is the brake on the OCR path. */
-    private var lastOcrSignature: String = ""
-
-    /** Time of the last automatic WeChat shot — WeChat has no tree signature to
-     *  dedupe on before the picture, so its brake is time-based. */
-    private var lastWeChatShotAt = 0L
-
-    /** Chat title OCR read off WeChat's top band. WeChat exposes no nodes, so this
-     *  is the only source of a conversation title — and [targetFor] must keep
-     *  serving it back or the session would invalidate itself on every capture.
-     *  The stability rule lives in [WeChatTitleState], where it is unit tested. */
-    private var weChatTitle = WeChatTitleState()
 
     /** Last package written to [Trace], so foreground churn does not spam it. */
     private var lastTraceForeground: String? = null
@@ -1156,7 +1081,10 @@ open class ChatCaptureService : AccessibilityService() {
                             val labels = WeChatSpeakerAttribution.labelsFor(speakerLines, boxes)
                             val speakers = WeChatSpeakerAttribution.assign(boxes, labels)
                             Trace.log("wx speakers labels=${labels.size} members=${speakers.count { it.startsWith("member:") }} unknown=${speakers.count { it == "unknown" }}")
-                            ocrByRects(bmp, rects, title, WECHAT_PKG, token, speakers)
+                            ocrByRects(
+                                bmp, rects, title, WECHAT_PKG, token,
+                                speakers = speakers, manual = manual, voiceBoxes = boxes
+                            )
                         }
                     }
                 }
@@ -1172,34 +1100,105 @@ open class ChatCaptureService : AccessibilityService() {
         pkg: String,
         token: ConversationSession.Token,
         speakers: List<String>? = null,
+        manual: Boolean = false,
+        voiceBoxes: List<WeChatBubbles.Box>? = null,
     ) {
         val sx = ocr.scaleX; val sy = ocr.scaleY
         // Screen -> bitmap: drop the window origin first. A window shot does not
         // start at (0,0) in split screen or when it excludes the status bar.
         val ox = ocr.originX; val oy = ocr.originY
         val out = arrayOfNulls<Msg>(rects.size)
+        val voiceDetected = BooleanArray(rects.size)
+        val voiceTranscriptRead = BooleanArray(rects.size)
         var remaining = rects.size
+
+        fun finishBubble(index: Int, text: String) {
+            if (text.isNotEmpty()) {
+                val bubble = rects[index]
+                val speaker = speakers?.getOrNull(index)
+                out[index] = Msg(
+                    speaker ?: bubble.side,
+                    text,
+                    sender = speaker?.takeIf { it.startsWith("member:") }?.removePrefix("member:")
+                )
+            }
+            remaining--
+            if (remaining == 0) {
+                runCatching { bmp.recycle() }
+                val unreadableVoice = voiceDetected.indices.any { voiceDetected[it] && !voiceTranscriptRead[it] }
+                val note = if (unreadableVoice) {
+                    WECHAT_VOICE_TRANSCRIPT_NOTE
+                } else null
+                val latestIndex = rects.lastIndex
+                val blockAnalysis = latestIndex >= 0 && WeChatVoiceText.shouldBlockAnalysis(
+                    latestBubbleIsIncoming = voiceBoxes?.getOrNull(latestIndex)?.side == "other",
+                    latestBubbleIsVoice = voiceDetected[latestIndex],
+                    latestVoiceHasTranscript = voiceTranscriptRead[latestIndex]
+                )
+                finishOcrSnapshot(
+                    ChatSnapshot(title, out.filterNotNull(), note = note),
+                    pkg, manual, token, blockAnalysis
+                )
+            }
+        }
+
         rects.forEachIndexed { i, br ->
             val region = Rect(
                 ((br.rect.left - ox) * sx).toInt(), ((br.rect.top - oy) * sy).toInt(),
                 ((br.rect.right - ox) * sx).toInt(), ((br.rect.bottom - oy) * sy).toInt())
             ocr.recognize(bmp, region) { lines ->
-                val text = OcrGrouping.cleanBubbleText(lines.joinToString(" ") { it.text })
-                if (text.isNotEmpty()) {
-                    val speaker = speakers?.getOrNull(i)
-                    out[i] = Msg(
-                        speaker ?: br.side,
-                        text,
-                        sender = speaker?.takeIf { it.startsWith("member:") }?.removePrefix("member:")
-                    )
-                }
-                remaining--
-                if (remaining == 0) {
-                    runCatching { bmp.recycle() }
-                    finishOcrSnapshot(ChatSnapshot(title, out.filterNotNull()), pkg, manual = false, token = token)
+                val recognized = OcrGrouping.cleanBubbleText(lines.joinToString(" ") { it.text })
+                val text = if (pkg == WECHAT_PKG) {
+                    WeChatVoiceText.stripDurationLabels(recognized)
+                } else recognized
+                val voiceBox = voiceBoxes?.getOrNull(i)
+                if (pkg == WECHAT_PKG && voiceBox != null && WeChatVoiceText.isDurationLabel(recognized)) {
+                    voiceDetected[i] = true
+                    val transcriptRegion = weChatTranscriptRegion(voiceBoxes, i, bmp.width, bmp.height)
+                    if (transcriptRegion == null) {
+                        finishBubble(i, "")
+                    } else {
+                        ocr.recognize(bmp, transcriptRegion) { transcriptLines ->
+                            val transcript = OcrGrouping.cleanBubbleText(
+                                transcriptLines.joinToString(" ") { it.text }
+                            ).let(WeChatVoiceText::stripDurationLabels)
+                            voiceTranscriptRead[i] = transcript.isNotEmpty()
+                            finishBubble(i, transcript)
+                        }
+                    }
+                } else {
+                    finishBubble(i, text.takeUnless(WeChatVoiceText::isDurationLabel).orEmpty())
                 }
             }
         }
+    }
+
+    /**
+     * WeChat places its built-in voice transcript below the voice bubble. Read
+     * only that adjacent area after OCR identifies a duration label; never fetch
+     * or upload the audio itself.
+     */
+    private fun weChatTranscriptRegion(
+        boxes: List<WeChatBubbles.Box>,
+        index: Int,
+        width: Int,
+        height: Int,
+    ): Rect? {
+        val box = boxes.getOrNull(index) ?: return null
+        val top = box.top
+        val nextBubbleTop = boxes.asSequence().drop(index + 1)
+            .map { it.top }
+            .filter { it > box.bottom }
+            .minOrNull() ?: Int.MAX_VALUE
+        val bottom = minOf(
+            (height * BOTTOM_CROP).toInt(),
+            box.bottom + (height * 0.16f).toInt(),
+            nextBubbleTop - 1
+        )
+        if (bottom - top < 8) return null
+        val left = if (box.side == "other") box.left else (width * 0.08f).toInt()
+        val right = if (box.side == "other") (width * 0.92f).toInt() else box.right
+        return Rect(left.coerceIn(0, width - 1), top, right.coerceIn(1, width), bottom)
     }
 
     /** Whole screen minus the top bar and the input area, grouped by line gaps. */
@@ -1236,7 +1235,13 @@ open class ChatCaptureService : AccessibilityService() {
     }
 
     /** Shared tail of both OCR paths: dedupe, then analyze or park the bubble. */
-    private fun finishOcrSnapshot(raw: ChatSnapshot, pkg: String, manual: Boolean, token: ConversationSession.Token) {
+    private fun finishOcrSnapshot(
+        raw: ChatSnapshot,
+        pkg: String,
+        manual: Boolean,
+        token: ConversationSession.Token,
+        blockAnalysis: Boolean = false,
+    ) {
         ocrBusy = false
         if (!isCurrent(token)) return
         // 来源在**唯一的公共尾部**盖一次章：三条 OCR 出口（微信像素、按气泡、
@@ -1247,7 +1252,7 @@ open class ChatCaptureService : AccessibilityService() {
         Trace.log("ocr pkg=$pkg provenance=${snapshot.provenance} msgs=${snapshot.messages.size} manual=$manual sides=" +
             snapshot.messages.joinToString(",") { "${it.side}:${it.text.length}" })
         if (snapshot.messages.isEmpty()) {
-            if (manual) overlay?.showError("这一屏没认出文字")
+            if (manual || blockAnalysis) overlay?.showError(snapshot.note ?: "这一屏没认出文字")
             return
         }
         if (!prefs.isAllowed(snapshot.title)) { leaveConversation(); overlay?.hide(); return }
@@ -1255,6 +1260,10 @@ open class ChatCaptureService : AccessibilityService() {
         if (pkg.isNotEmpty() && pkg != activePkg) { activePkg = pkg; lastSignature = "" }
         currentSnapshot = snapshot
         overlay?.setApp(pkg.ifEmpty { null })
+        if (blockAnalysis) {
+            overlay?.showError(snapshot.note ?: WECHAT_VOICE_TRANSCRIPT_NOTE)
+            return
+        }
         val sig = snapshot.signature()
         // Manual taps always re-run; the automatic path dedupes like the tree path.
         if (!manual && sig == lastSignature) {
@@ -1355,6 +1364,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.hide()
         overlay = null
         worker.shutdownNow()
+        analysisCalls.close()
     }
 
     companion object {
@@ -1392,6 +1402,8 @@ open class ChatCaptureService : AccessibilityService() {
          * [WeChatBubbles] instead — see [maybeCaptureWeChat].
          */
         private const val WECHAT_PKG = "com.tencent.mm"
+        private const val WECHAT_VOICE_TRANSCRIPT_NOTE =
+            "微信语音尚未转成可识别文字。请长按语音消息，选择“转文字”后再分析；助手不会读取或上传语音音频。"
 
         /**
          * Floor between two automatic WeChat screenshots. WeChat fires content

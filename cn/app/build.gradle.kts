@@ -11,8 +11,11 @@ plugins {
 // (storeFile / storePassword / keyAlias / keyPassword). Override the path with
 // the JEV_KEYSTORE_PROPS env var. Without it, release builds are unsigned.
 val releaseProps = Properties().apply {
-    val f = File(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")
-    if (f.exists()) FileInputStream(f).use { load(it) }
+    System.getenv("JEV_KEYSTORE_PROPS")?.takeIf { it.isNotBlank() }?.let { path ->
+        val f = File(path)
+        require(f.isFile) { "JEV_KEYSTORE_PROPS does not point to a file: $path" }
+        FileInputStream(f).use { load(it) }
+    }
 }
 
 android {
@@ -28,6 +31,7 @@ android {
         targetSdk = 35
         versionCode = 10
         versionName = "2.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // ML Kit's bundled Chinese recognizer ships native libs for every ABI.
         // The target phone (and every phone this can run on: minSdk 30) is
@@ -93,6 +97,8 @@ dependencies {
     compileOnly("de.robv.android.xposed:api:82")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
     // Unit tests run against android.jar, where org.json is a stub that throws
     // "not mocked". The JSON round trip is most of the judgment logic, so the
     // real implementation goes on the test classpath only (never in the APK).

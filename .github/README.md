@@ -76,12 +76,23 @@
 
 **1. 构建。** 本分支没有发布安装包，从源码构建一份 debug 包（Android 11+，仅支持 ARM64 / `arm64-v8a`）：
 
+需要 JDK 17、Android SDK Platform 35 和 Build Tools 35。可用 Android Studio 打开仓库里的 `cn/` 目录，等待 Gradle 同步后构建 `app`；或在仓库根目录打开终端运行：
+
+```powershell
+# Windows PowerShell
+Set-Location .\cn
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
+adb install -r .\app\build\outputs\apk\debug\app-debug.apk
+```
+
 ```bash
-# 需要 JDK 17 或 21，以及 Android SDK（compileSdk 35）
+# macOS / Linux
 cd cn
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk bash gradlew :app:assembleDebug
+./gradlew :app:testDebugUnitTest :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+APK 输出在 `cn/app/build/outputs/apk/debug/`。安装到实体手机前，开启开发者选项和 USB 调试，并确保设备为 ARM64。也可从 GitHub Actions 的 **Build Debug APK** 工作流下载构建产物；该工作流会运行单元测试、构建 APK 并上传 artifact。构建和单元测试不需要 API key；安装后使用模型功能时才需要在 App 里配置。
 
 原版上游的 release 包在上游仓库的 [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases)，那是包名不同的另一个应用（上游 `jev-assistant-v1.7-release.apk`），和这里的构建互不覆盖，也不能就地升级。
 
@@ -218,20 +229,35 @@ QQ、X 全程只有一个 Activity，判「是不是聊天窗」要看树里有�
 <details>
 <summary><b>构建与目录结构</b></summary>
 
-JDK 17 + Android SDK（platform 35 / build-tools 35）。
+JDK 17 + Android SDK（platform 35 / build-tools 35）。以下命令从仓库根目录执行。
+
+```powershell
+# Windows PowerShell
+Set-Location .\cn
+.\gradlew.bat :app:testDebugUnitTest
+.\gradlew.bat :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
+
+# 仅发布签名构建时设置；签名文件和密钥应放在仓库之外
+$env:JEV_KEYSTORE_PROPS = 'C:\secure\jev-release.properties'
+.\gradlew.bat :app:assembleRelease
+```
 
 ```bash
+# macOS / Linux
 cd cn
-./gradlew assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
-./gradlew assembleRelease    # 需要仓库外的签名 properties，路径由 JEV_KEYSTORE_PROPS 指定
+./gradlew :app:testDebugUnitTest
+./gradlew :app:assembleDebug
+JEV_KEYSTORE_PROPS=/secure/jev-release.properties ./gradlew :app:assembleRelease
 ```
+
+Release 签名 properties 需包含 `storeFile`、`storePassword`、`keyAlias` 和 `keyPassword`。不设置 `JEV_KEYSTORE_PROPS` 时 release APK 不签名；不要把签名文件或密钥提交到仓库。
 
 - `cn/app/` — Android 应用（Kotlin，传统 View）
   - `capture/` 无障碍采集：`ChatAppAdapter.kt` 各 App 适配器、`ChatCaptureService.kt` 分发服务、前台保活、`ocr/` 截屏与离线识别
   - `jev/` Jev 客户端与题目集 · `overlay/` 悬浮窗 · `core/` 配置与数据模型（含 `core/kb/` 知识库存储与上下文构建）
   - `KnowledgeActivity` 知识库管理页（笔记 / 联系人）
 - `cn/tools/jev/` — Jev 题目集与校准脚手架（Python）
-- `cn/docs/` — 设计与验收文档
+- `cn/docs/` — 设计与验收文档；[国内版产品范围与验收基线](../cn/docs/product-scope.md)
 - `cn/apk/` — 签好名的 release 包
 
 </details>
@@ -258,4 +284,3 @@ cd cn
 - 不要用「Jev 聊天助手」「jev-chat」名称或 chatjevs.com 域名暗示由原作者出品或背书。
 
 **隐私与免责声明**：触发分析时，聊天文字和启用的背景信息会发送到你自行配置的第三方模型服务商；截图仅在本机 OCR。请阅读[隐私政策](../cn/PRIVACY.md)以及所选服务商的政策，并遵守 QQ、TIM、Telegram、微信、X、飞书、WhatsApp 等软件的用户协议与当地法律法规；因违反第三方 App 用户协议导致的账号限制等后果由使用者自行承担。作者不对第三方服务商的数据处理行为或使用后果负责。
-

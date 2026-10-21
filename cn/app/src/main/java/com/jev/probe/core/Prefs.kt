@@ -8,19 +8,27 @@ import android.util.Log
  * the relationship description used in Jev's state, the conversation whitelist,
  * plus the context (D stage) and OCR (B stage) switches.
  *
- * Key handling: stored in app-private SharedPreferences (not world-readable,
- * never logged, never in code/git). Only key *lengths* are ever logged.
+ * API keys are AES-GCM encrypted with an Android Keystore key before they are
+ * stored in app-private SharedPreferences. Only key lengths are ever logged.
  */
 class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
     private val sp = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+    private val apiKeyVault = ApiKeyVault(sp)
+    private val keyStorageFailures = mutableSetOf<String>()
 
     /**
      * Only the real config migrates — and only the real config logs it. The
      * throwaway instances behind the settings test buttons and the KB self-check
      * have nothing to carry over, and used to print one migration line per tap.
      */
-    init { if (prefsName == PREFS_MAIN) { migrateIfNeeded(); unseedBochaDefaultIfUnconfigured() } }
+    init {
+        if (prefsName == PREFS_MAIN) {
+            migrateIfNeeded()
+            migrateApiKeys()
+            unseedBochaDefaultIfUnconfigured()
+        }
+    }
 
     /**
      * v1.2 -> v1.3: the single `openrouter_key` becomes the judge route's key.
@@ -81,8 +89,8 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         set(v) = sp.edit().putString(K_JUDGE_BASE, v.trim()).apply()
 
     var judgeKey: String
-        get() = sp.getString(K_JUDGE_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_JUDGE_KEY, v.trim()).apply()
+        get() = readApiKey(K_JUDGE_KEY)
+        set(v) = writeApiKey(K_JUDGE_KEY, v)
 
     var judgeModel: String
         get() = sp.getString(K_JUDGE_MODEL, DEFAULT_JUDGE_MODEL_OPENROUTER) ?: DEFAULT_JUDGE_MODEL_OPENROUTER
@@ -120,8 +128,8 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
     /** Blank = fall back to [judgeKey]. */
     var replyKey: String
-        get() = sp.getString(K_REPLY_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_REPLY_KEY, v.trim()).apply()
+        get() = readApiKey(K_REPLY_KEY)
+        set(v) = writeApiKey(K_REPLY_KEY, v)
 
     /** Generative model for drafting the 3 candidate replies. */
     var replyModel: String
@@ -141,8 +149,8 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
     /** Blank = fall back to [replyKey] then [judgeKey]. */
     var visionKey: String
-        get() = sp.getString(K_VISION_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_VISION_KEY, v.trim()).apply()
+        get() = readApiKey(K_VISION_KEY)
+        set(v) = writeApiKey(K_VISION_KEY, v)
 
     var visionModel: String
         get() = sp.getString(K_VISION_MODEL, DEFAULT_VISION_MODEL) ?: DEFAULT_VISION_MODEL
@@ -192,8 +200,70 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         set(v) = sp.edit().putString(K_REVIEW_BASE, v.trim()).apply()
 
     var reviewKey: String
-        get() = sp.getString(K_REVIEW_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_REVIEW_KEY, v.trim()).apply()
+        get() = readApiKey(K_REVIEW_KEY)
+        set(v) = writeApiKey(K_REVIEW_KEY, v)
+
+    /** Non-secret explanation shown in Settings when a saved key cannot be read. */
+    val keyStorageError: String?
+        @Synchronized get() = if (keyStorageFailures.isEmpty()) null
+        else "无法读取或安全保存部分 API 密钥，请在设置中重新录入并保存。"
+
+    @Synchronized
+    fun clearApiKeysForRecovery(): Boolean {
+        val cleared = sp.edit()
+            .remove(K_JUDGE_KEY)
+            .remove(K_REPLY_KEY)
+            .remove(K_VISION_KEY)
+            .remove(K_REVIEW_KEY)
+            .remove(K_LEGACY_KEY)
+            .commit()
+        if (cleared) keyStorageFailures.clear()
+        return cleared
+    }
+
+    private fun migrateApiKeys() {
+        for (key in listOf(K_JUDGE_KEY, K_REPLY_KEY, K_VISION_KEY, K_REVIEW_KEY, K_LEGACY_KEY)) {
+            readApiKey(key)
+        }
+        val legacy = try {
+            apiKeyVault.read(K_LEGACY_KEY)
+        } catch (e: Exception) {
+            setKeyStorageError(K_LEGACY_KEY, e)
+            return
+        }
+        if (K_JUDGE_KEY !in keyStorageFailures && judgeKey.isBlank() && legacy.isNotBlank()) {
+            writeApiKey(K_JUDGE_KEY, legacy)
+        }
+        if (K_LEGACY_KEY !in keyStorageFailures && K_JUDGE_KEY !in keyStorageFailures) {
+            writeApiKey(K_LEGACY_KEY, "")
+        }
+    }
+
+    @Synchronized
+    private fun readApiKey(name: String): String {
+        return try {
+            apiKeyVault.read(name).also { keyStorageFailures.remove(name) }
+        } catch (e: Exception) {
+            setKeyStorageError(name, e)
+            ""
+        }
+    }
+
+    @Synchronized
+    private fun writeApiKey(name: String, value: String) {
+        try {
+            apiKeyVault.write(name, value.trim())
+            keyStorageFailures.remove(name)
+        } catch (e: Exception) {
+            setKeyStorageError(name, e)
+        }
+    }
+
+    @Synchronized
+    private fun setKeyStorageError(name: String, error: Exception) {
+        keyStorageFailures.add(name)
+        Log.e(TAG, "API key storage failed for $name: ${error.javaClass.simpleName}")
+    }
 
     var reviewModel: String
         get() = sp.getString(K_REVIEW_MODEL, "") ?: ""
