@@ -1081,7 +1081,10 @@ open class ChatCaptureService : AccessibilityService() {
                             val labels = WeChatSpeakerAttribution.labelsFor(speakerLines, boxes)
                             val speakers = WeChatSpeakerAttribution.assign(boxes, labels)
                             Trace.log("wx speakers labels=${labels.size} members=${speakers.count { it.startsWith("member:") }} unknown=${speakers.count { it == "unknown" }}")
-                            ocrByRects(bmp, rects, title, WECHAT_PKG, token, speakers)
+                            ocrByRects(
+                                bmp, rects, title, WECHAT_PKG, token,
+                                speakers = speakers, manual = manual, voiceBoxes = boxes
+                            )
                         }
                     }
                 }
@@ -1097,34 +1100,105 @@ open class ChatCaptureService : AccessibilityService() {
         pkg: String,
         token: ConversationSession.Token,
         speakers: List<String>? = null,
+        manual: Boolean = false,
+        voiceBoxes: List<WeChatBubbles.Box>? = null,
     ) {
         val sx = ocr.scaleX; val sy = ocr.scaleY
         // Screen -> bitmap: drop the window origin first. A window shot does not
         // start at (0,0) in split screen or when it excludes the status bar.
         val ox = ocr.originX; val oy = ocr.originY
         val out = arrayOfNulls<Msg>(rects.size)
+        val voiceDetected = BooleanArray(rects.size)
+        val voiceTranscriptRead = BooleanArray(rects.size)
         var remaining = rects.size
+
+        fun finishBubble(index: Int, text: String) {
+            if (text.isNotEmpty()) {
+                val bubble = rects[index]
+                val speaker = speakers?.getOrNull(index)
+                out[index] = Msg(
+                    speaker ?: bubble.side,
+                    text,
+                    sender = speaker?.takeIf { it.startsWith("member:") }?.removePrefix("member:")
+                )
+            }
+            remaining--
+            if (remaining == 0) {
+                runCatching { bmp.recycle() }
+                val unreadableVoice = voiceDetected.indices.any { voiceDetected[it] && !voiceTranscriptRead[it] }
+                val note = if (unreadableVoice) {
+                    WECHAT_VOICE_TRANSCRIPT_NOTE
+                } else null
+                val latestIndex = rects.lastIndex
+                val blockAnalysis = latestIndex >= 0 && WeChatVoiceText.shouldBlockAnalysis(
+                    latestBubbleIsIncoming = voiceBoxes?.getOrNull(latestIndex)?.side == "other",
+                    latestBubbleIsVoice = voiceDetected[latestIndex],
+                    latestVoiceHasTranscript = voiceTranscriptRead[latestIndex]
+                )
+                finishOcrSnapshot(
+                    ChatSnapshot(title, out.filterNotNull(), note = note),
+                    pkg, manual, token, blockAnalysis
+                )
+            }
+        }
+
         rects.forEachIndexed { i, br ->
             val region = Rect(
                 ((br.rect.left - ox) * sx).toInt(), ((br.rect.top - oy) * sy).toInt(),
                 ((br.rect.right - ox) * sx).toInt(), ((br.rect.bottom - oy) * sy).toInt())
             ocr.recognize(bmp, region) { lines ->
-                val text = OcrGrouping.cleanBubbleText(lines.joinToString(" ") { it.text })
-                if (text.isNotEmpty()) {
-                    val speaker = speakers?.getOrNull(i)
-                    out[i] = Msg(
-                        speaker ?: br.side,
-                        text,
-                        sender = speaker?.takeIf { it.startsWith("member:") }?.removePrefix("member:")
-                    )
-                }
-                remaining--
-                if (remaining == 0) {
-                    runCatching { bmp.recycle() }
-                    finishOcrSnapshot(ChatSnapshot(title, out.filterNotNull()), pkg, manual = false, token = token)
+                val recognized = OcrGrouping.cleanBubbleText(lines.joinToString(" ") { it.text })
+                val text = if (pkg == WECHAT_PKG) {
+                    WeChatVoiceText.stripDurationLabels(recognized)
+                } else recognized
+                val voiceBox = voiceBoxes?.getOrNull(i)
+                if (pkg == WECHAT_PKG && voiceBox != null && WeChatVoiceText.isDurationLabel(recognized)) {
+                    voiceDetected[i] = true
+                    val transcriptRegion = weChatTranscriptRegion(voiceBoxes, i, bmp.width, bmp.height)
+                    if (transcriptRegion == null) {
+                        finishBubble(i, "")
+                    } else {
+                        ocr.recognize(bmp, transcriptRegion) { transcriptLines ->
+                            val transcript = OcrGrouping.cleanBubbleText(
+                                transcriptLines.joinToString(" ") { it.text }
+                            ).let(WeChatVoiceText::stripDurationLabels)
+                            voiceTranscriptRead[i] = transcript.isNotEmpty()
+                            finishBubble(i, transcript)
+                        }
+                    }
+                } else {
+                    finishBubble(i, text.takeUnless(WeChatVoiceText::isDurationLabel).orEmpty())
                 }
             }
         }
+    }
+
+    /**
+     * WeChat places its built-in voice transcript below the voice bubble. Read
+     * only that adjacent area after OCR identifies a duration label; never fetch
+     * or upload the audio itself.
+     */
+    private fun weChatTranscriptRegion(
+        boxes: List<WeChatBubbles.Box>,
+        index: Int,
+        width: Int,
+        height: Int,
+    ): Rect? {
+        val box = boxes.getOrNull(index) ?: return null
+        val top = box.top
+        val nextBubbleTop = boxes.asSequence().drop(index + 1)
+            .map { it.top }
+            .filter { it > box.bottom }
+            .minOrNull() ?: Int.MAX_VALUE
+        val bottom = minOf(
+            (height * BOTTOM_CROP).toInt(),
+            box.bottom + (height * 0.16f).toInt(),
+            nextBubbleTop - 1
+        )
+        if (bottom - top < 8) return null
+        val left = if (box.side == "other") box.left else (width * 0.08f).toInt()
+        val right = if (box.side == "other") (width * 0.92f).toInt() else box.right
+        return Rect(left.coerceIn(0, width - 1), top, right.coerceIn(1, width), bottom)
     }
 
     /** Whole screen minus the top bar and the input area, grouped by line gaps. */
@@ -1161,7 +1235,13 @@ open class ChatCaptureService : AccessibilityService() {
     }
 
     /** Shared tail of both OCR paths: dedupe, then analyze or park the bubble. */
-    private fun finishOcrSnapshot(raw: ChatSnapshot, pkg: String, manual: Boolean, token: ConversationSession.Token) {
+    private fun finishOcrSnapshot(
+        raw: ChatSnapshot,
+        pkg: String,
+        manual: Boolean,
+        token: ConversationSession.Token,
+        blockAnalysis: Boolean = false,
+    ) {
         ocrBusy = false
         if (!isCurrent(token)) return
         // 来源在**唯一的公共尾部**盖一次章：三条 OCR 出口（微信像素、按气泡、
@@ -1172,7 +1252,7 @@ open class ChatCaptureService : AccessibilityService() {
         Trace.log("ocr pkg=$pkg provenance=${snapshot.provenance} msgs=${snapshot.messages.size} manual=$manual sides=" +
             snapshot.messages.joinToString(",") { "${it.side}:${it.text.length}" })
         if (snapshot.messages.isEmpty()) {
-            if (manual) overlay?.showError("这一屏没认出文字")
+            if (manual || blockAnalysis) overlay?.showError(snapshot.note ?: "这一屏没认出文字")
             return
         }
         if (!prefs.isAllowed(snapshot.title)) { leaveConversation(); overlay?.hide(); return }
@@ -1180,6 +1260,10 @@ open class ChatCaptureService : AccessibilityService() {
         if (pkg.isNotEmpty() && pkg != activePkg) { activePkg = pkg; lastSignature = "" }
         currentSnapshot = snapshot
         overlay?.setApp(pkg.ifEmpty { null })
+        if (blockAnalysis) {
+            overlay?.showError(snapshot.note ?: WECHAT_VOICE_TRANSCRIPT_NOTE)
+            return
+        }
         val sig = snapshot.signature()
         // Manual taps always re-run; the automatic path dedupes like the tree path.
         if (!manual && sig == lastSignature) {
@@ -1318,6 +1402,8 @@ open class ChatCaptureService : AccessibilityService() {
          * [WeChatBubbles] instead — see [maybeCaptureWeChat].
          */
         private const val WECHAT_PKG = "com.tencent.mm"
+        private const val WECHAT_VOICE_TRANSCRIPT_NOTE =
+            "微信语音尚未转成可识别文字。请长按语音消息，选择“转文字”后再分析；助手不会读取或上传语音音频。"
 
         /**
          * Floor between two automatic WeChat screenshots. WeChat fires content

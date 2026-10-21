@@ -167,7 +167,7 @@ class SettingsActivity : AppCompatActivity() {
             if (judgeProtoChat) 1 else 0
         ) { i -> judgeProtoChat = i == 1 }
 
-        judgeCard.addView(pills(
+        judgeCard.addView(wrappedPills(
             listOf("OpenRouter", "博查 Jev", "TypeSafe 直连", "Vercel", "OpenCode Zen", "DeepSeek 官方", "自定义"), judgeProviderIdx) { idx ->
             judgeProviderIdx = idx
             when (idx) {
@@ -981,6 +981,53 @@ class SettingsActivity : AppCompatActivity() {
     /** Horizontal selectable pills; calls [onPick] with the chosen index. */
     private fun pills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View =
         pillRow(options, initial, onPick).first
+
+    /** Two-column selectable pills so presets remain visible on a phone screen. */
+    private fun wrappedPills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View {
+        var selected = initial
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val views = ArrayList<TextView>()
+        options.forEachIndexed { index, option ->
+            val pill = TextView(this).apply {
+                text = option
+                textSize = 12.5f
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(9), dp(8), dp(9))
+                layoutParams = LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                ).apply { leftMargin = dp(3); rightMargin = dp(3) }
+                setOnClickListener {
+                    selected = index
+                    views.forEachIndexed { viewIndex, view -> paintPill(view, viewIndex == selected) }
+                    onPick(index)
+                }
+            }
+            views.add(pill)
+        }
+        options.indices.step(2).forEach { start ->
+            rows.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(views[start])
+                if (start + 1 < views.size) {
+                    addView(views[start + 1])
+                } else {
+                    addView(View(this@SettingsActivity).apply {
+                        layoutParams = LinearLayout.LayoutParams(0, 1, 1f).apply {
+                            leftMargin = dp(3)
+                            rightMargin = dp(3)
+                        }
+                    })
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(6) }
+            })
+        }
+        views.forEachIndexed { index, view -> paintPill(view, index == selected) }
+        return rows
+    }
 
     /**
      * [pills] plus a programmatic selector. One row has to be able to drive

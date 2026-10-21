@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">小助手</string>
+    <string name="a11y_service_name">小助手 - 聊天读取服务</string>
     <string name="a11y_desc">读取当前聊天窗口文字，用于生成回复建议。不会自动发送消息。</string>
     <!-- 框架设置页里显示的模块说明。只描述能力，不承诺安全：风险原文在
          App 自己的设置页里逐条呈现（见 SettingsActivity 的「注入增强」段）。 -->
