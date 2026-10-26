@@ -82,6 +82,8 @@ object ReplyReview {
         }
         val judgmentText = ReplyPrompt.judgmentBlock(judgment)
         if (judgmentText.isNotBlank()) sb.append(judgmentText)
+        // 调用方传进来的 relationship 必须已经是 effectiveRelationship 的结果：
+        // 复查和起草要看到同一段关系，第 3 条标准才成立。
         sb.append("关系：").append(relationship).append("\n\n")
         sb.append("最近对话：\n").append(convo.trim()).append("\n\n")
         sb.append("候选回复：\n")

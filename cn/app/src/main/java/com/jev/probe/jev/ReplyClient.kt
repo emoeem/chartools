@@ -11,6 +11,7 @@ import com.jev.probe.core.kb.DomainBrief
 import com.jev.probe.core.kb.Ledger
 import com.jev.probe.core.kb.LedgerPrompt
 import com.jev.probe.core.kb.PersonaCard
+import com.jev.probe.core.kb.effectiveRelationship
 import com.jev.probe.core.safety.SafetyBlockedException
 import com.jev.probe.core.safety.SafetyGate
 import org.json.JSONArray
@@ -113,11 +114,12 @@ class ReplyClient(private val prefs: Prefs) {
         ctx: ChatContext? = null,
         count: Int = 3,
         avoid: List<String> = emptyList(),
+        judgment: Analysis? = null,
         style: String = prefs.style,
         intensity: Intensity = Intensity.AUTO,
         scope: HttpScope? = null
     ): List<RankedReply> =
-        draft(snapshot, relationship, ctx, count, avoid, judgment = null, style = style,
+        draft(snapshot, relationship, ctx, count, avoid, judgment = judgment, style = style,
             intensity = intensity, scope = scope)
             .map { it.copy(ranked = false, prob = 0.0) }
 
@@ -223,7 +225,9 @@ class ReplyClient(private val prefs: Prefs) {
             prefs.effectiveReviewKey(),
             prefs.effectiveReviewModel(),
             ReplyReview.system(candidates.size),
-            ReplyReview.user(relationship, convo, judgment, ctx?.ledger, candidates, card),
+            // 关系先过 effectiveRelationship：复查和起草要看到同一段关系
+            // （联系人自己的关系压过全局），第 3 条标准才不是各说各话。
+            ReplyReview.user(ctx.effectiveRelationship(relationship), convo, judgment, ctx?.ledger, candidates, card),
             temperature = 0.0,
             scope = scope
         )
@@ -324,11 +328,15 @@ class ReplyClient(private val prefs: Prefs) {
         val user = ReplyPrompt.draftUserPrompt(
             relationship, ctx, prefs.contextHistoryCount, judgment,
             card, verdict.caution, convo, avoid, n, intensity)
+        // 档位解析一次、两处共用：system 的策略契约和 user 的档位块必须拿到
+        // 同一个结果，否则会出现「必须推进」和「不要推进」同场。
+        val resolvedIntensity = Intensity.resolve(intensity, judgment)
         return Ask(
-            system = ReplyPrompt.draftSystemPrompt(n, prefs.replyLanguage, prefs.replyLength, card),
+            system = ReplyPrompt.draftSystemPrompt(n, prefs.replyLanguage, prefs.replyLength, card, resolvedIntensity),
             user = ReplyPrompt.skillNote(ctx) + user,
-            temperature = if (avoid.isEmpty()) prefs.replyTemperature
-            else (prefs.replyTemperature + 0.1).coerceAtMost(1.5),
+            // 用户设的温度就是温度：跨轮 avoid 现在几乎每轮非空，旧的「avoid
+            // 非空就 +0.1」等于全局偷偷调参，反重复交给 avoid 文本和复查兜着。
+            temperature = prefs.replyTemperature,
             count = n,
             frequencyPenalty = prefs.replyFrequencyPenalty,
             presencePenalty = prefs.replyPresencePenalty

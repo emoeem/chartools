@@ -59,4 +59,15 @@ class IntensityTest {
     fun labelsCoverEveryEntry() {
         Intensity.entries.forEach { assertTrue(it.label.isNotBlank()) }
     }
+
+    @Test
+    fun resolveKeepsManualChoicesAndMapsAuto() {
+        // 手选原样、自动按判断映射——system 策略契约和 user 档位块共用这一个
+        // 解析，各算各的就会出现「必须推进」和「不要推进」同场。
+        val tense = judgment(danger = 7.0)
+        assertEquals(Intensity.SOFT, Intensity.resolve(Intensity.AUTO, tense))
+        assertEquals(Intensity.SOFT, Intensity.resolve(Intensity.SOFT, null))
+        assertEquals(Intensity.FORWARD, Intensity.resolve(Intensity.FORWARD, tense))
+        assertEquals(Intensity.NATURAL, Intensity.resolve(Intensity.AUTO, null))
+    }
 }

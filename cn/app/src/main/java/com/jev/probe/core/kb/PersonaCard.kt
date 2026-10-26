@@ -10,6 +10,7 @@ package com.jev.probe.core.kb
  * 语气：克制、短句，不解释
  * 语域：亲密
  * 硬边界：不要提家人、不要留痕
+ * 避谈：稳赚
  * 安全词：红灯
  * 示例：
  * 我：今天想你了
@@ -52,6 +53,14 @@ data class PersonaCard(
     val topic: String = "",
     /** Hard limits, already split and expanded — see [splitBoundaries]. */
     val boundaries: List<String> = emptyList(),
+    /**
+     * 避谈词：**不许出现在我的回复里**，但和 [boundaries] 是两种东西——
+     * 硬边界是「对方一提就停整轮」（SafetyGate 逐字拦对方的消息），避谈只是
+     * 约束我方措辞（比如销售的「稳赚」「保证收益」：客户问「能稳赚吗」要照常
+     * 回应，只是不许替用户许下这个承诺）。混在一个键里时，避谈词会被当成
+     * 硬边界去拦对方——恰好在最需要回复的一轮把候选掐掉。
+     */
+    val avoid: List<String> = emptyList(),
     val safeword: String = "",
     /**
      * 交通灯里的黄灯：对方打出时要**减速确认**，不是停止——红灯仍然只归
@@ -92,6 +101,11 @@ data class PersonaCard(
             sb.append("硬边界（这些内容绝不可以出现在回复里）：")
                 .append(boundaries.joinToString("、")).append('\n')
         }
+        if (avoid.isNotEmpty()) {
+            sb.append("避谈（这些词不要出现在我的回复里，也不许换种说法向对方许诺；")
+                .append("对方主动提到时照常回应这件事，只是不替对方展开、不顺着写）：")
+                .append(avoid.joinToString("、")).append('\n')
+        }
         if (safeword.isNotBlank()) sb.append("安全词：").append(safeword).append('\n')
         if (yellow.isNotBlank()) {
             sb.append("黄灯：").append(yellow)
@@ -123,6 +137,7 @@ data class PersonaCard(
             "scene" to listOf("情境", "场景", "设定", "scene", "scenario", "setting"),
             "topic" to listOf("主题", "领域", "话题", "topic", "domain", "subject"),
             "boundaries" to listOf("边界", "硬边界", "底线", "禁忌", "limits", "hardlimits", "limit"),
+            "avoid" to listOf("避谈", "回避", "avoid"),
             "safeword" to listOf("安全词", "safeword"),
             "yellow" to listOf("黄灯", "yellow"),
             "extra" to listOf("补充", "其他", "备注", "extra", "note", "notes"),
@@ -156,6 +171,7 @@ data class PersonaCard(
 
             val scalars = HashMap<String, String>()
             val boundaries = ArrayList<String>()
+            val avoid = ArrayList<String>()
             val examples = ArrayList<String>()
             val extra = ArrayList<String>()
 
@@ -179,6 +195,7 @@ data class PersonaCard(
                 val value = cut.second.trim()
                 when (field) {
                     "boundaries" -> boundaries += splitBoundaries(value)
+                    "avoid" -> avoid += splitBoundaries(value)
                     "register" -> scalars[field] = value
                     "examples" -> Unit
                     else -> scalars[field] =
@@ -189,7 +206,7 @@ data class PersonaCard(
             // A recognised *key* is what makes this a card. Example lines alone are
             // not enough, or a free-form note that happens to contain "我：..." would
             // silently change shape.
-            val structured = scalars.isNotEmpty() || boundaries.isNotEmpty()
+            val structured = scalars.isNotEmpty() || boundaries.isNotEmpty() || avoid.isNotEmpty()
             if (!structured) return PersonaCard(raw = text)
 
             return PersonaCard(
@@ -200,6 +217,7 @@ data class PersonaCard(
                 topic = scalars["topic"].orEmpty(),
                 scene = scalars["scene"].orEmpty(),
                 boundaries = boundaries,
+                avoid = avoid,
                 safeword = scalars["safeword"].orEmpty(),
                 yellow = scalars["yellow"].orEmpty(),
                 examples = examples,

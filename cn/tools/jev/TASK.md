@@ -1,6 +1,8 @@
 # 任务：搭 Jev 判断层的题目集 + 校准脚手架（Python，PC 上跑）
 
-你在 `H:\ai_tool\jev-android`。**先读 `CLAUDE.md` 和 `docs/acceptance.md`**，里面有硬约束和验收标准。
+> **历史任务书（v1.3 时期）。** 脚手架本身仍在用（`tools/jev/`）；当前版本 2.0，功能以[功能介绍](../../docs/feature-guide.md)为准。文中 `H:\ai_tool\jev-android` 是当时的 Windows 构建机路径；本机仓库在 `/home/emo/code/chartools/cn`。
+
+你在仓库根目录（本机 `/home/emo/code/chartools/cn`，Windows 构建机 `H:\ai_tool\jev-android`）。**先读 `CLAUDE.md` 和 `docs/acceptance.md`**，里面有硬约束和验收标准。
 
 ## 背景
 

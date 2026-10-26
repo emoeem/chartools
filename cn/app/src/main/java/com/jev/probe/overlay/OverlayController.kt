@@ -87,6 +87,13 @@ class OverlayController(private val ctx: Context) {
     var onRegenerate: (() -> Unit)? = null
 
     /**
+     * 手动「生成」：用户明确要一次候选，不依赖自动触发。与 [onRegenerate] 的区别
+     * 只在入口动机——服务层会先判断手里有没有快照、要不要先抓一次屏幕，最后
+     * **一定**给一个可见结果（生成 / 先识别 / 一句原因）。
+     */
+    var onManualGenerate: (() -> Unit)? = null
+
+    /**
      * "再给 2 条": keep the candidates already on the card and add two more to the
      * bottom. Different from [onRegenerate], which throws the current set away —
      * when two of the three are nearly right, redrafting all three loses them.
@@ -315,7 +322,18 @@ class OverlayController(private val ctx: Context) {
         }
         val status = TextView(ctx).apply { textSize = 12f; setTextColor(Color.parseColor("#9CA3AF")); setPadding(0, 0, dp(6), 0) }
         val chev = TextView(ctx).apply { textSize = 15f; setTextColor(Color.parseColor("#6B7280")) }
-        header.addView(pill); header.addView(head); header.addView(status); header.addView(chev)
+        // 手动「生成」常驻 header 右上角。之所以不放在 body 的 footer 里：footer 在
+        // 可滚动区底部，QQ 里键盘一顶、候选一多，它就滚到屏幕外——用户看到的现象
+        // 就是「重新生成点不到」。header 永远在第一行，拖到哪都在。
+        val regenBtn = TextView(ctx).apply {
+            text = "↻"; textSize = 17f; setTextColor(Palette.brand())
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(8), 0, dp(2), 0)
+            contentDescription = "手动重新生成"
+            setOnClickListener { onManualGenerate?.invoke() }
+        }
+        header.addView(pill); header.addView(head); header.addView(status)
+        header.addView(chev); header.addView(regenBtn)
         attachDrag(header, widthPx = { cardW }, onTap = { onHeaderTap() }) { x, y ->
             app?.let { prefs.saveCardPosition(it, x, y) }
             if (expanded) applyBodyMaxHeight()
@@ -414,6 +432,9 @@ class OverlayController(private val ctx: Context) {
             layoutParams = FrameLayout.LayoutParams(dp(196), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = top }
         }
         menu.addView(menuItem("截屏识别一次") { dismissMenu(); onOcrCapture?.invoke() })
+        // 手动生成：长按是最容易被记住的入口，尤其在 header 那枚 ↻ 被系统/键盘
+        // 挡住的时候。
+        menu.addView(menuItem("重新生成候选（手动）") { dismissMenu(); onManualGenerate?.invoke() })
         menu.addView(menuItem(if (appAutoEnabled) "这个应用不再自动分析" else "恢复这个应用的自动分析") {
             dismissMenu(); onToggleAppAuto?.invoke()
         })
@@ -647,6 +668,22 @@ class OverlayController(private val ctx: Context) {
         repliesWaiting = false
         moreWaiting = false
         stopTickerIfIdle()
+        render()
+    }
+
+    /**
+     * 服务侧一轮已经收尾（正常落地、被丢弃、或超时兜底）：把等待态收干净。
+     *
+     * 只在确实还在等待时才重建 body —— 正常落地走的是 [showReplies]，它自己
+     * 已经清过 waiting，这里不该再多画一次。
+     */
+    fun stopRoundWaiting() {
+        if (!judgeWaiting && !repliesWaiting) return
+        judgeWaiting = false
+        repliesWaiting = false
+        moreWaiting = false
+        streamText = null
+        stopTicker()
         render()
     }
 

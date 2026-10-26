@@ -6,13 +6,13 @@
 
 **A conversation copilot for your phone. Jev works alongside your chat apps, helps you understand what the other person means, and suggests what to say next. Tap to fill in a reply. You decide whether to send it.**
 
-> **This is a local fork built on Jev Chat Assistant second-hand** (package `com.jev.probe`, currently v1.8). It is **not the upstream repository and not the original authors' release**, it is only built and used locally, and it publishes no APK. Upstream: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis). Credit is given as [NOTICE](../NOTICE) requires; upstream names and domains are not used to imply endorsement by the original authors.
+> **This is a local fork built on Jev Chat Assistant** (package `com.jev.probe`, currently 2.0 in development). It is **not the upstream repository and not the original authors' release**; it is only built and used locally, and it publishes no APK. Upstream: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis). Credit is given as [NOTICE](../NOTICE) requires; upstream names and domains are not used to imply endorsement by the original authors.
 
-[![Version](https://img.shields.io/badge/Version-v1.8-1f6feb?style=flat-square)](../cn/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-2.0%20dev-1f6feb?style=flat-square)](../cn/CHANGELOG.md)
 [![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#quick-start)
 [![License](https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square)](../LICENSE)
 
-[Upstream website](https://chatjevs.com) · [Upstream setup guide](https://chatjevs.com/guides/android-setup.html) · [Changelog](../cn/CHANGELOG.md) · [Upstream macOS](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Upstream Windows](https://github.com/jev-chat/jev-chat-windows)
+[Full feature guide (Chinese)](../cn/docs/feature-guide.md) · [Changelog (Chinese)](../cn/CHANGELOG.md) · [Contributors](CONTRIBUTORS.md) · [Upstream website](https://chatjevs.com) · [Upstream setup guide](https://chatjevs.com/guides/android-setup.html) · [Upstream macOS](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Upstream Windows](https://github.com/jev-chat/jev-chat-windows)
 
 [简体中文](README.md) · **English** · [Tiếng Việt](README.vi.md)
 
@@ -20,10 +20,13 @@
 
 ## What this branch changes
 
-This branch keeps developing on top of upstream v1.7, and all of that work lives in this repository. The full list is in the unreleased sections of the [changelog](../cn/CHANGELOG.md) (in Chinese):
+This branch keeps developing on top of upstream v1.7, and all of that work lives in this repository. The full list is in the unreleased sections of the [changelog](../cn/CHANGELOG.md) (in Chinese); the complete feature description is in the [feature guide](../cn/docs/feature-guide.md) (also in Chinese):
 
 - **Capture layer:** new Telegram and TIM adapters; WeChat runs on a read-only "screenshot + on-device OCR" path (bubble colour decides the sides); OCR grouping, speaker attribution, and recent-reply dedup.
 - **Knowledge base:** on-device document import (PDF / Word / EPUB / web pages; scanned files fall back to on-device OCR), skill packs (Agent Skills, matched against the conversation), contact profiles and ledgers.
+- **Persona library:** personas are now a user-managed library (create / rename / duplicate / delete / import / export / restore built-ins) instead of three hard-coded templates, with per-contact personas and keys for topic, hard limits, "avoid saying", safeword, amber light and example lines.
+- **Manual generate:** a regenerate control on the card header, in the long-press menu and in the persistent notification; it re-drafts from the current snapshot, captures the screen first when there is none, and says why when neither is possible; a round stuck for more than 8 seconds can be taken over manually.
+- **Reply naturalness (P0):** the first draft is now written *after* the assessment (with a 2-second blind-draft fallback); relationship resolution is "contact relationship over global"; the candidate strategy contract is count-aware (asking for 2 candidates no longer demands 3 strategies); a new "avoid" persona key separates "stop the round when the other person mentions it" from "never say it in my reply"; low-confidence assessments are downgraded to a hint instead of stated as fact.
 - **Optional injection layer:** read-only enhancements through LSPosed / Vector — off by default, enabled per app, and falling back to the accessibility path (with the reason noted in Trace) the moment it cannot read.
 - **Context and memory:** reply context window 10 → 20 messages; knowledge-base hit threshold fix (a single skill pack used to be mathematically unreachable); an explicit hint on the card when memory is not active.
 - **UI:** edge-snapping bubble capsule, tiered candidate and judgement cards with collapsible details, grouped settings page, intensity presets (auto / hold back / natural / push).
@@ -51,8 +54,11 @@ The upstream authors were not involved in these changes and do not endorse them;
 | X / Twitter DMs | Full workflow supported | Parses `content-desc` on Compose nodes | Tested with version 12.25 in Chinese; the English UI has not been verified |
 | Feishu / Lark | OCR fallback verified on a real device | Reads message bubble bounds through accessibility, then extracts text with offline ML Kit OCR | Message text is custom-rendered and absent from the accessibility tree. Since v1.3, each bubble is processed with OCR; read status is used to identify the sender |
 | WhatsApp | One-to-one chats (beta) | Accessibility nodes | One-to-one chats only; group chats are not read and WhatsApp is never screenshotted; replies follow the language of the other person's latest message. Reading rules by [@smgonthebeat](https://github.com/smgonthebeat) (#73), verified against WhatsApp 2.26.38.73 recordings |
+| Telegram | Full workflow supported | Accessibility nodes | Tested with 12.10.1 (versionCode 70382): each row carries "nickname / body / status line", and the sender is decided by the status verb (`已发送` = you, `已收到` = the other person), so a UI language other than Chinese or English cannot determine sides; the chat page is detected by the bottom input box (y ≥ 60% of screen height), and chat lists / topic pages do not show the card |
+| WeChat | Full workflow supported (OCR) | Screenshot + on-device OCR | Tested with 8.0.78: WeChat exposes no accessibility tree to third parties (the whole tree is a single empty `bounds="[0,0][0,0]"` node), so it can only read the screen. Screenshot → split sides by bubble fill colour (green = you, grey = the other person; your own image/file cards are grey, with right-avatar overlap as fallback) → ML Kit Chinese OCR. Only the dark theme was tested; skins and backgrounds are unverified |
 | Any other app | Manual capture supported | Full-screen OCR via "Scan screen once" in the overlay menu | Manual only; all text is treated as coming from the other person, with a notice in the panel |
-| Desktop / web | Planned | Screenshots with OCR / vision | Same core, different capture method |
+| macOS / Windows | Separate upstream projects | See each repository | [macOS](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Windows](https://github.com/jev-chat/jev-chat-windows) |
+| Web | Planned | — | No web version yet |
 
 Jev only reads conversations on your own device that you are authorized to view. It is not designed to target any particular platform.
 
@@ -75,7 +81,7 @@ The original upstream release APK lives in the upstream repository's [Releases](
 
 **3. Enable permissions.** Follow the guide on the home screen to enable:
 
-- Accessibility, to read messages. After upgrading to v1.3 or later, toggle the accessibility service off and back on to enable screenshot capture.
+- Accessibility, to read messages. After installing or upgrading this build, toggle the accessibility service off and back on once so the screenshot capability is picked up.
 - Display over other apps, to show the analysis overlay.
 - Autostart and unrestricted battery usage. Both are essential on Xiaomi / HyperOS; otherwise, the system may freeze Jev in the background and prevent it from reading messages.
 
@@ -248,10 +254,10 @@ cd cn
 
 ## Copyright and License
 
-Upstream copyright © 2026 Finderchangchang and the jev-chat contributors. The code is available under the [MIT License](../LICENSE). See also [NOTICE](../NOTICE). **This repository is a derivative fork of that project** (local use, package `com.jev.probe`, version v1.8); the upstream authors took no part in, and do not endorse, any of the changes in this fork.
+Upstream copyright © 2026 Finderchangchang and the jev-chat contributors. The code is available under the [MIT License](../LICENSE). See also [NOTICE](../NOTICE). **This repository is a derivative fork of that project** (local use, package `com.jev.probe`, version 2.0 in development); the upstream authors took no part in, and do not endorse, any of the changes in this fork.
 
 - **Commercial use is allowed:** Individuals and companies may use, modify, redistribute, or integrate the code into their own products without payment or prior permission.
 - **Attribution is required:** Keep LICENSE and NOTICE when distributing or using the project commercially, and credit the source in your product's About page, documentation, or release page. Suggested wording: `Based on Jev Chat Assistant (https://github.com/jev-chat/jev-chat-jarvis)`.
 - Do not use the names "Jev Chat Assistant" ("Jev 聊天助手") or "jev-chat", or the domain chatjevs.com, to imply that your product was made or endorsed by the original authors.
 
-**Disclaimer:** This project only processes conversations on your own device that you are authorized to view. Follow the terms of service of QQ, X, Feishu, WhatsApp, and any other apps you use, as well as applicable local laws and regulations. The authors accept no responsibility for the consequences of its use.
+**Disclaimer:** This project only processes conversations on your own device that you are authorized to view. Follow the terms of service of QQ, X, Feishu, WhatsApp, and any other apps you use, as well as applicable local laws and regulations. The maintainers of this fork accept no responsibility for the consequences of its use.

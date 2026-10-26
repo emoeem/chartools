@@ -1,5 +1,6 @@
 package com.jev.probe.core.kb
 
+import com.jev.probe.core.safety.SafetyGate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -32,15 +33,54 @@ class PersonaPresetsTest {
             assertTrue("「$name」缺少关系", card.relation.isNotBlank())
             assertTrue("「$name」缺少语气", card.tone.isNotBlank())
             assertTrue("「$name」缺少主题", card.topic.isNotBlank())
-            // 硬边界必须拆成闸门能逐字匹配的关键词。写成整句「不要提家人」时
-            // 拆出来的仍是「家人」，但若模板写成散文就成了死条目。
-            assertTrue("「$name」硬边界没拆出关键词", card.boundaries.isNotEmpty())
+            // 硬边界/避谈不要求每张都有——日常卡就该一张约束都不带（家人/工作
+            // 写成硬边界会拦掉朋友的最普通的话）。各卡的具体约束面由
+            // dailyAndSalesPresetsDoNotBlockOrdinaryMentions 和
+            // theRoleplayPresetsOpenTheRegisterAndTheDailyOneDoesNot 分别钉。
             assertTrue("「$name」没有语气样例", card.examples.isNotEmpty())
 
             val prompt = card.promptText()
             assertTrue(prompt, prompt.contains("主题："))
-            assertTrue(prompt, prompt.contains("硬边界"))
+            if (card.boundaries.isNotEmpty()) assertTrue(prompt, prompt.contains("硬边界"))
+            if (card.avoid.isNotEmpty()) assertTrue(prompt, prompt.contains("避谈"))
         }
+    }
+
+    /**
+     * 2026-10-22 修正的回归锁：日常卡的旧写法「硬边界：家人、工作」和销售卡的
+     * 「硬边界：稳赚、保证收益」都会在**对方**那条消息里出现这些词时掐掉整轮
+     * 候选——朋友说一句「最近工作好累」、客户问一句「能稳赚吗」，恰好是最需要
+     * 回复的一轮。这些词现在要么删掉（日常），要么挪进避谈（销售，只约束我方
+     * 措辞）。闸门仍然认网调卡的家人/前任——那是真的「对方一提就该停」。
+     */
+    @Test
+    fun dailyAndSalesPresetsDoNotBlockOrdinaryMentions() {
+        val byName = PersonaPresets.ALL.toMap()
+
+        val daily = PersonaCard.parse(byName.getValue("日常"))
+        assertTrue("日常卡不该再有硬边界", daily.boundaries.isEmpty())
+        assertFalse(
+            SafetyGate.check(listOf("最近工作好累，家里事也多"), daily).blocked
+        )
+
+        val sales = PersonaCard.parse(byName.getValue("销售·跟单"))
+        assertTrue("销售卡的稳赚/保证收益应该是避谈不是硬边界", sales.avoid.contains("稳赚"))
+        assertTrue(sales.avoid.contains("保证收益"))
+        assertTrue("销售卡不该再有硬边界", sales.boundaries.isEmpty())
+        assertFalse(
+            "客户问收益不该掐掉整轮",
+            SafetyGate.check(listOf("这个项目能稳赚吗？保证收益吗"), sales).blocked
+        )
+        // 避谈真的进提示词：模型被明说这两个词不许出现在回复里。
+        assertTrue(sales.promptText(), sales.promptText().contains("避谈"))
+        assertTrue(sales.promptText(), sales.promptText().contains("稳赚"))
+
+        val roleplay = PersonaCard.parse(byName.getValue("网调·我是主"))
+        assertTrue("网调卡的家人仍是硬边界", roleplay.boundaries.contains("家人"))
+        assertTrue(
+            "网调场景对方提家人仍然要拦",
+            SafetyGate.check(listOf("说起我家人"), roleplay).blocked
+        )
     }
 
     @Test

@@ -30,6 +30,14 @@ enum class Intensity {
             entries.firstOrNull { it.name == name } ?: AUTO
 
         /**
+         * 档位的最终生效值：手选档原样，自动档按判断结果映射。
+         * system 提示词的策略契约和 user 提示词的档位块都必须用同一个
+         * 解析结果——两边各算各的就会一个说「必须推进」一个说「不要推进」。
+         */
+        fun resolve(mode: Intensity, judgment: Analysis?): Intensity =
+            if (mode == AUTO) auto(judgment) else mode
+
+        /**
          * 「自动」档的判断结果 → 档位映射。判断为 null（会话第一轮、或起草
          * 没等到判断）时退回自然 —— 没有证据就不偏移默认行为。
          */

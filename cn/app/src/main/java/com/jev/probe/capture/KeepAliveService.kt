@@ -33,12 +33,19 @@ class KeepAliveService : Service() {
             this, 1,
             Intent(this, ChatCaptureService::class.java).setAction(ACTION_SUMMON),
             android.app.PendingIntent.FLAG_IMMUTABLE)
+        // 「重新生成」兜底：卡片被聊天键盘顶住、胶囊被拖到屏幕边缘时，这是最后
+        // 一个一定能按到的手动入口——不经过悬浮窗，直接让服务生成一次。
+        val regenerate = android.app.PendingIntent.getService(
+            this, 2,
+            Intent(this, ChatCaptureService::class.java).setAction(ACTION_GENERATE),
+            android.app.PendingIntent.FLAG_IMMUTABLE)
         val notif: Notification = Notification.Builder(this, channelId)
             .setContentTitle("小助手运行中")
             .setContentText("在聊天旁读消息、给回复建议")
             .setSmallIcon(android.R.drawable.ic_menu_edit)
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "唤出助手", summon).build())
+            .addAction(Notification.Action.Builder(null, "重新生成", regenerate).build())
             .build()
         startForeground(1, notif)
     }
@@ -50,6 +57,9 @@ class KeepAliveService : Service() {
     companion object {
         /** 通知「唤出助手」的动作；[ChatCaptureService.onStartCommand] 消费。 */
         const val ACTION_SUMMON = "com.jev.probe.action.SUMMON_OVERLAY"
+
+        /** 通知「重新生成」的动作；同样由 [ChatCaptureService.onStartCommand] 消费。 */
+        const val ACTION_GENERATE = "com.jev.probe.action.GENERATE_REPLIES"
 
         fun start(ctx: Context) {
             val i = Intent(ctx, KeepAliveService::class.java)

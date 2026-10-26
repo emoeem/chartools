@@ -1,13 +1,23 @@
 # 验收标准（公共尺子）
 
-所有任务以此为准。**建者不自证，贴真实输出。**
+所有任务以此为准。**建者不自证，贴真实输出。** 当前版本 2.0；功能以[功能介绍](feature-guide.md)为准。
 
-## A. 构建
+## A. 构建与单测
+
+本机（Linux，仓库 `/home/emo/code/chartools/cn`）：
 
 ```
-H:\ai_tool\jev-android\gradlew.bat assembleDebug
+cd /home/emo/code/chartools/cn
+bash gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
-零 error。产物 `app/build/outputs/apk/debug/app-debug.apk` 存在。
+
+Windows 构建机（历史路径）：
+
+```
+H:\ai_tool\jev-android\gradlew.bat :app:testDebugUnitTest assembleDebug
+```
+
+单测 0 失败、构建零 error。产物 `app/build/outputs/apk/debug/app-debug.apk` 存在。新增 / 修改行为必须带 JVM 单测；Android 框架接线（Handler、Service、悬浮窗）单测覆盖不到的，要在报告里写明真机验证结果或缺口。
 
 ## C. Jev 判断层
 

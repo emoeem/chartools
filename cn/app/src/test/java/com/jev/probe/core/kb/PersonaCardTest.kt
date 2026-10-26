@@ -179,4 +179,29 @@ class PersonaCardTest {
         val bare = PersonaCard.parse("关系：主奴\n安全词：红灯")
         assertFalse(bare.promptText(), bare.promptText().contains("黄灯："))
     }
+
+    /**
+     * 避谈是和硬边界并列的独立键：硬边界逐字拦**对方**的消息（SafetyGate），
+     * 避谈只约束**我方**措辞（提示词）。混在一个键里时，销售的「稳赚」会被
+     * 当成硬边界去拦客户的问题——恰好在最需要回复的一轮把候选掐掉。
+     */
+    @Test
+    fun avoidIsItsOwnFieldAndNeverReachesTheGate() {
+        val card = PersonaCard.parse("关系：销售和客户\n避谈：稳赚、保证收益")
+        assertTrue(card.structured)
+        assertTrue(card.avoid.toString(), card.avoid.contains("稳赚"))
+        assertTrue(card.avoid.toString(), card.avoid.contains("保证收益"))
+        // 避谈绝不进硬边界——那是闸门的字段。
+        assertTrue(card.boundaries.isEmpty())
+        val prompt = card.promptText()
+        assertTrue(prompt, prompt.contains("避谈"))
+        assertTrue(prompt, prompt.contains("不许换种说法向对方许诺"))
+        // 避谈里的词对方说了不拦轮：这是它与硬边界的本质区别。
+        assertFalse(
+            com.jev.probe.core.safety.SafetyGate.check(
+                listOf("这个能稳赚吗？保证收益吗"), card).blocked
+        )
+        // 只写避谈一行也算结构化卡（键认出来了）。
+        assertTrue(PersonaCard.parse("避谈：稳赚").structured)
+    }
 }

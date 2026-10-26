@@ -1,6 +1,8 @@
 # Jev 聊天助手（安卓）— 全平台非侵入对话副驾
 
-挂在聊天 App 旁边（QQ、飞书、X、WhatsApp 已适配）的非侵入式助手：读到对方最新消息 → 调 Jev 判断 → 悬浮窗给出分析和 3 条候选回复（Jev 排序）→ 人一键填入输入框。**发送永远由人手动点，程序不自动发。**
+挂在聊天 App 旁边（QQ、TIM、Telegram、微信、飞书、X、WhatsApp 已适配）的非侵入式助手：读到对方最新消息 → 先判断局势 → 悬浮窗给出分析和候选回复（判断排序）→ 人一键填入输入框。**发送永远由人手动点，程序不自动发。**
+
+> **当前状态（2026-10-22）**：版本 2.0 开发中。完整功能见 [docs/feature-guide.md](docs/feature-guide.md)，逐版改动见 [CHANGELOG.md](CHANGELOG.md)。回复自然度 P0（先判后写 / 关系优先级 / n 感知策略契约 / 避谈键）已落地，报告在 `_reports/reply-naturalness-p0_report.md`。
 
 ## 硬约束（所有人必须遵守）
 
@@ -12,8 +14,8 @@
 2. **绝不自动发送消息**，绝不点任何 App 的发送按钮。填入输入框后停手。
 3. **只读目标 App 正常开放给无障碍服务的内容**：服务类名用本项目自己的包名；`accessibility_service_config.xml` 不加 `isAccessibilityTool`（本 App 不是辅助功能工具）；目标 App 隐藏控件树或开了防截屏，就视为不支持。
 4. **不碰钱**：不触碰转账、红包、收款码相关任何界面元素。
-5. **路径全 ASCII**：Android 构建工具在 Windows 上不接受中文路径。项目只能在 `H:\ai_tool\jev-android`。
-6. **密钥不落盘、不进日志、不进 git**：OpenRouter key 从环境变量 `OPENROUTER_API_KEY` 读，或 App 加密设置项。任何文件里都不许出现 `sk-or-` 开头的字符串。
+5. **路径全 ASCII**：Android 构建工具不接受中文路径。本机仓库在 `/home/emo/code/chartools/cn`；Windows 构建机沿用 `H:\ai_tool\jev-android`。两处路径都只含 ASCII。
+6. **密钥不落盘、不进日志、不进 git**：OpenRouter key 从环境变量 `OPENROUTER_API_KEY` 读，或 App 加密设置项（Keystore AES-GCM）。任何文件里都不许出现 `sk-or-` / `sk-` 开头的真实密钥。
 7. 编码一律 UTF-8。Windows 中文环境下 PowerShell 用 pwsh 7+，Python 读写文件必须显式 `encoding='utf-8'`。
 8. 禁止 `git commit` / `git push`，由人拍板。
 
@@ -21,7 +23,7 @@
 
 - Kotlin，传统 View + XML，**不用 Compose**
 - minSdk 30，compileSdk / targetSdk 35
-- JDK 17（`H:\android\jdk`），Android SDK 在 `H:\android\sdk`，Gradle 缓存 `H:\android\gradle-home`
+- JDK 17+；本机 Android SDK 在 `/home/emo/android-sdk`（Gradle 用 `cn/local.properties` 的 `sdk.dir`）；Windows 构建机 JDK/SDK 在 `H:\android\jdk` / `H:\android\sdk`，Gradle 缓存 `H:\android\gradle-home`
 - 目标机（2026-10-06 实测）：OPPO PJE110 / Android 16 (SDK 36) / 1200×2670；KernelSU root 可用（`su -c id` → `context=u:r.ksu:s0`），注入框架 = **Vector 2.2**（LSPosed 现代分支，API 102，兼容旧 `de.robv.android.xposed` API），框架 CLI 在 `/data/adb/lspd/cli`（`modules enable|disable|ls` / `scope add|ls|rm`，支持 `--json`），设备**没有 `sqlite3`**。历史目标机：小米 14（houji / 23127PN0CC），HyperOS 3.0 / Android 16。
 - 模型客户端分三路：`jev/JudgeClient`（判断）、`jev/ReplyClient`（回复）、`jev/VisionClient`（视觉，OCR 用），共用 `jev/HttpJson`；配置在 `core/Prefs`（`judge*` / `reply*` / `vision*` 字段），旧密钥一次性迁移，标记位 `prefs_migrated_v13`。
 - ML Kit `com.google.mlkit:text-recognition-chinese:16.0.1`（bundled，不是 play-services 版），`ndk.abiFilters` 只留 `arm64-v8a`。
@@ -51,11 +53,23 @@
 |---|---|---|
 | `app/`、`gradle/`、gradle 文件 | Android 构建方 | 国内版安卓工程，在本目录（`cn/`）跑 `./gradlew` |
 | `tools/jev/` | Jev 判断方 | Python 题目集与校准脚手架，PC 上跑 |
-| `docs/` | 主控 | 验收标准、报告 |
-| `docs/v1.3-plan.md` | 主控 | v1.3 总方案与修订，**所有 worker 必读** |
+| `docs/feature-guide.md` | 主控 | **当前版本的完整功能介绍**，用户文档以它为准 |
+| `docs/product-scope.md` | 主控 | 产品范围与不可突破的边界 |
+| `docs/acceptance.md` | 主控 | 验收标准（构建 / 单测 / 真机） |
+| `docs/v1.3-*.md`、`docs/lsposed-enhancement-plan.md` | 主控 | 历史方案与设计记录，**不代表当前实现状态**；现状看 feature-guide 与 CHANGELOG |
 | `_reports/` | 所有人 | 每个任务的交付报告写这里 |
 
 跨边界的问题**只报告，不改**，由主控收口。
+
+## 文档维护
+
+用户可见的三份主文档，改动功能时必须同步：
+
+1. `CHANGELOG.md` — 每版新增 / 改进 / 修复 / 已知限制，人话版；
+2. `docs/feature-guide.md` — 完整功能介绍（采集、判断、起草、人设、知识库、技能、接口、安全）；
+3. `.github/README.md`（及 `.en` / `.vi`）— 版本徽章、相对上游的改动清单、平台支持表。
+
+贡献者与维护者分工只写在 `.github/CONTRIBUTORS.md`：本分支（`@emoeem`）与上游贡献者分节，上游署名按 NOTICE 保留，不得删除。
 
 ## 报告格式
 

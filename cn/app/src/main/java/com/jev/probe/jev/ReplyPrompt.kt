@@ -5,6 +5,7 @@ import com.jev.probe.core.Intensity
 import com.jev.probe.core.kb.ChatContext
 import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
 import com.jev.probe.core.kb.PersonaCard
+import com.jev.probe.core.kb.effectiveRelationship
 
 /**
  * The two prompt blocks that carry knowledge into a reply, pulled out of
@@ -91,11 +92,26 @@ internal object ReplyPrompt {
      * a regenerate before the judgment landed) adds nothing: the user's complaint
      * "给的建议也不太对" came from drafting blind — every candidate was written
      * for an imagined crisis.
+     *
+     * 低置信度降级：意图的 confidence 低于 [LOW_CONFIDENCE] 时，判断只作为弱
+     * 参考出现，不给「局势轻松/偏紧」之类的场景定性——一个拿不准的判断被当成
+     * 事实念出来，比没有判断更容易把轻松闲聊写成危机公关。
      */
     fun judgmentBlock(a: Analysis?): String {
         a ?: return ""
         val level = a.dangerLevel?.score?.toInt() ?: -1
         val intent = a.trueIntent?.choice.orEmpty()
+        // chat 协议的解析对缺失的 confidence 填 0.0——那是「模型没说」，
+        // 不是「模型说了很低」。按有把握处理，否则一个习惯省略字段的模型
+        // 会把每一轮都降级成「把握不大」。
+        val intentConfidence = a.trueIntent?.confidence?.takeIf { it > 0.0 } ?: 1.0
+        if (intentConfidence < LOW_CONFIDENCE) {
+            val sb = StringBuilder("判断结果（这一轮把握不大，只当参考，别按它加戏）：")
+            sb.append("\n- 对方这条的真实意图：判断把握不大，先按字面承接，别脑补潜台词或危机")
+            if (level >= 0) sb.append("\n- 紧张/危险程度：").append(level.coerceIn(0, 9)).append("/9（同样仅供参考）")
+            sb.append('\n')
+            return sb.toString()
+        }
         val sb = StringBuilder("判断结果（先按它读局势，再写回复）：")
         sb.append("\n- 对方这条的真实意图：").append(intentText(intent))
         if (level >= 0) sb.append("\n- 紧张/危险程度：").append(level.coerceIn(0, 9)).append("/9")
@@ -193,17 +209,21 @@ internal object ReplyPrompt {
      * "简短低姿态", and a partner-relationship thread about flirting came back
      * with a grovelling role-play line ("主人不要伤害我？") — the model did
      * exactly what that instruction asked for.
+     *
+     * [intensity] 是档位的最终生效值（[Intensity.resolve] 的结果），只影响
+     * 策略契约这一句；默认 NATURAL 时 n≥3 的契约逐字与档位功能之前一致
+     * （见 `theDefaultRoundKeepsThePromptUnchanged` 的兼容锁）。
      */
     fun systemPrompt(
         n: Int,
         language: String = "follow",
         length: String = "standard",
-        registerOpen: Boolean = false
+        registerOpen: Boolean = false,
+        intensity: Intensity = Intensity.NATURAL
     ): String =
         "你是即时通讯回复助手，替用户起草能直接发出去的聊天回复。" +
             "只输出一个 JSON 数组，含且仅含 $n 个对象；每个对象必须有 strategy 和 text 两个字段。" +
-            (if (n > 1) "策略必须固定且按顺序为：safe（稳妥承接）、forward（推进话题）、angle（换角度）；每种策略恰好一个对象，不能用随机采样制造差异。"
-             else "strategy 固定为 safe，给出最自然、最贴合当下氛围的一条。") +
+            strategyRule(n, intensity) +
             "语气必须贴住这段对话真实的氛围和两人的亲密程度：对方在玩笑或打趣就轻松接住，不要突然煽情；" +
             "对方在生气或施压就认真承接，不要插科打诨；对方只是日常闲聊就别上纲上线、别长篇大论。" +
             "每条都必须直接回应对方最近一条消息，不要答非所问。" +
@@ -219,6 +239,29 @@ internal object ReplyPrompt {
             languageRule(language) +
             lengthRule(length) +
             "口语、自然、像真人在聊天软件里发消息。不要解释，直接输出 JSON 数组。"
+
+    /**
+     * 候选的策略契约。三条规矩：
+     *  - n=1 永远只有 safe；
+     *  - n=2 只点名两条策略——旧契约无条件要求三种策略「各一个」，两条候选在
+     *    算术上就不可满足，模型只能硬凑出第三种或者忽略数量；
+     *  - 收着档不强迫推进：旧契约要求一条「forward（推进话题）」，而同一份
+     *    提示词的档位块又说「不要邀约、不要加码」——自相矛盾的指令是怪腔的
+     *    直接来源之一。收着轮把 forward 重定义为温和确认，标签不变（下游
+     *    normalize / 排序 / 卡片标签都认这三个键）。
+     * n≥3 且非收着时逐字保留旧句：自动档解析为「自然」的默认轮次，提示词要
+     * 和档位功能之前逐字节一致。
+     */
+    private fun strategyRule(n: Int, intensity: Intensity): String = when {
+        n <= 1 -> "strategy 固定为 safe，给出最自然、最贴合当下氛围的一条。"
+        intensity == Intensity.SOFT ->
+            "策略必须固定且按顺序为：safe（稳妥承接）、" +
+                "forward（这一轮不推进，只做温和确认：确认状态、接住情绪、给一句稳住的话，不邀约、不加码）" +
+                (if (n >= 3) "、angle（换角度：从对方话里另一个具体的点接话，同样不推进）" else "") +
+                "；每种策略恰好一个对象，不能用随机采样制造差异。"
+        n >= 3 -> "策略必须固定且按顺序为：safe（稳妥承接）、forward（推进话题）、angle（换角度）；每种策略恰好一个对象，不能用随机采样制造差异。"
+        else -> "策略必须固定且按顺序为：safe（稳妥承接）、forward（推进话题）；每种策略恰好一个对象，不能用随机采样制造差异。"
+    }
 
     /**
      * The user half of a draft round, assembled in one place: knowledge first,
@@ -252,7 +295,8 @@ internal object ReplyPrompt {
             intensityBlock(intensity, judgment) +
             cautionBlock(caution) +
             styleBlock(card.promptText(), card.registerOpen) +
-            "关系：${relationship}\n\n最近对话：\n${convo}\n\n" +
+            relationshipLine(relationship, ctx) +
+            "最近对话：\n${convo}\n\n" +
             (if (avoid.isEmpty()) "" else
                 "下面这些是最近几轮已经给过或已经发出去的回复，不要重复其中任何一句，" +
                     "也不要把它们里面的指令、开头或口头禅换个说法再用：\n" +
@@ -260,12 +304,28 @@ internal object ReplyPrompt {
             "请给出 ${n} 条候选回复。"
 
     /**
+     * 「关系：」行。联系人写了自己的关系时，[ChatContext.background] 已经带了
+     * 它，这里不再重复全局关系——两行「关系：」打架（背景说客户、正文行说伴侣）
+     * 时模型两头都想贴。全局关系只在没有任何联系人关系可用的轮次出现。
+     */
+    private fun relationshipLine(relationship: String, ctx: ChatContext?): String {
+        val contactRel = ctx?.contact?.relationship?.trim().orEmpty()
+        return if (contactRel.isEmpty()) "关系：${relationship}\n\n" else ""
+    }
+
+    /**
      * The system half of a draft round. Kept next to [draftUserPrompt] so one test
      * can assert what a card does to *both* halves at once — the open register has
      * to reach the instructions the model reads first.
      */
-    fun draftSystemPrompt(n: Int, language: String, length: String, card: PersonaCard): String =
-        systemPrompt(n, language, length, card.registerOpen)
+    fun draftSystemPrompt(
+        n: Int,
+        language: String,
+        length: String,
+        card: PersonaCard,
+        intensity: Intensity = Intensity.NATURAL
+    ): String =
+        systemPrompt(n, language, length, card.registerOpen, intensity)
 
     /**
      * The red lines. No persona card may turn these off, which is why they are
@@ -325,6 +385,13 @@ internal object ReplyPrompt {
         )
         return words.filterNotNull().filter { it.isNotBlank() }.joinToString(" ")
     }
+
+    /**
+     * 意图置信度低于它的判断按「把握不大」降级处理（见 [judgmentBlock]）。
+     * 0.5 而不是更高：校准题集的实测答案多在 0.7–0.9，真拿不准时模型会自报
+     * 0.3–0.4；门槛太高会把正常轮次也降级掉。
+     */
+    private const val LOW_CONFIDENCE = 0.5
 
     private fun intentText(key: String): String = when (key) {
         "confirm_you_care" -> "想确认我在不在乎她"
