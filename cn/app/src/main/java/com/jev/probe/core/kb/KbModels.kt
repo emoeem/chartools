@@ -115,3 +115,16 @@ data class ChatContext(
         return sb.toString().trim()
     }
 }
+
+/**
+ * 这一轮真正生效的关系：联系人自己写的关系优先，没写才用全局设置。
+ *
+ * 为什么必须是它：起草、判断、复查三条路都要拿「对方和我是什么关系」，
+ * 各自直读全局设置的话，一个存了联系人的会话里会出现两行打架的「关系：」
+ * （背景块里是联系人写的关系，正文行是全局的）——模型两头都想贴，
+ * 写出来的就是那种既不像客户服务又不像朋友聊天的怪腔。
+ */
+fun ChatContext?.effectiveRelationship(default: String): String {
+    val contactRel = this?.contact?.relationship?.trim().orEmpty()
+    return contactRel.ifEmpty { default }
+}

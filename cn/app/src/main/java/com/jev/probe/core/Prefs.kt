@@ -681,6 +681,10 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         const val DEFAULT_VISION_MODEL = "qwen/qwen2.5-vl-72b-instruct"
         const val DASHSCOPE_VISION_MODEL = "qwen-vl-max"
 
-        const val DEFAULT_REL = "对方是我的伴侣；from=me 的是我发的，from=other 的是对方发的"
+        // 中性默认：这段文字会逐字进「关系：」行，写作模型会照着它定亲疏——
+        // 旧默认「对方是我的伴侣；from=me 的是我发的…」把每一次销售/同事对话
+        // 都框成伴侣聊天，还混进了给协议层看的 from 说明。具体关系应该由用户
+        // 在设置里写，或者由联系人自己的关系字段覆盖（见 effectiveRelationship）。
+        const val DEFAULT_REL = "朋友"
     }
 }

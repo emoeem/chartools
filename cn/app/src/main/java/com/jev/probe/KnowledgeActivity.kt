@@ -28,6 +28,7 @@ import com.jev.probe.core.kb.Note
 import com.jev.probe.core.kb.PersonaCard
 import com.jev.probe.core.kb.PersonaPresets
 import com.jev.probe.core.kb.PersonaStatus
+import com.jev.probe.core.kb.PersonaStore
 import com.jev.probe.core.kb.TopicScope
 import com.jev.probe.core.skill.Skill
 import com.jev.probe.core.skill.SkillMatcher
@@ -467,12 +468,14 @@ class KnowledgeActivity : AppCompatActivity() {
         val personaEdit = edit(
             existing?.persona ?: "",
             "这个联系人专用的回复人设。写一句话也行；写成下面这种键值卡会更准：" +
-                "称呼／关系／语气／语域／主题／情境／硬边界／安全词／示例。" +
+                "称呼／关系／语气／语域／主题／情境／硬边界／避谈／安全词／示例。" +
                 "「主题」写这段对话整体属于哪一类（例如「网调」），回复会被钉在这个领域里；" +
                 "「示例」下面用「我：」开头的行会被当作你的语气样例。" +
                 "语域写「亲密」才会放开角色化称呼和情境描写。" +
                 "「硬边界」里写下的词会被逐字匹配：对方那条消息里出现这个词就不出候选，" +
-                "所以写「家人」比只写「不要提家人」更管用（同义词不会命中）。留空使用全局人设"
+                "所以写「家人」比只写「不要提家人」更管用（同义词不会命中）。" +
+                "「避谈」只约束我的回复不许出现这些词（如稳赚、保证收益），对方提到照常回，不拦整轮。" +
+                "联系人的「关系」这一栏会压过设置页的全局关系描述。留空使用全局人设"
         ).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             minLines = 2; gravity = Gravity.TOP
@@ -740,41 +743,70 @@ class KnowledgeActivity : AppCompatActivity() {
     private fun label(t: String) = text(t, 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) }
 
     /**
-     * 人设模板：点一下就把整张卡填进去。
+     * 联系人专用人设的快捷入口：点一下把**人设库里那一条**填进 [target]。
      *
-     * 为什么要有它：人设卡认八个键（称呼／关系／语气／语域／主题／情境／硬边界／
-     * 安全词／示例），但从零写一张卡等于要用户先学会这套格式 —— 而最需要它的人
-     * 恰恰不知道**哪个字段才是让回复变的那一个**。模板把这件事示范一遍：主题把
-     * 回复钉在领域里，硬边界进闸门，示例定语气，语域决定放不放得开。改几个字就能用。
-     * 已经有内容时先问一句，不静默覆盖用户自己写的东西。
+     * 以前这里是 [PersonaPresets] 里写死的三张。联系人身上要的往往更具体（「这个
+     * 客户要客气，那个可以开玩笑」），所以改成直接读用户自己的库 —— 在设置页攒好
+     * 的每一份人设，这里都能一键套到某个人头上，不用重新敲一遍。
+     *
+     * 读盘放在线程里：这里是对话框构造路径，主线程不能等 IO。库是空的就明说去哪建，
+     * 不给一排点不动的东西。
      */
     private fun personaPresets(target: EditText): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        PersonaPresets.ALL.forEach { (name, body) ->
-            row.addView(TextView(this).apply {
-                text = name; textSize = 13f; gravity = Gravity.CENTER
-                setTypeface(typeface, Typeface.BOLD)
-                setTextColor(accent)
-                background = round(dp(10), Color.WHITE, stroke = true)
-                setPadding(dp(8), dp(8), dp(8), dp(8))
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    .apply { rightMargin = dp(8) }
-                setOnClickListener {
-                    if (target.text.isNullOrBlank()) {
-                        target.setText(body)
-                    } else {
-                        confirm("套用「$name」模板", "会用模板覆盖现在写着的人设，确定？") {
-                            target.setText(body)
-                        }
-                    }
+        val hint = text("人设库：读取中…", 11f, sub).apply { setPadding(0, dp(4), 0, dp(2)) }
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(hint)
+        box.addView(chips)
+        Thread {
+            val list = runCatching { PersonaStore.get(this).list() }.getOrDefault(emptyList())
+            runOnUiThread {
+                if (list.isEmpty()) {
+                    hint.text = "人设库是空的 —— 先去「设置 → 人设与语气」建一份，这里就能一键套到联系人身上"
+                    return@runOnUiThread
                 }
-            })
-        }
-        return row
+                hint.text = "从人设库套用（覆盖下面的专用人设）"
+                list.chunked(2).forEach { pair ->
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        setPadding(0, dp(6), 0, 0)
+                    }
+                    pair.forEach { p ->
+                        row.addView(TextView(this).apply {
+                            text = p.name; textSize = 12.5f; gravity = Gravity.CENTER
+                            setTypeface(typeface, Typeface.BOLD); setTextColor(accent)
+                            background = round(dp(10), Color.WHITE, stroke = true)
+                            setPadding(dp(6), dp(8), dp(6), dp(8))
+                            layoutParams = LinearLayout.LayoutParams(
+                                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                            ).apply { rightMargin = dp(8) }
+                            setOnClickListener {
+                                if (target.text.isNullOrBlank()) {
+                                    target.setText(p.body)
+                                } else {
+                                    confirm("套用「${p.name}」", "会用这条覆盖现在写着的联系人专用人设，确定？") {
+                                        target.setText(p.body)
+                                    }
+                                }
+                            }
+                        })
+                    }
+                    // 奇数条时补一个占位，否则最后一张会被拉满整行。
+                    if (pair.size == 1) {
+                        row.addView(View(this).apply {
+                            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+                                .apply { rightMargin = dp(8) }
+                        })
+                    }
+                    chips.addView(row)
+                }
+            }
+        }.start()
+        return box
     }
 
     private fun edit(value: String, hintText: String) = EditText(this).apply {

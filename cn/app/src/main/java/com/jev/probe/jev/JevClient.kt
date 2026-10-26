@@ -108,8 +108,12 @@ class JevClient(private val prefs: Prefs) {
     }
 
     /**
-     * 未排序的候选（轮内的"先写后判"路径和「再给 2 条」）。[intensity] 与
+     * 未排序的候选（轮内的"先判后写"路径和「再给 2 条」）。[intensity] 与
      * [draftAndRank] 共享同一份档位语义，进同一份缓存键。
+     *
+     * [judgment] 是这一轮已经到手的判断结果：首轮起草现在等判断（见
+     * `ChatCaptureService` 的 DraftTrigger），带着它写，模型才知道这一场是
+     * 吵架、玩笑还是角色扮演；判断路由超时才盲写（null）。
      */
     fun draftOnly(
         snapshot: ChatSnapshot,
@@ -117,10 +121,12 @@ class JevClient(private val prefs: Prefs) {
         ctx: ChatContext?,
         count: Int = 3,
         avoid: List<String> = emptyList(),
+        judgment: Analysis? = null,
         intensity: Intensity = Intensity.AUTO,
         scope: HttpScope? = null
     ): List<RankedReply> =
-        replyClient.draftOnly(snapshot, relationship, ctx, count, avoid, prefs.style, intensity, scope)
+        replyClient.draftOnly(snapshot, relationship, ctx, count, avoid, judgment,
+            prefs.style, intensity, scope)
 
     /**
      * S1 证据复查。默认关（[Prefs.reviewEnabled]）：开着时让模型逐条核验排序
@@ -191,6 +197,8 @@ class JevClient(private val prefs: Prefs) {
      * while the model is still writing. Deliberately outside the LRU — a cached
      * answer would defeat the point of watching it stream — and the caller keeps
      * [draftOnly] as the fallback when a server does not speak SSE.
+     *
+     * [judgment] 同 [draftOnly]：判断先行时的流式轮也带着判断写。
      */
     fun draftStream(
         snapshot: ChatSnapshot,
@@ -198,12 +206,13 @@ class JevClient(private val prefs: Prefs) {
         ctx: ChatContext?,
         count: Int = 3,
         avoid: List<String> = emptyList(),
+        judgment: Analysis? = null,
         intensity: Intensity = Intensity.AUTO,
         onVisible: (String) -> Unit,
         scope: HttpScope? = null
     ): List<RankedReply> =
         replyClient.draftStream(
-            snapshot, relationship, ctx, count, avoid, judgment = null,
+            snapshot, relationship, ctx, count, avoid, judgment = judgment,
             style = prefs.style, intensity = intensity, onVisible = onVisible, scope = scope
         ).map { it.copy(ranked = false, prob = 0.0) }
 

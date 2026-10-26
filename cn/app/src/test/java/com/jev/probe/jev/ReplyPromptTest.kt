@@ -586,4 +586,99 @@ class ReplyPromptTest {
         assertFalse(background, background.contains("会话台账"))
         assertFalse(background, background.contains("先生"))
     }
+
+    // ---------------------------------------------- 回复自然度 P0（2026-10-22）
+    //
+    // 四个「模型看到的事实错了」的修复，各自一条锁：关系优先级、低置信度
+    // 判断降级、n=2 的策略算术、收着档不强迫推进。
+
+    @Test
+    fun theContactsOwnRelationshipOutranksTheGlobalDefault() {
+        // 联系人写了自己的关系时，背景块已经带了它；正文行不得再把全局关系
+        // 重复一遍——两行「关系：」打架（背景说客户、正文行说伴侣）时，模型
+        // 两头都想贴，写出来的既不像客户服务也不像伴侣。
+        val ctx = ChatContext(
+            Contact(id = "c1", name = "王总", relationship = "销售和客户"),
+            emptyList(), emptyList(), emptyList(), ""
+        )
+        val prompt = ReplyPrompt.draftUserPrompt(
+            "对方是我的伴侣", ctx, 30, null, PersonaCard.parse(null), "",
+            "对方：在吗", emptyList(), 3)
+        assertTrue(prompt, prompt.contains("关系：销售和客户"))
+        assertFalse(prompt, prompt.contains("伴侣"))
+        // 「关系：」只出现一次（背景块里那次），不再有第二行。
+        assertEquals(1, Regex("关系：").findAll(prompt).count())
+    }
+
+    @Test
+    fun withoutAContactTheGlobalRelationshipAppearsExactlyOnce() {
+        val prompt = ReplyPrompt.draftUserPrompt(
+            "朋友", null, 30, null, PersonaCard.parse(null), "",
+            "对方：在吗", emptyList(), 3)
+        assertTrue(prompt, prompt.contains("关系：朋友"))
+        assertEquals(1, Regex("关系：").findAll(prompt).count())
+    }
+
+    @Test
+    fun aLowConfidenceJudgmentDoesNotDictateTheScene() {
+        // 拿不准的判断被当成事实念出来，比没有判断更糟：轻松闲聊会被写成
+        // 危机公关。低于阈值时只留一句弱参考，不给局势定性。
+        val shaky = Analysis(
+            trueIntent = Choice("casual_chat", 0.3, emptyMap()),
+            dangerLevel = Score(1.0, 0.3, 9),
+            sheNeeds = Choice("nothing", 0.4, emptyMap()), shouldReplyNow = null,
+            bestAction = Choice("say_less", 0.3, emptyMap()),
+            tensionResolved = null, literalQuestion = null,
+            rankedReplies = emptyList(), latencyMs = 0
+        )
+        val block = ReplyPrompt.judgmentBlock(shaky)
+        assertTrue(block, block.contains("把握不大"))
+        assertTrue(block, block.contains("按字面承接"))
+        assertFalse(block, block.contains("局势轻松"))
+        assertFalse(block, block.contains("什么都不需要"))
+    }
+
+    @Test
+    fun aMissingConfidenceFieldIsNotReadAsLowConfidence() {
+        // chat 协议的解析对缺失的 confidence 填 0.0——那是「没说」，不是「很低」。
+        // 把它当低置信度会让一个习惯省略字段的模型每一轮都被降级。
+        val unconfident = Analysis(
+            trueIntent = Choice("casual_chat", 0.0, emptyMap()),
+            dangerLevel = Score(1.0, 0.0, 9),
+            sheNeeds = null, shouldReplyNow = null, bestAction = null,
+            tensionResolved = null, literalQuestion = null,
+            rankedReplies = emptyList(), latencyMs = 0
+        )
+        val block = ReplyPrompt.judgmentBlock(unconfident)
+        assertFalse(block, block.contains("把握不大"))
+        assertTrue(block, block.contains("日常闲聊"))
+    }
+
+    @Test
+    fun twoCandidatesAskForTwoStrategiesNotThree() {
+        // 旧契约在 n=2 时仍要求三种策略「各一个」——算术上不可满足，模型只能
+        // 硬凑或忽略数量。两条候选就是两条策略。
+        val sys = ReplyPrompt.systemPrompt(2)
+        assertTrue(sys, sys.contains("2 个对象"))
+        assertTrue(sys, sys.contains("safe（稳妥承接）、forward（推进话题）"))
+        assertFalse(sys, sys.contains("angle"))
+    }
+
+    @Test
+    fun aSoftRoundDoesNotOrderAPush() {
+        // 收着档：system 的策略契约和 user 的档位块必须同一口径。旧契约在这轮
+        // 仍强迫一条「forward（推进话题）」，而档位块说「不要邀约、不要加码」
+        // ——自相矛盾的指令是怪腔的直接来源。
+        val soft = ReplyPrompt.systemPrompt(3, intensity = Intensity.SOFT)
+        assertTrue(soft, soft.contains("这一轮不推进"))
+        assertTrue(soft, soft.contains("温和确认"))
+        assertFalse(soft, soft.contains("forward（推进话题）"))
+        val softTwo = ReplyPrompt.systemPrompt(2, intensity = Intensity.SOFT)
+        assertTrue(softTwo, softTwo.contains("温和确认"))
+        assertFalse(softTwo, softTwo.contains("forward（推进话题）"))
+        // 默认（自然）轮的契约逐字不变——theDefaultRoundKeepsThePromptUnchanged
+        // 锁的就是这条路径。
+        val natural = ReplyPrompt.systemPrompt(3)
+        assertTrue(natural, natural.contains("forward（推进话题）、angle（换角度）"))
+    }
 }

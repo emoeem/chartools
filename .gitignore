@@ -44,3 +44,6 @@ secrets.*
 *.jks
 *.keystore
 keystore.properties
+
+# Security scan artifacts
+.mimosa/

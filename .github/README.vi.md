@@ -6,13 +6,13 @@
 
 **“Trợ lý đồng hành hội thoại” cài trên điện thoại: hiểu người kia trong các ứng dụng chat được hỗ trợ, cho biết nên trả lời thế nào, điền vào ô nhập bằng một chạm; bạn tự quyết định có gửi hay không.**
 
-> **Đây là một nhánh cục bộ được phát triển dựa trên Jev Chat Assistant** (tên gói `com.jev.probe`, phiên bản hiện tại v1.8). Đây **không phải kho gốc và không phải bản phát hành của tác giả gốc**, chỉ được build và dùng tại máy, không phát hành APK. Kho gốc: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis). Ghi nguồn theo yêu cầu của [NOTICE](../NOTICE); không dùng tên hay tên miền của dự án gốc để ngụ ý tác giả gốc chứng thực.
+> **Đây là một nhánh cục bộ được phát triển dựa trên Jev Chat Assistant** (tên gói `com.jev.probe`, phiên bản hiện tại 2.0 đang phát triển). Đây **không phải kho gốc và không phải bản phát hành của tác giả gốc**, chỉ được build và dùng tại máy, không phát hành APK. Kho gốc: [jev-chat/jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis). Ghi nguồn theo yêu cầu của [NOTICE](../NOTICE); không dùng tên hay tên miền của dự án gốc để ngụ ý tác giả gốc chứng thực.
 
-[![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-v1.8-1f6feb?style=flat-square)](../cn/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-2.0%20dev-1f6feb?style=flat-square)](../cn/CHANGELOG.md)
 [![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#bắt-đầu-nhanh)
 [![License](https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square)](../LICENSE)
 
-[Trang web gốc](https://chatjevs.com) · [Hướng dẫn cài đặt gốc](https://chatjevs.com/guides/android-setup.html) · [Nhật ký thay đổi](../cn/CHANGELOG.md) · [Bản macOS gốc](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Bản Windows gốc](https://github.com/jev-chat/jev-chat-windows)
+[Hướng dẫn tính năng đầy đủ (tiếng Trung)](../cn/docs/feature-guide.md) · [Nhật ký thay đổi (tiếng Trung)](../cn/CHANGELOG.md) · [Người đóng góp](CONTRIBUTORS.md) · [Trang web gốc](https://chatjevs.com) · [Hướng dẫn cài đặt gốc](https://chatjevs.com/guides/android-setup.html) · [Bản macOS gốc](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Bản Windows gốc](https://github.com/jev-chat/jev-chat-windows)
 
 [简体中文](README.md) · [English](README.en.md) · **Tiếng Việt**
 
@@ -20,10 +20,13 @@
 
 ## Nhánh này thay đổi những gì
 
-Nhánh này tiếp tục phát triển dựa trên bản gốc v1.7, toàn bộ thay đổi nằm trong kho này; danh sách đầy đủ ở các mục "chưa phát hành" trong [nhật ký thay đổi](../cn/CHANGELOG.md) (tiếng Trung):
+Nhánh này tiếp tục phát triển dựa trên bản gốc v1.7, toàn bộ thay đổi nằm trong kho này; danh sách đầy đủ ở các mục "chưa phát hành" trong [nhật ký thay đổi](../cn/CHANGELOG.md) (tiếng Trung), mô tả tính năng đầy đủ ở [hướng dẫn tính năng](../cn/docs/feature-guide.md) (tiếng Trung):
 
 - **Lớp thu thập:** thêm adapter Telegram và TIM; WeChat đi theo đường chỉ đọc "chụp màn hình + OCR trên máy" (màu bong bóng quyết định bên trái/phải); gom nhóm OCR, gán người nói, khử trùng lặp trả lời gần đây.
 - **Kho tri thức:** nhập tài liệu trên máy (PDF / Word / EPUB / trang web; bản scan tự chuyển sang OCR trên máy), gói kỹ năng (Agent Skills, tự khớp theo hội thoại), hồ sơ liên hệ và sổ ghi.
+- **Thư viện nhân vật:** nhân vật trở thành thư viện do người dùng tự quản (tạo / đổi tên / nhân bản / xoá / nhập / xuất / khôi phục mẫu), thay cho ba mẫu cứng; hỗ trợ nhân vật riêng cho từng liên hệ và các khoá chủ đề, giới hạn cứng, "tránh nói", từ an toàn, đèn vàng, câu ví dụ.
+- **Tạo thủ công:** nút tạo lại trên đầu thẻ, trong menu nhấn giữ và trong thông báo thường trực; có ảnh chụp hiện tại thì tạo lại ngay, không có thì đọc màn hình một lần, đều không được thì nói rõ lý do; một vòng bị kẹt quá 8 giây có thể bị tiếp quản thủ công.
+- **Độ tự nhiên của trả lời (P0):** bản nháp đầu tiên được viết *sau* khi có phán đoán (dự phòng viết mù sau 2 giây); quan hệ ưu tiên "quan hệ của liên hệ hơn quan hệ toàn cục"; hợp đồng chiến lược ứng viên biết số lượng (xin 2 ứng viên không còn đòi 3 chiến lược); khoá nhân vật mới "tránh nói" tách "dừng cả vòng khi đối phương nhắc tới" khỏi "trả lời của tôi không được nói ra"; phán đoán có độ tin cậy thấp chỉ còn là gợi ý, không bị nói như sự thật.
 - **Lớp can thiệp tùy chọn:** tăng cường chỉ đọc qua LSPosed / Vector — mặc định tắt, bật theo từng ứng dụng, không đọc được thì lập tức quay về đường accessibility và ghi lý do vào Trace.
 - **Ngữ cảnh và ghi nhớ:** cửa sổ ngữ cảnh trả lời 10 → 20 tin nhắn; sửa ngưỡng khớp kho tri thức (một gói kỹ năng đơn lẻ trước đây không thể đạt tới về mặt toán học); nhắc rõ trên thẻ khi ghi nhớ chưa được kích hoạt.
 - **Giao diện:** bong bóng dính mép màn hình, thẻ ứng viên và phán đoán phân tầng (chi tiết có thể thu gọn), trang cài đặt chia nhóm, mức đẩy (tự động / giữ lại / tự nhiên / đẩy mạnh).
@@ -39,7 +42,7 @@ Tác giả gốc không tham gia và không bảo chứng cho các thay đổi n
 - **Quyền gửi luôn thuộc về bạn.** Ứng dụng chỉ điền câu trả lời vào ô nhập, không bao giờ tự gửi, không can thiệp vào việc chuyển tiền, lì xì hoặc thu tiền.
 - **Một lõi, nhiều nền tảng.** QQ, TIM và X đã chạy thử trên thiết bị thật; 飞书 bổ sung nội dung chính bằng OCR, WhatsApp được kiểm chứng bằng dữ liệu ghi màn hình. Thêm một ứng dụng chỉ cần viết một adapter vài chục dòng.
 - **Nó hiểu những người và việc liên quan đến bạn.** Cơ sở tri thức cục bộ và hồ sơ liên hệ tự động đưa các ghi chú phù hợp cùng lịch sử trò chuyện của người đó vào quá trình phân tích, giúp câu trả lời không mâu thuẫn với thiết lập của bạn.
-- **Bạn tự cấu hình API.** Địa chỉ, khóa và mô hình cho ba luồng phân tích, trả lời và thị giác đều có thể điền riêng. Khi phân tích, nội dung trò chuyện và thông tin nền đang bật sẽ được gửi tới nhà cung cấp mô hình mà bạn cấu hình; tác giả không vận hành máy chủ trung gian.
+- **Bạn tự cấu hình API.** Địa chỉ, khóa và mô hình cho ba luồng phân tích, trả lời và thị giác đều có thể điền riêng. Khi phân tích, nội dung trò chuyện và thông tin nền đang bật sẽ được gửi tới nhà cung cấp mô hình mà bạn cấu hình; người duy trì nhánh này không vận hành máy chủ trung gian.
 - **Có thể kiểm soát dữ liệu lưu trên máy.** Khóa, cơ sở tri thức và lịch sử tùy chọn nằm trong không gian riêng của ứng dụng; ảnh chụp màn hình chỉ được OCR trên máy và không tải lên. Cách nhà cung cấp bên thứ ba xử lý nội dung nhận được tuân theo chính sách quyền riêng tư của họ.
 
 ## Hỗ trợ nền tảng
@@ -51,8 +54,11 @@ Tác giả gốc không tham gia và không bảo chứng cho các thay đổi n
 | X / Twitter tin nhắn riêng | ✅ Hỗ trợ đầy đủ từ đầu đến cuối | Phân tích content-desc của node Compose | Đã kiểm thử trên 12.25, giao diện tiếng Trung; chưa xác minh giao diện tiếng Anh |
 | 飞书 / Lark | ✅ Dự phòng bằng OCR (đã xác minh trên thiết bị thật) | Đọc hình chữ nhật bong bóng bằng dịch vụ trợ năng + OCR tiếng Trung ngoại tuyến bằng ML Kit để nhận dạng nội dung chính | Nội dung chính tự vẽ không có trong cây trợ năng; từ 1.3, thực hiện OCR cho hình chữ nhật từng bong bóng; phân biệt tôi/đối phương theo trạng thái đã đọc |
 | WhatsApp | 🧪 Trò chuyện 1v1 | Đọc node bằng dịch vụ trợ năng | Chỉ đọc trò chuyện 1v1, không đọc nhóm, không chụp màn hình; trả lời theo ngôn ngữ tin nhắn mới nhất của đối phương. Quy tắc đọc của [@smgonthebeat](https://github.com/smgonthebeat) (#73), kiểm chứng với bản ghi WhatsApp 2.26.38.73 |
+| Telegram | ✅ Hỗ trợ đầy đủ từ đầu đến cuối | Đọc node bằng dịch vụ trợ năng | Đã kiểm thử trên 12.10.1 (versionCode 70382): mỗi dòng có "biệt danh / nội dung / dòng trạng thái", phân biệt người gửi theo động từ trạng thái (`已发送` = bạn, `已收到` = đối phương), nên giao diện không phải tiếng Trung hoặc tiếng Anh thì không phân biệt được trái/phải; trang chat nhận diện bằng ô nhập ở đáy (y ≥ 60% chiều cao màn hình), danh sách chat và trang chủ đề không hiện thẻ |
+| WeChat | ✅ Hỗ trợ đầy đủ (OCR) | Chụp màn hình + OCR trên máy | Đã kiểm thử trên 8.0.78: WeChat không cung cấp cây trợ năng cho bên thứ ba (toàn bộ cây chỉ là một node rỗng `bounds="[0,0][0,0]"`), nên chỉ đọc được màn hình. Chụp màn hình → phân biệt trái/phải theo màu nền bong bóng (xanh lá = bạn, xám = đối phương; thẻ ảnh/tệp của bạn là màu xám, dùng ảnh đại diện bên phải chồng lên làm dự phòng) → OCR tiếng Trung bằng ML Kit. Chỉ kiểm thử giao diện tối; giao diện/skin khác chưa xác minh |
 | Ứng dụng khác chưa hỗ trợ | ✅ Thủ công | OCR toàn màn hình bằng “Nhận diện ảnh chụp một lần” trong menu cửa sổ nổi | Không tự động, không phân biệt tôi/đối phương (mọi nội dung đều được coi là lời của đối phương và được ghi rõ trong khung phân tích); không hỗ trợ ứng dụng ẩn nội dung giao diện hoặc chặn chụp màn hình |
-| Máy tính để bàn / web | ⏳ Đang lên kế hoạch | Ảnh chụp màn hình + OCR / thị giác | Cùng một lõi, chỉ thay đổi cách thu thập |
+| macOS / Windows | ✅ Dự án gốc riêng | Xem từng kho | [macOS](https://github.com/jev-chat/jev-chat-jarvis-mac) · [Windows](https://github.com/jev-chat/jev-chat-windows) |
+| Web | ⏳ Đang lên kế hoạch | — | Chưa có bản web |
 
 Dự án này chỉ đọc nội dung chat trên thiết bị của chính bạn, nơi bạn có quyền xem và phiên bản hiện tại hỗ trợ; không đọc ứng dụng ẩn nội dung giao diện hoặc chặn chụp màn hình.
 
@@ -137,7 +143,7 @@ Không cần root và không phải cài bất kỳ module nào. Ứng dụng kh
 <details>
 <summary><b>Lịch sử trò chuyện của tôi có được tải lên không?</b></summary>
 
-Khi kích hoạt phân tích, nội dung chat hiện tại cùng ghi chú liên hệ mà bạn đã bật, nội dung cơ sở tri thức được truy xuất và lịch sử trò chuyện sẽ được gửi tới API mô hình mà bạn cấu hình trong cài đặt. Tác giả dự án không vận hành máy chủ trung gian và không nhận được nội dung này; ảnh chụp màn hình được OCR trên máy và không tải lên. Lịch sử mặc định tắt; khi bật, lịch sử chỉ được lưu trong thư mục riêng của ứng dụng trên máy. Nhà cung cấp mô hình bên thứ ba có thể xử lý nội dung yêu cầu theo chính sách của họ; vui lòng xem [chính sách quyền riêng tư](../cn/PRIVACY.md) và chính sách của nhà cung cấp đã chọn trước khi sử dụng.
+Khi kích hoạt phân tích, nội dung chat hiện tại cùng ghi chú liên hệ mà bạn đã bật, nội dung cơ sở tri thức được truy xuất và lịch sử trò chuyện sẽ được gửi tới API mô hình mà bạn cấu hình trong cài đặt. Người duy trì nhánh này không vận hành máy chủ trung gian và không nhận được nội dung này; ảnh chụp màn hình được OCR trên máy và không tải lên. Lịch sử mặc định tắt; khi bật, lịch sử chỉ được lưu trong thư mục riêng của ứng dụng trên máy. Nhà cung cấp mô hình bên thứ ba có thể xử lý nội dung yêu cầu theo chính sách của họ; vui lòng xem [chính sách quyền riêng tư](../cn/PRIVACY.md) và chính sách của nhà cung cấp đã chọn trước khi sử dụng.
 
 </details>
 
@@ -237,10 +243,10 @@ cd cn
 
 ## Bản quyền và giấy phép
 
-Bản gốc: Copyright © 2026 Finderchangchang và những người đóng góp cho jev-chat. Mã nguồn được phát hành theo giấy phép mã nguồn mở [MIT](../LICENSE), xem thêm [NOTICE](../NOTICE). **Kho này là một nhánh phát triển tiếp của dự án đó** (dùng cục bộ, tên gói `com.jev.probe`, phiên bản v1.8); tác giả gốc không tham gia và không chứng thực cho bất kỳ thay đổi nào trong nhánh này.
+Bản gốc: Copyright © 2026 Finderchangchang và những người đóng góp cho jev-chat. Mã nguồn được phát hành theo giấy phép mã nguồn mở [MIT](../LICENSE), xem thêm [NOTICE](../NOTICE). **Kho này là một nhánh phát triển tiếp của dự án đó** (dùng cục bộ, tên gói `com.jev.probe`, phiên bản 2.0 đang phát triển); tác giả gốc không tham gia và không chứng thực cho bất kỳ thay đổi nào trong nhánh này.
 
 - **Có thể sử dụng thương mại**: cả cá nhân và công ty đều có thể sử dụng, chỉnh sửa, phân phối lại hoặc tích hợp vào sản phẩm của mình mà không cần trả phí hoặc xin phép trước.
 - **Bắt buộc ghi nguồn**: khi phân phối hoặc sử dụng thương mại, phải giữ lại LICENSE và NOTICE, đồng thời ghi nguồn trong trang “Giới thiệu”, tài liệu hoặc trang phát hành của sản phẩm. Cách ghi được khuyến nghị: `Dựa trên Jev 聊天助手（https://github.com/jev-chat/jev-chat-jarvis） để phát triển tiếp`.
 - Không dùng tên “Jev 聊天助手”, “jev-chat” hoặc tên miền chatjevs.com để gợi ý rằng sản phẩm do tác giả gốc phát hành hoặc chứng thực.
 
-**Quyền riêng tư và miễn trừ trách nhiệm**: khi kích hoạt phân tích, nội dung trò chuyện và thông tin nền đang bật sẽ được gửi tới nhà cung cấp mô hình bên thứ ba do bạn tự cấu hình; ảnh chụp màn hình chỉ được OCR trên máy. Vui lòng đọc [chính sách quyền riêng tư](../cn/PRIVACY.md) cùng chính sách của nhà cung cấp đã chọn và tuân thủ điều khoản của QQ, X, 飞书, WhatsApp và các phần mềm khác cùng pháp luật và quy định địa phương. Tác giả không chịu trách nhiệm về hành vi xử lý dữ liệu hoặc hậu quả sử dụng của nhà cung cấp bên thứ ba.
+**Quyền riêng tư và miễn trừ trách nhiệm**: khi kích hoạt phân tích, nội dung trò chuyện và thông tin nền đang bật sẽ được gửi tới nhà cung cấp mô hình bên thứ ba do bạn tự cấu hình; ảnh chụp màn hình chỉ được OCR trên máy. Vui lòng đọc [chính sách quyền riêng tư](../cn/PRIVACY.md) cùng chính sách của nhà cung cấp đã chọn và tuân thủ điều khoản của QQ, X, 飞书, WhatsApp và các phần mềm khác cùng pháp luật và quy định địa phương. Người duy trì nhánh này không chịu trách nhiệm về hành vi xử lý dữ liệu hoặc hậu quả sử dụng của nhà cung cấp bên thứ ba.

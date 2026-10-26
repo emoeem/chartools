@@ -2,6 +2,10 @@ Jev 聊天助手 (Jev Chat Assistant)
 Copyright (c) 2026 Finderchangchang and the jev-chat contributors
 https://github.com/jev-chat/jev-chat-jarvis · https://chatjevs.com
 
+本仓库是基于上述项目二次开发的本地分支（包名 com.jev.probe）。
+本分支的修改：Copyright (c) 2026 @emoeem (https://github.com/emoeem) · 仓库 https://github.com/emoeem/chartools
+Modifications in this fork: Copyright (c) 2026 @emoeem (https://github.com/emoeem) · https://github.com/emoeem/chartools
+
 本项目以 MIT 协议开源（见 LICENSE）。
 
 - 允许个人和商业使用、修改、再分发、集成到自有产品中，无需付费或事先授权。

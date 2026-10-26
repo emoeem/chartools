@@ -24,6 +24,7 @@ import com.jev.probe.core.Provenance
 import com.jev.probe.core.Trace
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
+import com.jev.probe.core.kb.effectiveRelationship
 import com.jev.probe.jev.ReplyPrompt
 import com.jev.probe.core.safety.SafetyBlockedException
 import com.jev.probe.jev.HttpScope
@@ -91,6 +92,12 @@ open class ChatCaptureService : AccessibilityService() {
     private var lastWeChatShotAt by conversationState::lastWeChatShotAt
     private var weChatTitle by conversationState::weChatTitle
 
+    /**
+     * 这一轮是什么时候开跑的（`uptimeMillis`）。只在 [analyzing] / [regenerating]
+     * 为 true 时有意义：手动「生成」靠它分辨当前是"正常在路上"还是"已经卡死"。
+     */
+    private var busySince = 0L
+
     private val session = ConversationSession()
     private val analysisTasks = ArrayList<Future<*>>()
 
@@ -111,6 +118,7 @@ open class ChatCaptureService : AccessibilityService() {
         pendingSnapshot = null
         analyzing = false
         regenerating = false
+        disarmRoundWatchdog()
         cancelScopes()
         analysisTasks.forEach { it.cancel(true) }
         analysisTasks.clear()
@@ -123,10 +131,48 @@ open class ChatCaptureService : AccessibilityService() {
         main.removeCallbacks(debounce)
         analyzing = false
         regenerating = false
+        disarmRoundWatchdog()
         cancelScopes()
         analysisTasks.forEach { it.cancel(true) }
         analysisTasks.clear()
     }
+
+    /**
+     * 本轮结束（成功、失败、被丢弃都算）：把两把锁和卡上的等待态一起放开。
+     *
+     * 以前只有「判断和起草都回来」这一条路会清 [analyzing]，而那条路排在
+     * `if (!isCurrent(token)) return@post` **后面**。于是会话一变（QQ 里翻列表、
+     * 输入法弹起、标题抖动都会），结果回来时直接 return，锁永久停在 true，
+     * 之后每一次「换一组」都在开头被静默挡掉——这就是"重新生成点不动"的直接原因。
+     */
+    private fun endRound() {
+        analyzing = false
+        regenerating = false
+        disarmRoundWatchdog()
+        overlay?.stopRoundWaiting()
+    }
+
+    /**
+     * 一轮的硬兜底。除了上面那些出口，worker 被拒、线程被中断、回调被系统吞掉
+     * 都可能让锁停在 true。这个定时器只看时钟：到点还没结束就强制解锁并在卡上
+     * 说一句，绝不让"按钮点了没反应"一直悬着。
+     */
+    private val roundWatchdog = Runnable {
+        if (!analyzing && !regenerating) return@Runnable
+        Trace.log("round watchdog fired analyzing=$analyzing regenerating=$regenerating busy=${SystemClock.uptimeMillis() - busySince}ms")
+        endRound()
+        overlay?.toast("上一轮卡住了，已解锁，可以重新生成")
+    }
+
+    private fun armRoundWatchdog() {
+        busySince = SystemClock.uptimeMillis()
+        main.removeCallbacks(roundWatchdog)
+        // 一轮最多三个串行请求（判断 / 起草 / 排序），每个都有 requestTimeoutSeconds
+        // 的硬超时；给到它的两倍再加余量，正常轮次永远不会被这个兜底碰到。
+        main.postDelayed(roundWatchdog, (prefs.requestTimeoutSeconds * 2L + 10L) * 1000L)
+    }
+
+    private fun disarmRoundWatchdog() { main.removeCallbacks(roundWatchdog) }
 
     /** Close the sockets of every in-flight HTTP call of the round being dropped. */
     private fun cancelScopes() {
@@ -240,6 +286,23 @@ open class ChatCaptureService : AccessibilityService() {
     private val ocr = MlKitOcr()
     private var ocrBusy = false
 
+    /**
+     * OCR 的硬兜底。`ocrBusy` 的复位写在每个回调出口上，而截图/识别回调本身
+     * 可能因为服务被解绑、Bitmap 回收、系统把截图请求吞掉而永远不来——那样
+     * `ocrBusy` 就永久停在 true，之后每一次「截屏识别一次」和手动生成里的
+     * 抓屏分支都在开头静默 return。和 [roundWatchdog] 同一类问题，同一类修法。
+     */
+    private val ocrWatchdog = Runnable {
+        if (!ocrBusy) return@Runnable
+        Trace.log("ocr watchdog: releasing stuck ocrBusy")
+        ocrBusy = false
+    }
+
+    private fun armOcrWatchdog() {
+        main.removeCallbacks(ocrWatchdog)
+        main.postDelayed(ocrWatchdog, 30_000L)
+    }
+
     /** Last package written to [Trace], so foreground churn does not spam it. */
     private var lastTraceForeground: String? = null
     private var lastTraceSig: String? = null
@@ -256,10 +319,11 @@ open class ChatCaptureService : AccessibilityService() {
         getSharedPreferences(Prefs.PREFS_MAIN, MODE_PRIVATE)
             .registerOnSharedPreferenceChangeListener(preferencesListener)
         overlay = OverlayController(this)
-        overlay?.onManualAnalyze = {
-            currentSnapshot?.let { pendingSnapshot = it; runAnalysis() }
-        }
+        // 点 header（卡上还没内容）：走和手动生成同一条路。旧代码是
+        // `currentSnapshot?.let { … }`——没有快照就什么都不发生，用户只看到"点了没反应"。
+        overlay?.onManualAnalyze = { manualGenerate() }
         overlay?.onRegenerate = { regenerateReplies() }
+        overlay?.onManualGenerate = { manualGenerate() }
         overlay?.onMoreReplies = { moreReplies() }
         overlay?.onOpenSettings = {
             startActivity(android.content.Intent(this, com.jev.probe.SettingsActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -539,29 +603,41 @@ open class ChatCaptureService : AccessibilityService() {
         main.postDelayed(confirmLeave, LEAVE_CONFIRM_MS)
     }
 
-    /** "换一组" / 重试: redraft the candidates only; the judgment on the card stays. */
+    /**
+     * 卡上单条候选的三个小动作（改短 / 换语气 / 重生成一条）：只动那一条，
+     * 不重跑整轮。
+     *
+     * 前置条件不满足时必须说一句人话——这串 `return` 原先全是静默的，用户
+     * 在 QQ 里点「重生成」看到的就是"没反应"。
+     */
     private fun refineReply(original: String, instruction: String) {
-        if (analyzing || regenerating || destroyed || !prefs.enabled) return
-        val snapshot = lastAnalyzed ?: currentSnapshot ?: return
-        val token = session.token() ?: return
-        if (!isCurrent(token)) return
+        if (destroyed || !prefs.enabled) return
+        if (analyzing || regenerating) { overlay?.toast("正在生成中…"); return }
+        val snapshot = lastAnalyzed ?: currentSnapshot
+        if (snapshot == null) { overlay?.showError("没读到当前对话：先打开一个聊天窗口"); return }
+        val token = session.token()
+        if (token == null) { overlay?.toast("会话已切换，请先打开一个聊天窗口"); return }
+        if (!isCurrent(token)) { overlay?.toast("会话已变化，请再点一次"); return }
         if (!prefs.hasKey()) { overlay?.showError("未设置回复接口密钥，去设置里填"); return }
 
         regenerating = true
+        armRoundWatchdog()
         val client = JevClient(prefs)
         overlay?.beginRegenerate()
         submitAnalysis {
             val refined = try {
                 withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "单条微调") { sc ->
-                    client.refineReply(snapshot, prefs.relationship, lastCtx, original, instruction, sc)
+                    client.refineReply(snapshot, lastCtx.effectiveRelationship(prefs.relationship),
+                        lastCtx, original, instruction, sc)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "single refine failed: " + e.message)
                 null
             }
             main.post {
+                if (!isCurrent(token)) { endRound(); return@post }
                 regenerating = false
-                if (!isCurrent(token)) return@post
+                disarmRoundWatchdog()
                 if (refined != null) {
                     recentReplies.remember(listOf(refined.text))
                     overlay?.replaceReply(original, refined)
@@ -580,22 +656,27 @@ open class ChatCaptureService : AccessibilityService() {
      * (changing numbers the user is reading) or lie about the order.
      */
     private fun moreReplies() {
-        if (analyzing || regenerating || destroyed || !prefs.enabled) return
-        val snapshot = lastAnalyzed ?: currentSnapshot ?: return
-        val token = session.token() ?: return
-        if (!isCurrent(token)) return
+        if (destroyed || !prefs.enabled) return
+        if (analyzing || regenerating) { overlay?.toast("正在生成中…"); return }
+        val snapshot = lastAnalyzed ?: currentSnapshot
+        if (snapshot == null) { overlay?.showError("没读到当前对话：先打开一个聊天窗口"); return }
+        val token = session.token()
+        if (token == null) { overlay?.toast("会话已切换，请先打开一个聊天窗口"); return }
+        if (!isCurrent(token)) { overlay?.toast("会话已变化，请再点一次"); return }
         if (!prefs.hasKey()) { overlay?.showError("未设置判断接口密钥，去设置里填"); return }
         regenerating = true
+        armRoundWatchdog()
         val avoid = (overlay?.currentReplyTexts().orEmpty() + recentReplies.asAvoid()).distinct()
         overlay?.beginMore()
         val client = JevClient(prefs)
-        val rel = prefs.relationship
+        val rel = lastCtx.effectiveRelationship(prefs.relationship)
         val ctx = lastCtx
         submitAnalysis {
             var err: String? = null
             val fresh = try {
                 withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
                     client.draftOnly(snapshot, rel, ctx, count = 2, avoid = avoid,
+                        judgment = lastJudgment,
                         intensity = lastIntensity, scope = sc)
                 }
             } catch (e: Exception) {
@@ -604,8 +685,9 @@ open class ChatCaptureService : AccessibilityService() {
                 emptyList()
             }
             main.post {
+                if (!isCurrent(token)) { endRound(); return@post }
                 regenerating = false
-                if (!isCurrent(token)) return@post
+                disarmRoundWatchdog()
                 if (fresh.isEmpty()) {
                     overlay?.endMoreWaiting()
                     overlay?.toast(err?.let { "没能再加两条：$it" } ?: "没能再加两条，原候选已保留")
@@ -617,17 +699,35 @@ open class ChatCaptureService : AccessibilityService() {
         }
     }
 
-    private fun regenerateReplies() {
-        if (analyzing || regenerating || destroyed || !prefs.enabled) return
-        val snapshot = lastAnalyzed ?: currentSnapshot ?: return
-        val token = session.token() ?: return
-        if (!isCurrent(token)) return
+    /** 「换一组」/「重试」按钮：手里有什么就用什么。 */
+    private fun regenerateReplies() = regenerateReplies(lastAnalyzed ?: currentSnapshot, "换一组")
+
+    /**
+     * 只重起草候选，卡上的判断保持不动。
+     *
+     * 每一处前置条件都对应一句可见反馈 —— 静默 `return` 是「点不动」的另一半：
+     * 用户分不清"没点到"、"在跑"、"没读到对话"，只能反复点。
+     *
+     * @param source 只用于 Trace，区分是人点的按钮还是手动生成/兜底路径调的。
+     */
+    private fun regenerateReplies(snapshot: ChatSnapshot?, source: String) {
+        if (destroyed || !prefs.enabled) return
+        if (snapshot == null) {
+            overlay?.showError("没读到当前对话：先打开一个聊天窗口，或长按悬浮球用「截屏识别一次」")
+            return
+        }
+        if (analyzing || regenerating) { overlay?.toast("正在生成中…"); return }
+        val token = session.token()
+        if (token == null) { overlay?.toast("会话已切换，请先打开一个聊天窗口"); return }
+        if (!isCurrent(token)) { overlay?.toast("会话已变化，请再点一次"); return }
         if (!prefs.hasKey()) { overlay?.showError("未设置判断接口密钥，去设置里填"); return }
+        Trace.log("redraft source=$source msgs=${snapshot.messages.size}")
         regenerating = true
+        armRoundWatchdog()
         val avoid = (overlay?.currentReplyTexts().orEmpty() + recentReplies.asAvoid()).distinct()
         overlay?.beginRegenerate()
         val client = JevClient(prefs)
-        val rel = prefs.relationship
+        val rel = lastCtx.effectiveRelationship(prefs.relationship)
         val ctx = lastCtx
         val count = prefs.candidateCount
         submitAnalysis {
@@ -643,13 +743,97 @@ open class ChatCaptureService : AccessibilityService() {
                 emptyList()
             }
             main.post {
+                if (!isCurrent(token)) { endRound(); return@post }
                 regenerating = false
-                if (isCurrent(token)) {
-                    recentReplies.remember(ranked.map { it.text })
-                    overlay?.showReplies(ranked, replyError) { text -> fillInput(token, text) }
-                }
+                disarmRoundWatchdog()
+                recentReplies.remember(ranked.map { it.text })
+                overlay?.showReplies(ranked, replyError) { text -> fillInput(token, text) }
             }
         }
+    }
+
+    // ------------------------------------------------------ 手动生成（用户诉求）
+
+    /**
+     * 手动「生成」：用户明确要一次候选，不依赖任何自动触发条件。
+     *
+     * 为什么需要它：自动路径要求"有新消息 + 判定通过 + 会话身份稳定"，而 QQ 这类
+     * 应用在滚动、输入法弹起、切回列表时这些条件反复失效；一旦 `analyzing` 或
+     * `regenerating` 停在 true，卡上那个「换一组」就彻底点不动。手动入口的作用
+     * 是把决定权拿回人手上：点一下，就一定要么出候选、要么给原因。
+     *
+     * 三条路（判定在 [ManualGenerate.decide]，纯逻辑、有单测）：
+     * 1. 手里有快照 → 直接重来；判断还在就只换候选，没判断就跑整轮；
+     * 2. 没快照但当前应用抓得到 → 先读一次（节点树优先，其次截屏 OCR），读完自动生成；
+     * 3. 都不行 → 把原因显示出来（旧代码在这里什么都不显示）。
+     *
+     * 忙了超过 [ManualGenerate.FORCE_GRACE_MS] 还点，就认为上一轮已经卡死：
+     * 先 cancelInFlight() 解锁再重来。这是"点了没反应"最直接的那一刀。
+     */
+    private fun manualGenerate() {
+        val root = rootInActiveWindow
+        val pkg = root?.packageName?.toString() ?: foregroundPkg ?: activePkg ?: overlay?.currentApp()
+        val snapshot = lastAnalyzed ?: currentSnapshot
+        val busyAge = if (analyzing || regenerating) SystemClock.uptimeMillis() - busySince else null
+        val decision = ManualGenerate.decide(
+            enabled = prefs.enabled,
+            hasKey = prefs.hasKey(),
+            hasSnapshot = snapshot != null,
+            canCapture = canCaptureNow(pkg),
+            busyAgeMs = busyAge,
+        )
+        Trace.log("manual generate pkg=${pkg ?: "-"} snapshot=${snapshot != null} " +
+            "busy=${busyAge ?: -1} decision=${decision.javaClass.simpleName}")
+        when (decision) {
+            is ManualGenerate.Decision.Regenerate -> {
+                if (ManualGenerate.shouldForceTakeOver(busyAge)) {
+                    // 上一轮已经超时还没收尾：手动意图优先，解锁重来。
+                    Trace.log("manual generate force take-over after ${busyAge}ms")
+                    cancelInFlight()
+                }
+                val s = snapshot ?: return
+                if (lastJudgment != null) regenerateReplies(s, "手动换一组")
+                else { pendingSnapshot = s; runAnalysis() }
+            }
+            is ManualGenerate.Decision.CaptureFirst -> captureThenGenerate(pkg)
+            is ManualGenerate.Decision.Explain -> {
+                if (decision.transient) overlay?.toast(decision.reason)
+                else overlay?.showError(decision.reason)
+            }
+        }
+    }
+
+    /**
+     * 手动生成能不能在当前屏幕上抓到东西：有适配器走节点树，微信走像素路径，
+     * 其余应用只有「截屏识别一次」那一档（要求能截图）。
+     */
+    private fun canCaptureNow(pkg: String?): Boolean {
+        if (pkg.isNullOrBlank() || isBlocked(pkg)) return false
+        if (adapters.containsKey(pkg) || pkg == WECHAT_PKG) return true
+        return pkg !in NO_SCREENSHOT_PKGS
+    }
+
+    /**
+     * 没有快照时的手动路径：先用节点树读一遍（快、无副作用），读不到再交给既有
+     * 的「截屏识别一次」。两条路都在拿到内容后自己开一轮，所以这里只负责把
+     * "我点了，它在动"说出来。
+     */
+    private fun captureThenGenerate(pkg: String?) {
+        val root = rootInActiveWindow
+        val adapter = root?.packageName?.toString()?.let { adapters[it] }
+        val live = if (root != null && adapter != null) {
+            runCatching { adapter.extract(root, resources) }.getOrNull()
+        } else null
+        if (live != null && live.messages.isNotEmpty()) {
+            Trace.log("manual generate: tree snapshot msgs=${live.messages.size}")
+            currentSnapshot = live
+            pendingSnapshot = live
+            runAnalysis()
+            return
+        }
+        Trace.log("manual generate: falling back to screenshot+OCR pkg=${pkg ?: "-"}")
+        overlay?.toast("先识别一次屏幕，识别完会自动生成")
+        ocrCaptureManual()
     }
 
     private fun replyErrorText(e: Exception): String {
@@ -704,11 +888,11 @@ open class ChatCaptureService : AccessibilityService() {
 
         val token = session.begin() ?: return
         analyzing = true
+        armRoundWatchdog()
         overlay?.beginRound()
         overlay?.setNote(snapshot.note)
         val count = prefs.candidateCount
         val client = JevClient(prefs)
-        val rel = prefs.relationship
 
         submitAnalysis {
             val ctx = try {
@@ -718,8 +902,13 @@ open class ChatCaptureService : AccessibilityService() {
                 Log.w(TAG, "context build failed: " + e.javaClass.simpleName)
                 null
             }
+            // 关系优先级：联系人自己写的关系压过全局设置。判断、起草、排序
+            // 三条路都用这一个值——各读各的会出现两行打架的「关系：」。
+            val rel = ctx.effectiveRelationship(prefs.relationship)
             main.post {
-                if (!isCurrent(token)) return@post
+                // 会话已经变了：这一轮作废，但锁必须放开。旧代码在这里直接 return，
+                // analyzing 就永久停在 true —— 之后所有「换一组」都被静默挡掉。
+                if (!isCurrent(token)) { endRound(); return@post }
                 lastAnalyzed = snapshot
                 lastCtx = ctx
                 overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0)
@@ -756,12 +945,11 @@ open class ChatCaptureService : AccessibilityService() {
                                 d.map { it.copy(ranked = false, prob = 0.0) }
                             }
                             main.post {
-                                if (!isCurrent(token)) return@post
+                                if (!isCurrent(token)) { endRound(); return@post }
                                 lastJudgment = j
                                 recentReplies.remember(ranked.map { it.text })
                                 overlay?.showReplies(ranked, null) { text -> fillInput(token, text) }
-                                analyzing = false
-                                analysisTasks.clear()
+                                endRound()
                             }
                         }
                     } else {
@@ -773,10 +961,85 @@ open class ChatCaptureService : AccessibilityService() {
                         }
                         recentReplies.remember(d.map { it.text })
                         overlay?.showReplies(d, error) { text -> fillInput(token, text) }
-                        analyzing = false
-                        analysisTasks.clear()
+                        endRound()
                     }
                 }
+
+                // ------------------------------------------------ 先判后写
+                //
+                // 起草过去和判断并行，judgment 只用来排序——写的时候是盲的，
+                // 「给的建议不太对 / 一轮一轮都像危机公关」就是从这来的。现在
+                // 起草等判断：判断回来带着它写；等满 DraftTrigger.WAIT_MS 还没
+                // 回来就盲写，判断路由慢或挂掉时延迟有上界。DraftTrigger 保证
+                // 两个触发点只生效一个，这里再由 isCurrent 挡掉会话已切换的
+                // 迟到触发。
+                val draftTrigger = DraftTrigger()
+
+                fun startDraftOnce(judgmentForDraft: com.jev.probe.core.Analysis?) {
+                    if (!isCurrent(token)) return
+                    // 迟到的 fireDraftBlind 不用 removeCallbacks：DraftTrigger 已经
+                    // started，fireBlind() 返回 false，那个 Runnable 自己就是 no-op。
+                    Trace.log("draft start judged=" + (judgmentForDraft != null))
+                    submitAnalysis {
+                        val draft = try {
+                            // 跨轮反重复：把最近几轮展示过的候选一并交给起草，别再复读。
+                            val avoid = recentReplies.asAvoid()
+                            if (prefs.streamReplies) {
+                                try {
+                                    withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
+                                        client.draftStream(
+                                            snapshot, rel, ctx, count = count, avoid = avoid,
+                                            judgment = judgmentForDraft,
+                                            intensity = lastIntensity,
+                                            onVisible = { live -> main.post { if (isCurrent(token)) overlay?.showStreaming(live) } },
+                                            scope = sc
+                                        )
+                                    }
+                                } catch (e: SafetyBlockedException) {
+                                    // A refusal must reach the user, not be retried as a
+                                    // transport hiccup: the fallback would refuse again.
+                                    throw e
+                                } catch (e: Exception) {
+                                    // Opt-in streaming must never cost the round its
+                                    // candidates: a provider or proxy that buffers SSE
+                                    // fails here, so redo it the ordinary way.
+                                    Log.w(TAG, "stream draft failed, falling back: " + e.message)
+                                    withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
+                                        client.draftOnly(snapshot, rel, ctx, count, avoid,
+                                            judgment = judgmentForDraft,
+                                            intensity = lastIntensity, scope = sc)
+                                    }
+                                }
+                            } else {
+                                withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
+                                    client.draftOnly(snapshot, rel, ctx, count, avoid,
+                                        judgment = judgmentForDraft,
+                                        intensity = lastIntensity, scope = sc)
+                                }
+                            }
+                        } catch (e: SafetyBlockedException) {
+                            Log.w(TAG, "draft blocked: " + e.message)
+                            main.post {
+                                if (isCurrent(token)) overlay?.showError(e.message ?: "这条不适合自动给候选")
+                            }
+                            emptyList()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "draft failed: " + e.message)
+                            emptyList()
+                        }
+                        main.post {
+                            if (!isCurrent(token)) { endRound(); return@post }
+                            round.draft = draft
+                            round.draftFinished = true
+                            if (draft.isNotEmpty()) {
+                                overlay?.showDraftFirst(draft) { text -> fillInput(token, text) }
+                            }
+                            finishRoundIfReady()
+                        }
+                    }
+                }
+
+                val fireDraftBlind = Runnable { if (draftTrigger.fireBlind()) startDraftOnce(null) }
 
                 submitAnalysis {
                     val judgment = try {
@@ -789,7 +1052,7 @@ open class ChatCaptureService : AccessibilityService() {
                         )
                     }
                     main.post {
-                        if (!isCurrent(token)) return@post
+                        if (!isCurrent(token)) { endRound(); return@post }
                         round.judgment = judgment
                         round.judgeFinished = true
                         if (judgment.error == null) {
@@ -798,64 +1061,16 @@ open class ChatCaptureService : AccessibilityService() {
                         } else {
                             overlay?.showJudgeFailure("⚠ 判断接口失败，未经排序")
                         }
+                        // 判断（无论成败）一到就放行起草；判断失败时降级为盲写。
+                        if (draftTrigger.fireWithJudgment(judgment.takeIf { it.error == null })) {
+                            startDraftOnce(draftTrigger.judgment)
+                        }
                         finishRoundIfReady()
                     }
                 }
 
-                submitAnalysis {
-                    val draft = try {
-                        // 跨轮反重复：把最近几轮展示过的候选一并交给起草，别再复读。
-                        val avoid = recentReplies.asAvoid()
-                        if (prefs.streamReplies) {
-                            try {
-                                withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
-                                    client.draftStream(
-                                        snapshot, rel, ctx, count = count, avoid = avoid,
-                                        intensity = lastIntensity,
-                                        onVisible = { live -> main.post { if (isCurrent(token)) overlay?.showStreaming(live) } },
-                                        scope = sc
-                                    )
-                                }
-                            } catch (e: SafetyBlockedException) {
-                                // A refusal must reach the user, not be retried as a
-                                // transport hiccup: the fallback would refuse again.
-                                throw e
-                            } catch (e: Exception) {
-                                // Opt-in streaming must never cost the round its
-                                // candidates: a provider or proxy that buffers SSE
-                                // fails here, so redo it the ordinary way.
-                                Log.w(TAG, "stream draft failed, falling back: " + e.message)
-                                withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
-                                    client.draftOnly(snapshot, rel, ctx, count, avoid,
-                                        intensity = lastIntensity, scope = sc)
-                                }
-                            }
-                        } else {
-                            withHardTimeout(prefs.requestTimeoutSeconds * 1000L, "回复接口") { sc ->
-                                client.draftOnly(snapshot, rel, ctx, count, avoid,
-                                    intensity = lastIntensity, scope = sc)
-                            }
-                        }
-                    } catch (e: SafetyBlockedException) {
-                        Log.w(TAG, "draft blocked: " + e.message)
-                        main.post {
-                            if (isCurrent(token)) overlay?.showError(e.message ?: "这条不适合自动给候选")
-                        }
-                        emptyList()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "draft failed: " + e.message)
-                        emptyList()
-                    }
-                    main.post {
-                        if (!isCurrent(token)) return@post
-                        round.draft = draft
-                        round.draftFinished = true
-                        if (draft.isNotEmpty()) {
-                            overlay?.showDraftFirst(draft) { text -> fillInput(token, text) }
-                        }
-                        finishRoundIfReady()
-                    }
-                }
+                // 判断迟迟不回（chat 协议慢 / 路由挂了）时的兜底触发。
+                main.postDelayed(fireDraftBlind, DraftTrigger.WAIT_MS)
             }
         }
     }
@@ -941,6 +1156,7 @@ open class ChatCaptureService : AccessibilityService() {
         val token = session.token() ?: return
         if (!isCurrent(token)) return
         ocrBusy = true
+        armOcrWatchdog()
         screenCapture.capture(shouldCapture = { isCurrent(token) }) { res ->
             if (!isCurrent(token)) {
                 if (res is ScreenCapture.Result.Ok) res.bitmap.recycle()
@@ -1019,6 +1235,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (ocrBusy || destroyed || !prefs.enabled) return
         val windowId = rootInActiveWindow?.windowId ?: return
         ocrBusy = true
+        armOcrWatchdog()
         screenCapture.capture(shouldCapture = {
             !destroyed && prefs.enabled && foregroundPkg == WECHAT_PKG
         }) { res ->
@@ -1317,11 +1534,14 @@ open class ChatCaptureService : AccessibilityService() {
      * 悬浮球本来就看得见，点开通知也只是 toast 提示，不凭空画一张空卡。
      */
     override fun onStartCommand(intent: android.content.Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == KeepAliveService.ACTION_SUMMON) {
-            main.post {
+        when (intent?.action) {
+            KeepAliveService.ACTION_SUMMON -> main.post {
                 if (session.target == null) overlay?.toast("先打开一个聊天窗口，助手才会出卡")
                 else overlay?.summon()
             }
+            // 通知栏「重新生成」：卡片被 QQ 的键盘挡住、胶囊被拖到边上时，
+            // 这是最后一个一定能按到的手动入口。
+            KeepAliveService.ACTION_GENERATE -> main.post { manualGenerate() }
         }
         return super.onStartCommand(intent, flags, startId)
     }
@@ -1358,6 +1578,7 @@ open class ChatCaptureService : AccessibilityService() {
         // Tear the overlay down and cut its callback so a stale button tap can
         // never call back into this dead instance.
         overlay?.onManualAnalyze = null
+        overlay?.onManualGenerate = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
         overlay?.onToggleAppAuto = null
