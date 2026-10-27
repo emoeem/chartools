@@ -25,6 +25,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.kb.ExpertApply
 import com.jev.probe.core.kb.ExpertCatalog
 import com.jev.probe.core.kb.ExpertPack
 import com.jev.probe.core.kb.ExpertShelf
@@ -34,6 +35,7 @@ import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
 import com.jev.probe.core.kb.PersonaCard
 import com.jev.probe.core.kb.PersonaPreset
 import com.jev.probe.core.kb.PersonaProfile
+import com.jev.probe.core.kb.StyleSink
 import com.jev.probe.core.kb.PersonaStatus
 import com.jev.probe.core.kb.PersonaStore
 import com.jev.probe.ui.ExpertAdapter
@@ -72,6 +74,20 @@ class ExpertActivity : AppCompatActivity() {
 
     private lateinit var prefs: Prefs
     private val store: PersonaStore by lazy { PersonaStore.get(this) }
+
+    /**
+     * 「当前生效」的写入口。适配到 `Prefs.style` —— **不引入第二份状态**：
+     * 这里只是把同一个 SharedPreferences 属性包成 [StyleSink]，没有任何副本。
+     */
+    private val styleSink = object : StyleSink {
+        override var style: String
+            get() = prefs.style
+            set(v) {
+                prefs.style = v
+            }
+    }
+
+    private val expertApply: ExpertApply by lazy { ExpertApply(store, styleSink) }
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
@@ -335,22 +351,31 @@ class ExpertActivity : AppCompatActivity() {
      * 热度写在 worker 上再 `finish()`：`touch` 要读改写整个 JSON，放在主线程会
      * 顶着一次磁盘写去关页面。
      */
+    /**
+     * 点「用」。三段顺序与失败语义都在 [ExpertApply] 里，这里只负责线程与提示。
+     *
+     * 之前的写法是**先把 `prefs.style` 换掉，再在后台 install** —— 磁盘写失败时
+     * 设置已经变成新专家、库里却没有这一条，界面照样弹「已套用」。现在落库先做，
+     * 失败就原样退回并照实说原因，不再假装成功。
+     */
     private fun applyExpert(p: PersonaProfile) {
-        prefs.style = p.body
+        val name = p.name
         worker.execute {
             // 目录条目第一次被用时先落库：热度要记在一条真实的库条目上，
             // 否则「最热」对 331 位目录专家永远是 0（货架不记热度）。
-            val preset = presetOf(p)
-            val live = if (preset != null) {
-                runCatching { store.install(preset) }.getOrNull()
-            } else {
-                store.get(p.id)
-            }
-            live?.let { runCatching { store.touch(it.id) } }
+            val result = expertApply.apply(p, presetOf(p))
             main.post {
-                toast("已套用「${p.name}」")
-                setResult(RESULT_OK)
-                finish()
+                if (result.ok) {
+                    toast(
+                        if (result.warning.isBlank()) "已套用「$name」"
+                        else "已套用「$name」（${result.warning}）"
+                    )
+                    setResult(RESULT_OK)
+                    finish()
+                } else {
+                    // 不改 setResult、不 finish：让用户留在专家库，换一位再试。
+                    toast(result.problem)
+                }
             }
         }
     }
