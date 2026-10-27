@@ -7,13 +7,31 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * 一条**有名字的人设**。
+ * 一条**有名字的人设** —— 也就是专家库里的一个「专家」。
  *
  * 和 [PersonaCard] 的分工：卡是「这一份人设被怎么理解」（解析结果，不可持久化），
- * 这里是人设**本身**（用户写下的那段原文 + 它的名字）。一份人设可以被改名、复制、
- * 导出、删掉，卡不会跟着存 —— 卡每次都由 [body] 现算。
+ * 这里是人设**本身**（用户写下的那段原文 + 它的名字 + 浏览层信息）。一份人设可以
+ * 被改名、复制、导出、删掉，卡不会跟着存 —— 卡每次都由 [body] 现算。
  *
- * [builtin] 只标「这条来自内置模板」，用来给「恢复内置模板」判断哪些已经在了；
+ * ## 两组字段，一条铁律
+ *
+ * - **行为层**：[body]。它是唯一进 `promptText()` 的东西，因为它就是卡的全部输入。
+ * - **浏览层**：[name]、[avatar]、[description]、[tags]、[category]、[usedCount]、
+ *   [presetKey]、[skillRefs]、[appPkgs]。这些只被界面、检索、排序、装配读，
+ *   **一个字节都不进提示词**。铁律的理由很具体：如果简介混进提示词，用户改一句
+ *   简介就会改变回复风格，而这件事没有任何报错可查。
+ *
+ *   例外只有一处：[body] 里如果写了「主题：网调」，那是用户**在正文里**声明的，
+ *   照旧进提示词 —— 那是他写的人设内容，不是这里加的元数据。
+ *
+ * ## 新增字段为什么都带默认值
+ *
+ * v1 的 `personas.json` 只有 `id/name/body/updatedAt/builtin`。工程用的是
+ * `org.json` 而不是 kotlinx.serialization，**反序列化不会套用 data class 的默认值**，
+ * 所以兼容性靠两件事：这里的默认值（Kotlin 侧构造）+ [PersonaStore] 里显式的
+ * `optXXX` 兜底（JSON 侧读取）。两者都写，v1 文件才真的能被读成 v2 对象。
+ *
+ * [builtin] 只标「这条来自内置预设」，用来给「恢复内置模板」判断哪些已经在了；
  * 内置条和用户自建的条**完全平等**：可以改、可以改名、可以删。模板是起点，不是枷锁。
  */
 data class PersonaProfile(
@@ -25,10 +43,41 @@ data class PersonaProfile(
      */
     val body: String,
     val updatedAt: Long = System.currentTimeMillis(),
-    val builtin: Boolean = false
+    val builtin: Boolean = false,
+    /** 浏览层：一个 emoji（专家卡左上角）。**不进提示词。** */
+    val avatar: String? = null,
+    /** 浏览层：卡片上那一行简介。**不进提示词。** */
+    val description: String? = null,
+    /** 浏览层：卡片下方的标签（2–3 个最合适）。**不进提示词。** */
+    val tags: List<String> = emptyList(),
+    /** 浏览层：分类抽屉。空 = 未分类。**不进提示词。** */
+    val category: String? = null,
+    /** 浏览层 + 排序：被套用过几次（「最热」排序的唯一数据源）。**不进提示词。** */
+    val usedCount: Int = 0,
+    /**
+     * 内置预设的**稳定标识**（如 `daily.friend`），用户改名不变；用户自建/复制出来的为空串。
+     *
+     * 存在的唯一理由：`seeded[]` / `removed[]` 台账要认得出「这条是不是那张预设」。
+     * 只按名字认的话，用户把「日常」改成「闲聊」之后台账就失联了 —— 下次启动会
+     * 复活一份和它并排的重名副本。
+     */
+    val presetKey: String = "",
+    /**
+     * 行为层（S4 灰度）：这个专家只用这些技能。空 = 沿用全局 enabled（今天的行为）。
+     * 改的是**装配**，不是文本，所以它不进提示词本身。
+     */
+    val skillRefs: List<String> = emptyList(),
+    /** 行为层（S4 灰度）：这个专家只在这些 App 里出现。空 = 全部已适配 App。 */
+    val appPkgs: List<String> = emptyList()
 ) {
     /** 现算的结构化卡；认不出键时退回自由文本，与手写人设完全同一套规则。 */
     fun card(): PersonaCard = PersonaCard.parse(body)
+
+    /** 有没有可展示的简介（界面用，避免到处写 `?: ""` 判空）。 */
+    val hasBlurb: Boolean get() = !description.isNullOrBlank()
+
+    /** 分类的空值归一到「未分类」用的空串，排序/筛选都不必再判 null。 */
+    val categoryOrBlank: String get() = category?.trim().orEmpty()
 }
 
 /** [PersonaStore.importJson] 的结果。永远不抛，失败写在 [error] 里。 */
@@ -55,7 +104,7 @@ data class PersonaImport(
  * 人设库：`filesDir/kb/personas.json`。
  *
  * 存在的理由是「人设不该被编译进 APK」。在此之前，能选的人设只有
- * [PersonaPresets] 里那三张写死的字串 —— 卖货的话术、客服的口气、和甲方说话的
+ * [PersonaPresets] 里那几张写死的字串 —— 卖货的话术、客服的口气、和甲方说话的
  * 分寸，全都要用户重新敲一遍，而且一关页面就没了。有了这个库，人设是**数据**：
  * 有名字、能存、能改、能导出给第二台机器。
  *
@@ -70,6 +119,24 @@ data class PersonaImport(
  *    「多几份」，不是「把现在这份换掉」。
  *
  * 单写者：所有读写过同一把锁，落盘走临时文件 + rename（同 [KbStore]）。
+ *
+ * ## v2 文件格式与两个台账
+ *
+ * ```json
+ * {"version":2,
+ *  "seeded":["roleplay.dom", ...],
+ *  "removed":["daily.friend"],
+ *  "items":[{...}]}
+ * ```
+ *
+ * - `seeded[]`：**播过**哪些预设。老用户升级后新加的预设能补进来，靠的就是
+ *   「`key ∉ seeded`」这一个条件。
+ * - `removed[]`：用户**主动删掉**过哪些预设。它是 `seeded` 的补充说明 ——
+ *   点名「这张是删的，不是没播过」，`restoreBuiltins()` 会它显式放行（用户点
+ *   「恢复内置模板」就是反悔）。
+ *
+ * 没有这两个台账，只能靠「文件在不在」判断要不要播种，于是：① 老用户永远收不到
+ * 新增预设；② 一旦改成「每次启动补缺」，用户删掉的预设会每次启动都长回来。
  */
 class PersonaStore private constructor(context: Context) {
 
@@ -79,7 +146,11 @@ class PersonaStore private constructor(context: Context) {
     private val root: File get() = File(app.filesDir, "kb")
     private val file: File get() = File(root, "personas.json")
 
-    /** 最近一次读盘的坏消息（文件损坏已备份等），给设置页回显用；正常为 null。 */
+    /** 台账的内存副本；每次读盘由 [decode] 刷新，写盘时随 items 一起落盘。 */
+    private val seeded = LinkedHashSet<String>()
+    private val removed = LinkedHashSet<String>()
+
+    /** 最近一次读盘的坏消息（文件损坏已备份、升级没写成等），给设置页回显用；正常为 null。 */
     @Volatile
     var lastProblem: String? = null
         private set
@@ -91,8 +162,8 @@ class PersonaStore private constructor(context: Context) {
     /**
      * 当前生效的是哪一条。
      *
-     * 只比原文（去首尾空白），因为 [Prefs.style] 是唯一真源；匹配不上任何一条
-     * 就是「未保存的自由文本」，这是合法状态，不是错误。
+     * 只比原文（去首尾空白），因为 [Prefs.style][com.jev.probe.core.Prefs] 是唯一真源；
+     * 匹配不上任何一条就是「未保存的自由文本」，这是合法状态，不是错误。
      */
     fun activeOf(style: String): PersonaProfile? {
         val text = style.trim()
@@ -106,10 +177,19 @@ class PersonaStore private constructor(context: Context) {
     /** 「清空知识库」的确认框要报得出会连带删掉几份人设。 */
     fun count(): Int = list().size
 
+    /** 台账快照（诊断/测试用）：哪些预设播过、哪些被用户删过。 */
+    fun ledger(): Pair<Set<String>, Set<String>> = synchronized(lock) {
+        loadLocked()
+        seeded.toSet() to removed.toSet()
+    }
+
     // ------------------------------------------------------------------ 写
 
     /**
      * 新建或就地更新。[id] 为 null 时新建。
+     *
+     * 就地更新**保留**浏览层字段（头像/简介/标签/分类/热度/`presetKey`/绑定）——
+     * 编辑正文不该顺手清掉用户填过的分类。
      *
      * @return 落盘后的条目；正文为空或 [id] 指向不存在的条目时返回 null（不新建半条）。
      */
@@ -131,9 +211,104 @@ class PersonaStore private constructor(context: Context) {
         }
     }
 
+    /** 带完整字段的新建（专家编辑器用）；正文为空时不新建。 */
+    fun create(
+        name: String,
+        body: String,
+        avatar: String? = null,
+        description: String? = null,
+        tags: List<String> = emptyList(),
+        category: String? = null,
+        skillRefs: List<String> = emptyList(),
+        appPkgs: List<String> = emptyList()
+    ): PersonaProfile? {
+        val text = body.trimEnd()
+        if (text.isBlank()) return null
+        return synchronized(lock) {
+            val items = loadLocked().toMutableList()
+            val entry = PersonaProfile(
+                id = newId(),
+                name = name.trim().ifBlank { "未命名专家" },
+                body = text,
+                avatar = avatar?.trim()?.ifBlank { null },
+                description = description?.trim()?.ifBlank { null },
+                tags = tags.map { it.trim() }.filter { it.isNotBlank() }.distinct(),
+                category = category?.trim()?.ifBlank { null },
+                skillRefs = skillRefs.filter { it.isNotBlank() }.distinct(),
+                appPkgs = appPkgs.filter { it.isNotBlank() }.distinct()
+            )
+            items += entry
+            if (writeLocked(items)) entry else null
+        }
+    }
+
+    /** 只改浏览层（头像/简介/标签/分类），不动正文。 */
+    fun updateMeta(
+        id: String,
+        name: String? = null,
+        avatar: String? = null,
+        description: String? = null,
+        tags: List<String>? = null,
+        category: String? = null
+    ): PersonaProfile? = synchronized(lock) {
+        val items = loadLocked().toMutableList()
+        val at = items.indexOfFirst { it.id == id }
+        if (at < 0) return@synchronized null
+        val old = items[at]
+        val next = old.copy(
+            name = name?.trim()?.ifBlank { old.name } ?: old.name,
+            avatar = avatar?.trim()?.ifBlank { null },
+            description = description?.trim()?.ifBlank { null },
+            tags = tags?.map { it.trim() }?.filter { it.isNotBlank() }?.distinct() ?: old.tags,
+            category = category?.trim()?.ifBlank { null },
+            updatedAt = System.currentTimeMillis()
+        )
+        items[at] = next
+        if (writeLocked(items)) next else null
+    }
+
+    /**
+     * 记一次「这个专家被用了」。**唯一**的热度打点入口。
+     *
+     * 故意**不动** `updatedAt`：「最新」排序按「最近编辑」排，如果套用也刷时间，
+     * 那么「最新」会悄悄变成「最近使用」，两个概念糊成一个，用户永远说不清
+     * 为什么刚建的那条专家排在最后。
+     *
+     * @return 更新后的条目；id 不存在时返回 null（不打点，也不写盘）。
+     */
+    fun touch(id: String): PersonaProfile? = synchronized(lock) {
+        if (id.isBlank()) return@synchronized null
+        val items = loadLocked().toMutableList()
+        val at = items.indexOfFirst { it.id == id }
+        if (at < 0) return@synchronized null
+        val next = items[at].copy(usedCount = items[at].usedCount + 1)
+        items[at] = next
+        if (writeLocked(items)) next else null
+    }
+
+    /**
+     * 按正文打点 —— 起草链路手上只有 `Prefs.style`（那段文本），没有 id。
+     * 匹配不上任何一条时什么也不做：自由文本不是专家，没有热度可记。
+     */
+    fun touchActive(style: String): PersonaProfile? {
+        val hit = activeOf(style) ?: return null
+        return touch(hit.id)
+    }
+
+    /**
+     * 删除。删的是内置预设时**记一笔墓碑**（`removed[]`），下次启动不会复活。
+     *
+     * 注意：这里的「不复活」有两条独立保险 —— `seeded[]` 里永远留着这个 key
+     * （播过就是播过），`removed[]` 只是把「用户是主动删的」这件事说明白，
+     * 好让「恢复内置模板」知道该放行哪一张。
+     */
     fun delete(id: String): Boolean = synchronized(lock) {
         val items = loadLocked().toMutableList()
-        if (!items.removeAll { it.id == id }) return@synchronized false
+        val at = items.indexOfFirst { it.id == id }
+        if (at < 0) return@synchronized false
+        val key = items[at].presetKey
+        items.removeAt(at)
+        if (key.isNotBlank()) removed += key
         writeLocked(items)
     }
 
@@ -141,22 +316,40 @@ class PersonaStore private constructor(context: Context) {
     fun duplicate(id: String): PersonaProfile? = synchronized(lock) {
         val items = loadLocked().toMutableList()
         val src = items.firstOrNull { it.id == id } ?: return@synchronized null
-        val copy = PersonaProfile(newId(), uniqueName(items, src.name + " 副本"), src.body)
+        // 副本是**用户自己的**专家，不是那张预设：清掉 presetKey，否则台账里
+        // 会出现两条同 key 的条目，删除语义会变得说不清。热度也从 0 开始。
+        val copy = PersonaProfile(
+            id = newId(),
+            name = uniqueName(items, src.name + " 副本"),
+            body = src.body,
+            avatar = src.avatar,
+            description = src.description,
+            tags = src.tags,
+            category = src.category,
+            skillRefs = src.skillRefs,
+            appPkgs = src.appPkgs
+        )
         items += copy
         if (writeLocked(items)) copy else null
     }
 
     /**
-     * 把**缺的**内置模板补回来，已存在的（按名字）跳过。
+     * 把**缺的**内置预设补回来，已存在的（按 `presetKey`，退化时按名字）跳过。
      * 删了内置模板又想找回来时用；不会复制出一堆同名条目。
+     *
+     * 这里对 `removed[]` **显式放行**：用户点「恢复内置模板」就是明确反悔。
      */
     fun restoreBuiltins(): Int = synchronized(lock) {
         val items = loadLocked().toMutableList()
-        val have = items.map { it.name }.toSet()
+        val haveKeys = items.map { it.presetKey }.filter { it.isNotBlank() }.toSet()
+        val haveNames = items.map { it.name }.toSet()
         var added = 0
-        PersonaPresets.ALL.forEach { (name, body) ->
-            if (name !in have) {
-                items += PersonaProfile(newId(), name, body.trim(), builtin = true)
+        PersonaPresets.PRESETS.forEach { preset ->
+            val already = preset.key in haveKeys || preset.name in haveNames
+            if (!already) {
+                items += preset.toProfile()
+                seeded += preset.key
+                removed -= preset.key
                 added++
             }
         }
@@ -169,6 +362,10 @@ class PersonaStore private constructor(context: Context) {
     /**
      * 全量导出成 JSON（人设库是给人看的，`toString(2)`）。
      * 拿去另一台机器「导入」即可，不需要 root、不需要云。
+     *
+     * 导出**带浏览层**（头像/简介/标签/分类）与 S4 的绑定，否则「把我的专家搬过去」
+     * 会搬成一堆没头像没分类的裸文本。不导出 `presetKey`（那是本机的台账标识）和
+     * `usedCount`（另一台机器上的热度没有意义）。
      */
     fun exportJson(): String = synchronized(lock) {
         val arr = JSONArray()
@@ -179,6 +376,12 @@ class PersonaStore private constructor(context: Context) {
                     .put("body", p.body)
                     .put("updatedAt", p.updatedAt)
                     .put("builtin", p.builtin)
+                    .put("avatar", p.avatar ?: JSONObject.NULL)
+                    .put("description", p.description ?: JSONObject.NULL)
+                    .put("tags", p.tags.toJsonArray())
+                    .put("category", p.category ?: JSONObject.NULL)
+                    .put("skillRefs", p.skillRefs.toJsonArray())
+                    .put("appPkgs", p.appPkgs.toJsonArray())
             )
         }
         JSONObject().put("version", VERSION).put("items", arr).toString(2)
@@ -190,17 +393,19 @@ class PersonaStore private constructor(context: Context) {
     /**
      * 导入。接受三种形态，都不抛异常：
      *
-     * - 本库 [exportJson] 的输出（`{"version":1,"items":[…]}`）
+     * - 本库 [exportJson] 的输出（`{"version":2,"items":[…]}`）
      * - 裸数组 `[{"name":…,"body":…}]`（手工拼的、别的工具给的）
      * - 一段**纯文本人设卡**（没有 name 字段时用第一行当名字）
      *
      * 重名策略见类注释：同名不同文 → 新增 `名字(导入)`。绝不覆盖已有条目。
+     * 浏览层字段（头像/简介/标签/分类/绑定）**有就带上，没有就空着** ——
+     * 导入别人的旧版导出文件不会因为缺字段而失败。
      */
     fun importJson(raw: String): PersonaImport = synchronized(lock) {
         val text = raw.trim()
         if (text.isEmpty()) return@synchronized PersonaImport(error = "内容是空的")
 
-        val incoming = ArrayList<Pair<String, String>>()
+        val incoming = ArrayList<Incoming>()
         try {
             val root = when {
                 text.startsWith("[") -> JSONArray(text)
@@ -210,13 +415,22 @@ class PersonaStore private constructor(context: Context) {
                 val o = root.optJSONObject(i) ?: continue
                 val body = o.optString("body", "").trimEnd()
                 if (body.isBlank()) continue
-                incoming += o.optString("name", "").trim() to body
+                incoming += Incoming(
+                    name = o.optString("name", "").trim(),
+                    body = body,
+                    avatar = o.optText("avatar"),
+                    description = o.optText("description"),
+                    tags = o.stringList("tags"),
+                    category = o.optText("category"),
+                    skillRefs = o.stringList("skillRefs"),
+                    appPkgs = o.stringList("appPkgs")
+                )
             }
         } catch (e: Exception) {
             // 不是 JSON —— 当成一张纯文本人设卡收下，而不是报错让人重来。
             val name = text.split('\n').firstOrNull { it.isNotBlank() }
                 ?.substringBefore('：')?.take(24)?.trim().orEmpty()
-            incoming += name.ifBlank { "导入的人设" } to text
+            incoming += Incoming(name = name.ifBlank { "导入的人设" }, body = text)
         }
         if (incoming.isEmpty()) return@synchronized PersonaImport(error = "里面没有人设（缺 body / 正文为空）")
 
@@ -224,17 +438,17 @@ class PersonaStore private constructor(context: Context) {
         var added = 0
         var renamed = 0
         var skipped = 0
-        incoming.forEach { (rawName, body) ->
-            val name = rawName.ifBlank { "导入的人设" }
+        incoming.forEach { src ->
+            val name = src.name.ifBlank { "导入的人设" }
             val same = items.firstOrNull { it.name == name }
             when {
                 same == null -> {
-                    items += PersonaProfile(newId(), name, body)
+                    items += src.toProfile(name)
                     added++
                 }
-                same.body.trim() == body.trim() -> skipped++
+                same.body.trim() == src.body.trim() -> skipped++
                 else -> {
-                    items += PersonaProfile(newId(), uniqueName(items, "$name(导入)"), body)
+                    items += src.toProfile(uniqueName(items, "$name(导入)"))
                     added++
                     renamed++
                 }
@@ -248,17 +462,21 @@ class PersonaStore private constructor(context: Context) {
     // -------------------------------------------------------------- 落盘
 
     /**
-     * 读盘。文件不存在 → 用 [PersonaPresets] 播种。
+     * 读盘。三条路径：文件不存在 → 播种；文件是 v1 → 迁移；文件是 v2 → 补缺预设。
      *
-     * 「只播种一次」靠的是文件本身：用户逐条删光后文件还在（items 为空），不会再
-     * 长回来；而**整个 kb 目录**被「清空知识库与历史」删掉时，下一次读会重新播种 ——
-     * 那是一次明确的「回到出厂」，设置页的确认框里写明了这一点。
+     * 「只播种一次」靠的是文件里的 `seeded[]` 台账，**不再靠文件在不在**：
+     * 后者只能表达「有没有播过」，表达不了「播过之后用户删了哪几张」，
+     * 于是老用户永远收不到新增预设 —— 那是专家库这个功能的地基，不能坏在这。
      */
     private fun loadLocked(): List<PersonaProfile> {
         val f = file
         if (!f.isFile) return seedLocked()
-        val parsed = runCatching { decode(f.readText(Charsets.UTF_8)) }.getOrNull()
-        if (parsed != null) return parsed
+        val doc = runCatching { decode(f.readText(Charsets.UTF_8)) }.getOrNull()
+        if (doc != null) {
+            seeded.clear(); seeded.addAll(doc.seeded)
+            removed.clear(); removed.addAll(doc.removed)
+            return if (doc.version < VERSION) migrateLocked(doc) else topUpLocked(doc.items)
+        }
 
         // 解析失败：先备份再放行，绝不直接覆盖用户的文件。
         val stamp = System.currentTimeMillis()
@@ -278,12 +496,76 @@ class PersonaStore private constructor(context: Context) {
     }
 
     private fun seedLocked(): List<PersonaProfile> {
-        val seeded = PersonaPresets.ALL.map { (name, body) ->
-            PersonaProfile(newId(), name, body.trim(), builtin = true)
-        }
-        writeLocked(seeded)
+        val items = PersonaPresets.PRESETS.map { it.toProfile() }
+        seeded.clear()
+        removed.clear()
+        items.forEach { seeded += it.presetKey }
+        writeLocked(items)
         lastProblem = null
-        return seeded
+        return items
+    }
+
+    /**
+     * v1 → v2。**这是全套改动里最高危的一步**：写坏 = 用户人设全没。
+     *
+     * 顺序刻意固定：先备份原文件 → 再算新结构 → 最后原子写。写失败也**不丢数据**：
+     * 内存里用迁移结果继续跑（用户这次能用），原 v1 文件原样留着，下次启动再试。
+     *
+     * 台账怎么填：v1 的首读会把**全部**预设播种一遍，所以「库里没有某张」等价于
+     * 「用户把它删了」。于是迁移时把全部内置 key 一次性记进 `seeded[]` ——
+     * 那几张被删掉的就再也不会被当成「新预设」复活。这不是偷懒，是 v1 的唯一解：
+     * 被删掉的条目连名字都没留下，无从反推。
+     */
+    private fun migrateLocked(doc: Doc): List<PersonaProfile> {
+        val stamp = System.currentTimeMillis()
+        val backup = File(root, "personas.v1-$stamp.json")
+        val saved = runCatching {
+            root.mkdirs()
+            file.copyTo(backup, overwrite = true)
+            true
+        }.getOrDefault(false)
+
+        val items = doc.items.map { p ->
+            // 老条目的 presetKey 只能按名字反查（v1 没存过它）。改名过的那几条查不到，
+            // 就留空 —— 它们从此被当成用户自己的专家，不会再被预设逻辑碰。
+            val key = if (p.builtin) PersonaPresets.keyOf(p.name) else ""
+            if (key.isNotEmpty()) p.copy(presetKey = key) else p
+        }
+        seeded.clear()
+        PersonaPresets.PRESETS.forEach { seeded += it.key }
+        removed.clear()
+
+        val ok = writeLocked(items)
+        lastProblem = when {
+            ok -> null
+            saved -> "人设库升级到 v2 没写成功，原文件已备份到 kb/${backup.name}，本次只读"
+            else -> "人设库升级到 v2 没写成功，也没能备份，本次只读（内容还在，只是没落盘）"
+        }
+        Log.i(TAG, "personas migrated v1->v2 ok=$ok backup=$saved items=${items.size}")
+        return items
+    }
+
+    /**
+     * v2 的补缺：把「没播过、也没被删过」的预设补进来。
+     *
+     * 只有这一条路径能让老用户收到新增预设。两个条件缺一不可 ——
+     * 少了 `seeded` 会重复播，少了 `removed` 会把用户删掉的长回来。
+     */
+    private fun topUpLocked(current: List<PersonaProfile>): List<PersonaProfile> {
+        val present = current.map { it.presetKey }.filter { it.isNotBlank() }.toSet()
+        val missing = PersonaPresets.PRESETS.filter {
+            it.key !in present && it.key !in seeded && it.key !in removed
+        }
+        if (missing.isEmpty()) return current
+
+        val items = current.toMutableList()
+        missing.forEach { items += it.toProfile() }
+        if (!writeLocked(items)) {
+            lastProblem = "有新的内置专家没写进人设库（储存空间？），下次启动会再试"
+            return current
+        }
+        missing.forEach { seeded += it.key }
+        return items
     }
 
     private fun writeLocked(items: List<PersonaProfile>): Boolean {
@@ -296,9 +578,22 @@ class PersonaStore private constructor(context: Context) {
                     .put("body", p.body)
                     .put("updatedAt", p.updatedAt)
                     .put("builtin", p.builtin)
+                    .put("avatar", p.avatar ?: JSONObject.NULL)
+                    .put("description", p.description ?: JSONObject.NULL)
+                    .put("tags", p.tags.toJsonArray())
+                    .put("category", p.category ?: JSONObject.NULL)
+                    .put("usedCount", p.usedCount)
+                    .put("presetKey", p.presetKey)
+                    .put("skillRefs", p.skillRefs.toJsonArray())
+                    .put("appPkgs", p.appPkgs.toJsonArray())
             )
         }
-        val text = JSONObject().put("version", VERSION).put("items", arr).toString(2)
+        val text = JSONObject()
+            .put("version", VERSION)
+            .put("seeded", seeded.toJsonArray())
+            .put("removed", removed.toJsonArray())
+            .put("items", arr)
+            .toString(2)
         return writeAtomic(file, text)
     }
 
@@ -319,11 +614,15 @@ class PersonaStore private constructor(context: Context) {
         }
     }
 
-    private fun decode(text: String): List<PersonaProfile> {
-        val arr = when {
-            text.trimStart().startsWith("{") -> JSONObject(text).optJSONArray("items") ?: JSONArray()
-            else -> JSONArray(text)
-        }
+    /**
+     * 解析。**所有新字段都必须显式 `optXXX` 兜底** —— 工程用 `org.json`，
+     * 反序列化时不套用 data class 默认值；直接 `getString("tags")` 遇到 v1 文件
+     * 会抛，`optString` 遇到数组会给出字符串 `"[]"` 这种垃圾。
+     */
+    private fun decode(text: String): Doc {
+        val trimmed = text.trimStart()
+        val root = if (trimmed.startsWith("{")) JSONObject(text) else null
+        val arr = root?.optJSONArray("items") ?: JSONArray(text)
         val out = ArrayList<PersonaProfile>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
@@ -335,15 +634,30 @@ class PersonaStore private constructor(context: Context) {
                 name = name,
                 body = body,
                 updatedAt = o.optLong("updatedAt", 0L),
-                builtin = o.optBoolean("builtin", false)
+                builtin = o.optBoolean("builtin", false),
+                avatar = o.optText("avatar"),
+                description = o.optText("description"),
+                tags = o.stringList("tags"),
+                category = o.optText("category"),
+                usedCount = o.optInt("usedCount", 0).coerceAtLeast(0),
+                presetKey = o.optString("presetKey", "").trim(),
+                skillRefs = o.stringList("skillRefs"),
+                appPkgs = o.stringList("appPkgs")
             )
         }
-        return out
+        return Doc(
+            // 裸数组 / 没有 version 的旧文件都按 v1 处理，走迁移路径补台账。
+            version = root?.optInt("version", 1) ?: 1,
+            items = out,
+            seeded = root?.stringList("seeded")?.toSet().orEmpty(),
+            removed = root?.stringList("removed")?.toSet().orEmpty()
+        )
     }
 
     companion object {
         private const val TAG = "JEVASSIST"
-        private const val VERSION = 1
+        /** 2 = 加了浏览层字段、`presetKey` 与 `seeded[]`/`removed[]` 两个台账。 */
+        private const val VERSION = 2
 
         @Volatile private var instance: PersonaStore? = null
 
@@ -366,4 +680,73 @@ class PersonaStore private constructor(context: Context) {
             return "$base $n"
         }
     }
+}
+
+/** 一份解析结果：条目 + 版本 + 两个台账。 */
+private data class Doc(
+    val version: Int,
+    val items: List<PersonaProfile>,
+    val seeded: Set<String>,
+    val removed: Set<String>
+)
+
+/** 导入过程中随身携带的一行（正文 + 浏览层），落成 [PersonaProfile] 前不分配 id。 */
+private data class Incoming(
+    val name: String,
+    val body: String,
+    val avatar: String? = null,
+    val description: String? = null,
+    val tags: List<String> = emptyList(),
+    val category: String? = null,
+    val skillRefs: List<String> = emptyList(),
+    val appPkgs: List<String> = emptyList()
+) {
+    fun toProfile(name: String = this.name): PersonaProfile = PersonaProfile(
+        id = PersonaStore.newId(),
+        name = name.ifBlank { "导入的人设" },
+        body = body,
+        avatar = avatar,
+        description = description,
+        tags = tags,
+        category = category,
+        skillRefs = skillRefs,
+        appPkgs = appPkgs
+    )
+}
+
+/** 预设 → 条目。`presetKey` 就是这里种下的，台账全靠它。 */
+private fun PersonaPreset.toProfile(id: String = PersonaStore.newId()): PersonaProfile =
+    PersonaProfile(
+        id = id,
+        name = name,
+        body = body.trim(),
+        builtin = true,
+        avatar = avatar,
+        description = description,
+        tags = tags,
+        category = category,
+        presetKey = key
+    )
+
+// ------------------------------------------------------------- org.json 小工具
+
+/** 缺失 / `null` / 空串 → null。`optString` 在这三种情况下都会给 `""`，分不开。 */
+private fun JSONObject.optText(key: String): String? =
+    if (!has(key) || isNull(key)) null else optString(key, "").trim().ifBlank { null }
+
+/** 字符串数组；不是数组就当空（导入别人的半截文件时不抛）。 */
+private fun JSONObject.stringList(key: String): List<String> {
+    val a = optJSONArray(key) ?: return emptyList()
+    val out = ArrayList<String>(a.length())
+    for (i in 0 until a.length()) {
+        val s = a.optString(i, "").trim()
+        if (s.isNotEmpty() && s !in out) out += s
+    }
+    return out
+}
+
+private fun Collection<String>.toJsonArray(): JSONArray {
+    val arr = JSONArray()
+    forEach { arr.put(it) }
+    return arr
 }
