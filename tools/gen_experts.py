@@ -216,7 +216,12 @@ def topic_of(name: str, desc: str, category: str) -> str:
             t = clip(head, MAX_TOPIC)
         else:
             t = category
-    return t[:MAX_TOPIC]
+    # 兜底分支从简介里切出来的短语，去完「精通」这类废话**会留下一个前导空格**
+    # （`精通 iOS/Android …` → `" iOS"`），于是 body 里写成 `主题： iOS`，
+    # 关系行写成 `在「 iOS」这件事上`。331 位里命中 2 位（移动应用开发者、高级开发者）。
+    # `PersonaCard` 解析时会 trim，所以回复不受影响 —— 但正文是给人看的，
+    # 而这种瑕疵只会在生成物里悄悄留着。统一在出口 strip 一次。
+    return t[:MAX_TOPIC].strip()
 
 
 def tone_of(text: str, name: str) -> str:
