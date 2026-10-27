@@ -11,6 +11,7 @@ import com.jev.probe.core.kb.DomainBrief
 import com.jev.probe.core.kb.Ledger
 import com.jev.probe.core.kb.LedgerPrompt
 import com.jev.probe.core.kb.PersonaCard
+import com.jev.probe.core.kb.StyleSource
 import com.jev.probe.core.kb.effectiveRelationship
 import com.jev.probe.core.safety.SafetyBlockedException
 import com.jev.probe.core.safety.SafetyGate
@@ -218,7 +219,7 @@ class ReplyClient(private val prefs: Prefs) {
         if (candidates.isEmpty()) return null
         // 复查必须拿到和起草**同一张**人设卡：第 3、5 条标准是「有没有和已知的
         // 称呼/边界冲突」，不给它卡，这两条就只能退化成「读着像不像」。
-        val rawStyle = ctx?.contact?.persona?.trim().takeUnless { it.isNullOrBlank() } ?: prefs.style
+        val rawStyle = StyleSource.resolve(prefs.style, ctx?.contact?.persona).text
         val card = PersonaCard.parse(rawStyle)
         val raw = chatOn(
             prefs.reviewEndpoint(),
@@ -313,7 +314,7 @@ class ReplyClient(private val prefs: Prefs) {
         // The persona note may be a key/value card (PersonaCard). Free text parses to
         // structured = false and comes back verbatim, so this is byte-for-byte the
         // string the app sent before cards existed.
-        val rawStyle = ctx?.contact?.persona?.trim().takeUnless { it.isNullOrBlank() } ?: style
+        val rawStyle = StyleSource.resolve(style, ctx?.contact?.persona).text
         val card = PersonaCard.parse(rawStyle)
         // Pre-flight, before anything leaves the device: some rounds this app will not
         // draft for, and the user has to be told which and why. Silently returning no

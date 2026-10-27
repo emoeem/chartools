@@ -364,11 +364,19 @@ class ExpertActivity : AppCompatActivity() {
             // 目录条目第一次被用时先落库：热度要记在一条真实的库条目上，
             // 否则「最热」对 331 位目录专家永远是 0（货架不记热度）。
             val result = expertApply.apply(p, presetOf(p))
+            // 联系人专用人设压过专家正文（优先级在 StyleSource 里，是有意的）。
+            // 这一句只讲事实：有 N 个聊天里已经写了专用人设，在那几个聊天里
+            // 这次套用不会改变提示词。不讲这句，用户看到的就是「点了没反应」。
+            val shadowing = if (result.ok) shadowingContacts() else 0
             main.post {
                 if (result.ok) {
+                    val notes = listOfNotNull(
+                        result.warning.takeIf { it.isNotBlank() },
+                        if (shadowing > 0) "${shadowing} 个联系人写了专用人设，那里会盖过它" else null
+                    )
                     toast(
-                        if (result.warning.isBlank()) "已套用「$name」"
-                        else "已套用「$name」（${result.warning}）"
+                        if (notes.isEmpty()) "已套用「$name」"
+                        else "已套用「$name」（${notes.joinToString("；")}）"
                     )
                     setResult(RESULT_OK)
                     finish()
@@ -379,6 +387,17 @@ class ExpertActivity : AppCompatActivity() {
             }
         }
     }
+
+    /**
+     * 有多少个联系人在「专用人设」里写了自己的话。
+     *
+     * 只数不读：这些文本属于具体某个人，套用专家时没有任何理由把它读出来，
+     * 更不该出现在 toast 里。读不到（文件坏 / 首次运行）就当 0，不拦套用 ——
+     * 这只是句提示，不是前置条件。
+     */
+    private fun shadowingContacts(): Int = runCatching {
+        KbStore.get(this).contacts().count { it.persona.isNotBlank() }
+    }.getOrDefault(0)
 
     private fun moreMenu(p: PersonaProfile) {
         if (ExpertShelf.isFromPack(p)) {

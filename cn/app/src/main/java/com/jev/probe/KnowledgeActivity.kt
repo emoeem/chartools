@@ -485,7 +485,13 @@ class KnowledgeActivity : AppCompatActivity() {
         box.addView(label("别名（每行一个）")); box.addView(aliasEdit)
         box.addView(label("关系")); box.addView(relEdit)
         box.addView(label("备注")); box.addView(notesEdit)
-        box.addView(label("联系人专用人设（点一下即套用）")); box.addView(personaPresets(personaEdit))
+        // 这里写的话会盖过专家库的正文（优先级在 StyleSource）。写在字段旁边，
+        // 因为只有在这里决定「要不要写」的人，才需要知道这件事。
+        box.addView(label("联系人专用人设（点一下即套用）"))
+        box.addView(text("填了这里，专家库套用的正文对这个人就不生效了", 11f, sub).apply {
+            setPadding(0, dp(2), 0, dp(4))
+        })
+        box.addView(personaPresets(personaEdit))
         box.addView(personaEdit)
 
         AlertDialog.Builder(this)
