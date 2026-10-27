@@ -57,6 +57,13 @@
             android:name=".KnowledgeActivity"
             android:exported="false" />
 
+        <!-- 专家库：浏览/搜索/套用/自建。独立 Activity 而不是设置页的一段，
+             因为在设置页里它让那个文件涨到 1523 行。 -->
+        <activity
+            android:name=".ExpertActivity"
+            android:exported="false"
+            android:label="专家库" />
+
         <activity
             android:name=".DocImportActivity"
             android:exported="false" />
