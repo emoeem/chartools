@@ -45,8 +45,17 @@ class PersonaBaselineTest {
         }
     }
 
-    /** 出厂顺序写死在这里：它是产品决定（先亲密模板、后日常、最后销售），不是实现细节。 */
-    private val expectedNames = listOf("网调·我是主", "网调·我是奴", "日常", "销售·跟单")
+    /**
+     * 出厂顺序写死在这里：它是产品决定（先亲密模板、后日常、最后销售），不是实现细节。
+     * S3 把预设从 4 张扩到 14 张时**只允许往后追加** —— 前四张的顺序不许动，
+     * 因为老用户的 `seeded[]` 台账和它是同一个身份序列。
+     */
+    private val expectedNames = listOf(
+        "网调·我是主", "网调·我是奴", "日常", "销售·跟单",
+        "恋爱·刚认识", "恋爱·冷战破冰", "销售·报价", "销售·追尾款",
+        "职场·向上汇报", "职场·同事协作", "职场·催进度",
+        "客服·售后", "客服·投诉安抚", "家人·日常问候"
+    )
 
     @Test
     fun theShippedLibraryStartsWithTheseExactPresetsInThisOrder() = withDir { dir ->

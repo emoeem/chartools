@@ -141,4 +141,59 @@ class PersonaPresetsTest {
             assertFalse("「$name」的黄灯不能混进安全词", card.safeword.contains("黄灯"))
         }
     }
+    /**
+     * S3 加进来的新约定：每张预设都得是**能浏览**的，不只是能进提示词。
+     *
+     * 这条守的是「专家库看起来像一个库」：没有分类 → 全部堆进「未分类」抽屉；
+     * 没有标签 → 卡片下面空一片；简介为空 → 卡面只剩一行键名。而这些都是
+     * **静默的**失败，界面不会报错，只会显得像个半成品。
+     */
+    @Test
+    fun everyPresetCarriesBrowsingMetadata() {
+        val categories = setOf("情感", "销售", "职场", "客服", "日常")
+        PersonaPresets.PRESETS.forEach { preset ->
+            assertTrue("「${preset.name}」没有简介", preset.description.isNotBlank())
+            assertTrue("「${preset.name}」分类不在预定义集合：${preset.category}", preset.category in categories)
+            assertTrue("「${preset.name}」标签少于 2 个", preset.tags.size >= 2)
+            assertTrue("「${preset.name}」标签里有空值", preset.tags.all { it.isNotBlank() })
+            // 头像是一个 emoji（一个码位）—— 两个字符的 emoji 会撑高卡片。
+            assertEquals("「${preset.name}」头像必须是单个 emoji", 1, preset.avatar.codePointCount(0, preset.avatar.length))
+            // key 必须唯一：台账靠它认人，重复就会有两个预设抢同一个身份。
+            assertTrue("「${preset.name}」的 presetKey 为空", preset.key.isNotBlank())
+        }
+        assertEquals(
+            "presetKey 必须唯一",
+            PersonaPresets.PRESETS.size,
+            PersonaPresets.PRESETS.map { it.key }.toSet().size
+        )
+        // 五个分类都要有货：空抽屉在界面上就是「点进去什么都没有」。
+        categories.forEach { c ->
+            assertTrue("分类「$c」一张预设都没有", PersonaPresets.PRESETS.any { it.category == c })
+        }
+    }
+
+    /**
+     * 不变量 1 的机器化守卫：浏览层元数据**一个字节都不许进提示词**。
+     * 一旦混进去，用户改一句简介就会改变回复风格，而这件事没有报错可查。
+     */
+    @Test
+    fun browsingMetadataNeverLeaksIntoThePrompt() {
+        PersonaPresets.PRESETS.forEach { preset ->
+            // 直白的做法（断言「简介/标签不出现在提示词里」）会误报：标签本来就是
+            // 正文里的高频词（「汇报」「跟单」），它们在 body 里出现是**用户写的正文**，
+            // 不是元数据泄漏。真正要钉的是：加不加元数据，提示词逐字相同。
+            val bare = PersonaProfile(id = "a", name = "x", body = preset.body)
+            val full = PersonaProfile(
+                id = "b", name = preset.name, body = preset.body,
+                avatar = preset.avatar, description = preset.description,
+                tags = preset.tags, category = preset.category
+            )
+            assertEquals("「${preset.name}」的元数据改变了提示词", bare.card().promptText(), full.card().promptText())
+            assertFalse(
+                "「${preset.name}」的简介进了提示词",
+                full.card().promptText().contains(preset.description)
+            )
+        }
+    }
+
 }

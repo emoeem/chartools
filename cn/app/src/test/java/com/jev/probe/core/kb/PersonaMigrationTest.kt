@@ -155,11 +155,11 @@ class PersonaMigrationTest {
         )
 
         val first = store(dir).list()
-        assertEquals(4, first.size)
+        assertEquals(PersonaPresets.PRESETS.size, first.size)
         assertTrue("缺的那张预设要补进来", first.any { it.presetKey == "sales.followup" })
         // 只补一次：再读不回重。
-        assertEquals(4, store(dir).list().size)
-        assertEquals(4, first.map { it.id }.size)
+        assertEquals(PersonaPresets.PRESETS.size, store(dir).list().size)
+        assertEquals(PersonaPresets.PRESETS.size, first.map { it.id }.toSet().size)
     }
 
     @Test
@@ -289,7 +289,7 @@ class PersonaMigrationTest {
     fun exportedBrowsingFieldsComeBackOnImport() = withDir { dir ->
         val a = store(dir)
         val created = a.create(
-            name = "客服·售后",
+            name = "售后·自定义",
             body = "称呼：您\n关系：客服和客户\n语气：客气、简短",
             avatar = "🎧",
             description = "售后口径：先接住情绪，再给时限",
@@ -308,7 +308,7 @@ class PersonaMigrationTest {
             val result = b.importJson(a.exportJson())
             assertTrue(result.describe(), result.ok)
             // 导入的是 a 的全库（4 张预设 + 1 条自建），所以按名字取自己那条。
-            val back = b.list().first { it.name == "客服·售后" }
+            val back = b.list().first { it.name == "售后·自定义" }
             assertEquals("🎧", back.avatar)
             assertEquals("售后口径：先接住情绪，再给时限", back.description)
             assertEquals(listOf("售后", "口径"), back.tags)
