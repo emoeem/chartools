@@ -30,7 +30,7 @@ import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.RankedReply
 import com.jev.probe.core.Trace
-import com.jev.probe.jev.StrategyOrder
+import com.jev.probe.core.StrategyOrder
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -153,7 +153,6 @@ class OverlayController(private val ctx: Context) {
     /** The readable text of an in-flight streaming draft (opt-in), or null. */
     private var streamText: String? = null
     private var streamPending = false
-    private var uiState: OverlayUiState = OverlayUiState.Idle
 
     /** Text views showing an elapsed-seconds counter; the ticker updates them in place. */
     private val waitLabels = ArrayList<Pair<TextView, String>>()
@@ -335,7 +334,6 @@ class OverlayController(private val ctx: Context) {
         header.addView(pill); header.addView(head); header.addView(status)
         header.addView(chev); header.addView(regenBtn)
         attachDrag(header, widthPx = { cardW }, onTap = { onHeaderTap() }) { x, y ->
-            app?.let { prefs.saveCardPosition(it, x, y) }
             if (expanded) applyBodyMaxHeight()
         }
 
@@ -576,7 +574,6 @@ class OverlayController(private val ctx: Context) {
 
     fun showError(msg: String) {
         if (!ensureWindow()) return
-        uiState = OverlayUiState.Error(msg)
         // 错误是唯一允许自动展开卡的路径：用户得看到"为什么没有候选"。
         setMode(Mode.CARD)
         expanded = true
@@ -593,7 +590,6 @@ class OverlayController(private val ctx: Context) {
     }
 
     fun showDraftFirst(draft: List<RankedReply>, onFill: (String) -> Unit) {
-        uiState = OverlayUiState.Draft(draft)
         lastFill = onFill
         streamText = null
         replies = draft.map { it.copy(ranked = false, prob = 0.0) }
@@ -612,9 +608,6 @@ class OverlayController(private val ctx: Context) {
 
     /** Replies land on their own — whether or not the judgment has arrived yet. */
     fun showReplies(ranked: List<RankedReply>, error: String? = null, onFill: (String) -> Unit) {
-        uiState = if (error == null && ranked.any { it.ranked }) OverlayUiState.Ranked(ranked)
-        else if (error != null) OverlayUiState.Error(error)
-        else OverlayUiState.Draft(ranked)
         lastFill = onFill
         streamText = null
         replies = ranked
@@ -628,7 +621,7 @@ class OverlayController(private val ctx: Context) {
     /**
      * An in-flight streaming draft grew (opt-in; see `Prefs.streamReplies`). Only
      * readable text is passed in — the JSON envelope and the prompt's own array
-     * format are stripped in [com.jev.probe.jev.StreamText]. The card shows it where
+     * format are stripped in [StreamText]（jev 包）. The card shows it where
      * the skeleton would be, so the user starts reading before the model finishes.
      *
      * Re-rendering is throttled: a quick model emits dozens of chunks a second and
@@ -690,7 +683,6 @@ class OverlayController(private val ctx: Context) {
     fun toast(msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
 
     fun hide() {
-        uiState = OverlayUiState.Idle
         val r = root ?: return
         stopTicker()
         runCatching { wm.removeView(r) }

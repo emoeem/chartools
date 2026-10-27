@@ -25,6 +25,10 @@ import com.jev.probe.core.Msg
  */
 class WhatsAppAdapter : ChatAppAdapter {
     override val pkg = WhatsAppRules.PACKAGE
+    override val displayName = "WhatsApp"
+
+    /** 永不截屏：无 OCR 兜底、无手动「截屏识别一次」。读不到文字就返回 null。 */
+    override val allowScreenshot = false
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? =
         WhatsAppRules.read(A11yNode(root))?.let { ChatSnapshot(it.title, it.messages) }

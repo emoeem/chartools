@@ -25,7 +25,41 @@ import com.jev.probe.core.Msg
  */
 interface ChatAppAdapter {
     val pkg: String
+
+    /** 展示名：主页支持列表、知识库联系人标签都从这里派生，别再各自写死。 */
+    val displayName: String
+
+    /**
+     * 在当前窗口里定位这个 App 的输入框（只找，不写；写由 [InputFiller] 负责）。
+     * 默认 null = 本 App 没有验证过的写入口，填入回退到显式剪贴板复制。
+     */
+    fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? = null
+
+    /** 截屏 / OCR 兜底是否允许。WhatsApp 永不截屏（含手动「截屏识别一次」）。 */
+    val allowScreenshot: Boolean get() = true
+
     fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot?
+}
+
+/**
+ * 无稳定 id 的输入框（X、Telegram 把 composer 发布成普通可编辑节点）的通用查找：
+ * 全树恰好一个合格可编辑节点才算，两个以上视为歧义、宁可剪贴板。
+ */
+internal fun findEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    val stack = ArrayDeque<AccessibilityNodeInfo>()
+    stack.addLast(root)
+    var guard = 0
+    var found: AccessibilityNodeInfo? = null
+    while (stack.isNotEmpty() && guard < 5000) {
+        guard++
+        val node = stack.removeLast()
+        if (node.isEditable && node.isVisibleToUser && node.isEnabled && !node.isPassword) {
+            if (found != null) return null // Ambiguous editor: clipboard only.
+            found = node
+        }
+        for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
+    }
+    return if (stack.isEmpty()) found else null
 }
 
 /** Shared helpers. */
@@ -89,6 +123,10 @@ internal fun findTitleInActionBar(
  */
 class QQAdapter : ChatAppAdapter {
     override val pkg = "com.tencent.mobileqq"
+    override val displayName = "QQ"
+
+    override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
+        root.findAccessibilityNodeInfosByViewId("com.tencent.mobileqq:id/input").firstOrNull()
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -180,6 +218,10 @@ class QQAdapter : ChatAppAdapter {
  */
 class TimAdapter : ChatAppAdapter {
     override val pkg = "com.tencent.tim"
+    override val displayName = "TIM"
+
+    override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
+        root.findAccessibilityNodeInfosByViewId("com.tencent.tim:id/input").firstOrNull()
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -361,6 +403,10 @@ internal fun collectFeishuBubbleRects(
  */
 class FeishuAdapter : ChatAppAdapter {
     override val pkg = "com.ss.android.lark"
+    override val displayName = "飞书"
+
+    override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
+        root.findAccessibilityNodeInfosByViewId("com.ss.android.lark:id/kb_rich_text_content").firstOrNull()
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -482,6 +528,10 @@ private fun parseXDesc(desc: String): Pair<String, String>? {
  */
 class XAdapter : ChatAppAdapter {
     override val pkg = "com.twitter.android"
+    override val displayName = "X"
+
+    // X 的 composer 是普通可编辑节点（无稳定 id），通用查找是唯一抓手。
+    override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? = findEditableNode(root)
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels

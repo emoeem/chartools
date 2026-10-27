@@ -312,7 +312,7 @@ JDK 17 and the Android SDK (platform 35). Run from `global/`:
 - `fixtures/`: recorded screens and the authored test corpus.
 - `tools/`: dump reader and a small OpenRouter client.
 - `docs/`: [testing](docs/TESTING.md) and [diagnostics](docs/DIAGNOSTICS.md).
-- `apk/`: the signed release APK.
+- `apk/`: signed release APKs when built locally (git-ignored; the repository itself ships none).
 
 Ground rules for contributions: never add a path that sends a message; keys never go
 into the repo, logs or diagnostics; diagnostics never contain chat text; the

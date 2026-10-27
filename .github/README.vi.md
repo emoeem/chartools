@@ -24,7 +24,8 @@ Nhánh này tiếp tục phát triển dựa trên bản gốc v1.7, toàn bộ 
 
 - **Lớp thu thập:** thêm adapter Telegram và TIM; WeChat đi theo đường chỉ đọc "chụp màn hình + OCR trên máy" (màu bong bóng quyết định bên trái/phải); gom nhóm OCR, gán người nói, khử trùng lặp trả lời gần đây.
 - **Kho tri thức:** nhập tài liệu trên máy (PDF / Word / EPUB / trang web; bản scan tự chuyển sang OCR trên máy), gói kỹ năng (Agent Skills, tự khớp theo hội thoại), hồ sơ liên hệ và sổ ghi.
-- **Thư viện nhân vật:** nhân vật trở thành thư viện do người dùng tự quản (tạo / đổi tên / nhân bản / xoá / nhập / xuất / khôi phục mẫu), thay cho ba mẫu cứng; hỗ trợ nhân vật riêng cho từng liên hệ và các khoá chủ đề, giới hạn cứng, "tránh nói", từ an toàn, đèn vàng, câu ví dụ.
+- **Thư viện nhân vật:** nhân vật trở thành thư viện do người dùng tự quản (tạo / đổi tên / nhân bản / xoá / nhập / xuất / khôi phục mẫu), thay cho ba mẫu cứng, với 14 thẻ khởi đầu (quan hệ / bán hàng / công sở / chăm sóc khách hàng / đời thường); hỗ trợ nhân vật riêng cho từng liên hệ và các khoá chủ đề, giới hạn cứng, "tránh nói", từ an toàn, đèn vàng, câu ví dụ.
+- **Thư viện chuyên gia (danh mục chỉ đọc 331 vị):** một "chuyên gia" = một phần thân nhân vật + ảnh đại diện, mô tả một dòng, thẻ, phân loại và số lần dùng. Ngoài các mẫu viết tay, APK còn đóng gói danh mục lấy từ [MichengAI/dsh-agency-agents](https://github.com/MichengAI/dsh-agency-agents): 331 vị thuộc 22 lĩnh vực (kỹ thuật / thiết kế / marketing / bán hàng / tài chính / y tế / pháp lý / học thuật …), và **chỉ vào thư viện của bạn khi bạn bấm chọn**. Phần nội dung nhân vật trong Cài đặt vẫn là nguồn duy nhất — không lưu "đang chọn chuyên gia nào" — còn ảnh, mô tả, thẻ, phân loại và số lần dùng chỉ dùng để duyệt và sắp xếp, không bao giờ vào prompt.
 - **Tạo thủ công:** nút tạo lại trên đầu thẻ, trong menu nhấn giữ và trong thông báo thường trực; có ảnh chụp hiện tại thì tạo lại ngay, không có thì đọc màn hình một lần, đều không được thì nói rõ lý do; một vòng bị kẹt quá 8 giây có thể bị tiếp quản thủ công.
 - **Độ tự nhiên của trả lời (P0):** bản nháp đầu tiên được viết *sau* khi có phán đoán (dự phòng viết mù sau 2 giây); quan hệ ưu tiên "quan hệ của liên hệ hơn quan hệ toàn cục"; hợp đồng chiến lược ứng viên biết số lượng (xin 2 ứng viên không còn đòi 3 chiến lược); khoá nhân vật mới "tránh nói" tách "dừng cả vòng khi đối phương nhắc tới" khỏi "trả lời của tôi không được nói ra"; phán đoán có độ tin cậy thấp chỉ còn là gợi ý, không bị nói như sự thật.
 - **Lớp can thiệp tùy chọn:** tăng cường chỉ đọc qua LSPosed / Vector — mặc định tắt, bật theo từng ứng dụng, không đọc được thì lập tức quay về đường accessibility và ghi lý do vào Trace.
@@ -38,7 +39,7 @@ Tác giả gốc không tham gia và không bảo chứng cho các thay đổi n
 ## Lý do nên dùng
 
 - **Nó phân tích trước, rồi mới soạn câu trả lời.** Hầu hết công cụ chỉ yêu cầu mô hình soạn thẳng một câu trả lời. Jev trước tiên dùng mô hình phân tích để xác định ý định thật của đối phương, mức độ nguy hiểm, có nên trả lời ngay hay không, rồi mới soạn câu trả lời dựa trên kết quả đó.
-- **Không can thiệp vào ứng dụng chat của bạn.** Không hook, không sửa gói, không sử dụng API hay tài khoản của bất kỳ ứng dụng nào, không đọc cơ sở dữ liệu; chỉ dùng dịch vụ trợ năng của hệ thống để đọc cuộc trò chuyện đang hiển thị trên màn hình.
+- **Mặc định không can thiệp vào ứng dụng chat của bạn.** Mặc định không hook, không sửa gói, không sử dụng API hay tài khoản của bất kỳ ứng dụng nào, không đọc cơ sở dữ liệu; chỉ dùng dịch vụ trợ năng của hệ thống để đọc cuộc trò chuyện đang hiển thị trên màn hình. Ngoài ra còn một lớp tăng cường **tùy chọn** qua LSPosed / Vector — tắt theo mặc định, bật riêng cho từng ứng dụng, và đọc không được thì lập tức quay về đường trợ năng.
 - **Quyền gửi luôn thuộc về bạn.** Ứng dụng chỉ điền câu trả lời vào ô nhập, không bao giờ tự gửi, không can thiệp vào việc chuyển tiền, lì xì hoặc thu tiền.
 - **Một lõi, nhiều nền tảng.** QQ, TIM và X đã chạy thử trên thiết bị thật; 飞书 bổ sung nội dung chính bằng OCR, WhatsApp được kiểm chứng bằng dữ liệu ghi màn hình. Thêm một ứng dụng chỉ cần viết một adapter vài chục dòng.
 - **Nó hiểu những người và việc liên quan đến bạn.** Cơ sở tri thức cục bộ và hồ sơ liên hệ tự động đưa các ghi chú phù hợp cùng lịch sử trò chuyện của người đó vào quá trình phân tích, giúp câu trả lời không mâu thuẫn với thiết lập của bạn.
@@ -91,7 +92,7 @@ Người dùng đã cài gói debug phải gỡ cài đặt trước khi cài re
 
 ### Phân tích và câu trả lời ứng viên
 
-- Mô hình phân tích trả lời một lần với: ý định thật của đối phương, mức độ nguy hiểm (1–9), điều đối phương muốn, có nên trả lời ngay hay không, hành động tốt nhất. Khoảng 1 giây, kèm mức độ chắc chắn.
+- Mô hình phân tích trả lời một lần với: ý định thật của đối phương, mức độ nguy hiểm (0–9), điều đối phương muốn, có nên trả lời ngay hay không, hành động tốt nhất. Khoảng 1 giây, kèm mức độ chắc chắn.
 - Mô hình tạo sinh soạn 3 câu trả lời ứng viên bằng văn phong nói tự nhiên; mô hình phân tích xếp hạng theo mức “phù hợp nhất” và đưa ra tỷ lệ.
 - Chạm một lần trong cửa sổ nổi để sao chép hoặc điền câu trả lời; thao tác điền dùng `ACTION_SET_TEXT`, nếu thất bại sẽ tự chuyển sang dán từ bảng nhớ tạm, **trong mọi trường hợp đều không gửi**.
 
@@ -99,11 +100,21 @@ Người dùng đã cài gói debug phải gỡ cài đặt trước khi cài re
 
 Tại Cài đặt → Phân tích → “Cơ sở tri thức và liên hệ”.
 
-- **Ghi chú**: tiêu đề / nội dung / thẻ / thường trực. Ghi chú thường trực luôn được đưa vào; các ghi chú khác chỉ được đưa vào khi thẻ hoặc tiêu đề xuất hiện trong tiêu đề cuộc trò chuyện hoặc trong 6 tin nhắn gần nhất, tối đa 5 ghi chú. Hỗ trợ nhập bằng cách dán văn bản nhiều dòng, phân đoạn theo dòng trống và lấy dòng đầu mỗi đoạn làm tiêu đề.
+- **Ghi chú**: tiêu đề / nội dung / thẻ / thường trực. Ghi chú thường trực luôn được đưa vào; các ghi chú khác được chọn theo độ liên quan BM25 (tiêu đề, thẻ và nội dung đều tham gia chấm điểm), tối đa 5 ghi chú. Hỗ trợ nhập bằng cách dán văn bản nhiều dòng, phân đoạn theo dòng trống và lấy dòng đầu mỗi đoạn làm tiêu đề.
 - **Liên hệ**: tên / bí danh (mỗi dòng một bí danh) / quan hệ / ghi chú. Có hiệu lực khi tiêu đề cuộc trò chuyện khớp với tên hoặc bất kỳ bí danh nào; tự động bỏ qua số người ở cuối tên nhóm, khoảng trắng đầu/cuối và khác biệt chữ hoa chữ thường. Có thể nhấn giữ vào bong bóng cửa sổ nổi để lưu nhanh cuộc trò chuyện hiện tại làm liên hệ bằng một chạm.
-- **Lịch sử**: “Ghi lại lịch sử trò chuyện (chỉ lưu trên máy)” mặc định tắt; khi bật, mỗi lần phân tích sẽ kèm N tin nhắn gần nhất (mặc định 30) và tự động loại bỏ phần đã hiển thị trên màn hình.
+- **Lịch sử**: “Ghi lại lịch sử trò chuyện (chỉ lưu trên máy)” mặc định tắt; khi bật, mỗi lần phân tích sẽ kèm N tin nhắn gần nhất (mặc định 30 trong cài đặt; bộ ngân sách nội bộ tối đa đưa 20 tin vào ngữ cảnh soạn) và tự động loại bỏ phần đã hiển thị trên màn hình.
 - **Xóa**: cơ sở tri thức và lịch sử đều nằm trong thư mục riêng của ứng dụng; nút “Xóa cơ sở tri thức và lịch sử” trong cài đặt xóa toàn bộ chỉ bằng một lần nhấn, không ghi vào nhật ký, không đưa vào git. Xem [chính sách quyền riêng tư](../cn/PRIVACY.md) để biết các loại dữ liệu cụ thể, mục đích, bên nhận và cách lưu giữ.
 - Phần đầu khung phân tích trong cửa sổ nổi hiển thị một dòng “Cơ sở tri thức N mục · Lịch sử M mục” để tiện xác nhận những gì đã được đưa vào.
+
+### Thư viện chuyên gia
+
+Tại Cài đặt → “Nhân vật và giọng điệu” → “Mở thư viện chuyên gia”.
+
+- **Hai tầng:** thư viện của bạn (đổi tên, sửa, xoá, xuất) và danh mục chỉ đọc đóng gói trong APK (331 vị thuộc 22 lĩnh vực). Danh mục chỉ là mẫu: chỉ vào thư viện khi bạn bấm chọn.
+- **“Dùng chuyên gia này” = thêm vào rồi áp dụng:** phần thân nhân vật được ghi vào đoạn văn bản nhân vật trong Cài đặt (vẫn là nguồn duy nhất) và ghi nhận một lần dùng (dữ liệu cho sắp xếp “dùng nhiều”). “Thêm vào thư viện” chỉ thêm, không đổi nhân vật hiện tại. Khi đã có trong thư viện, danh mục không hiển thị thêm bản trùng.
+- **Chỉ phần thân vào prompt:** giọng điệu và quy tắc đều đến từ chủ đề / cách gọi / giọng điệu / tình huống / quy tắc / câu ví dụ trong phần thân; ảnh, mô tả, thẻ, phân loại và số lần dùng chỉ dùng để duyệt và sắp xếp.
+- **Lưới và tìm kiếm:** lưới thẻ hai cột, ngăn phân loại, tìm theo tên / mô tả / thẻ / phần thân, ba kiểu sắp xếp (tổng hợp / dùng nhiều / mới nhất), 14 thẻ khởi đầu cùng tạo, nhân bản, nhập/xuất, xoá và khôi phục mẫu.
+- **Ràng buộc chuyên gia (bản xám, mặc định tắt):** chuyên gia có thể chỉ định kỹ năng cần nạp và ứng dụng sẽ xuất hiện; khi bật chỉ nạp các kỹ năng được chỉ định, khi tắt đường lắp ghép giống hệt trước đây.
 
 ### API và mô hình
 
@@ -114,7 +125,7 @@ Tại Cài đặt → Phân tích → “Cơ sở tri thức và liên hệ”.
 - API phân tích cũng có thể dùng DeepSeek: cấu hình có sẵn “DeepSeek chính thức” (địa chỉ `https://api.deepseek.com/v1`, mô hình `deepseek-chat`, dùng khóa DeepSeek). DeepSeek không cung cấp mô hình phán đoán Jev, nên khi chọn, giao thức phán đoán tự chuyển sang “chế độ chat OpenAI”: cùng bộ 7 câu hỏi được viết thành prompt cho mô hình chat và trả về đúng cấu trúc JSON đó — ý định, mức độ nguy hiểm, đối phương cần gì, có nên trả lời ngay, xếp hạng câu trả lời đều hoạt động như thường.
 - API phân tích có thêm hai nút “giao thức Jev / chế độ chat OpenAI” quyết định cách giao tiếp của nhánh này. Giao thức Jev gửi câu hỏi cho mô hình phán đoán Jev (họ TypeSafe, câu trả lời đã hiệu chuẩn); chế độ chat gửi cho mô hình chat thường, xác suất và mức độ nguy hiểm do nó tự ước lượng, kém chính xác hơn Jev và mỗi lần phán đoán phải mang theo toàn bộ bộ câu hỏi (khoảng 2000–3000 token đầu vào, chậm và đắt hơn Jev). Cấu hình có sẵn tự chọn đúng giao thức (DeepSeek = chế độ chat, còn lại = giao thức Jev); địa chỉ tùy chỉnh có thể chọn. Nâng cấp từ bản cũ giữ nguyên đường đi.
 - Có sẵn các cấu hình OpenRouter / 博查 Jev / TypeSafe trực tiếp / Vercel / OpenCode Zen / DeepSeek chính thức / 通义兼容; mỗi thẻ có thể kiểm tra kết nối bằng một chạm.
-- Chỉ cần một khóa là có thể dùng: nếu API trả lời và thị giác để trống, chúng sẽ tự động kế thừa cấu hình của API phân tích.
+- Chỉ cần một khóa là có thể dùng: **khóa** của API trả lời và thị giác để trống sẽ tự động kế thừa theo chuỗi (thị giác → trả lời → phân tích); địa chỉ và mô hình không kế thừa — API trả lời để trống thì mặc định đi OpenRouter (khi phân tích dùng DeepSeek, phần trả lời hoặc cấu hình DeepSeek luôn, hoặc giữ mặc định OpenRouter và điền khóa OpenRouter).
 - Khi nâng cấp từ phiên bản cũ, khóa cũ sẽ được chuyển sang cấu trúc ba thẻ mới đúng một lần.
 
 ### Thu thập và OCR
@@ -136,7 +147,7 @@ Không. Ứng dụng chỉ điền câu trả lời đã chọn vào ô nhập; 
 <details>
 <summary><b>Có cần root hay Xposed không? Tài khoản có bị khóa không?</b></summary>
 
-Không cần root và không phải cài bất kỳ module nào. Ứng dụng không sửa gói cài đặt của ứng dụng chat, không tiêm mã vào tiến trình, không gọi API hay hệ thống tài khoản của ứng dụng khác, mà chỉ đọc nội dung giao diện do dịch vụ trợ năng của hệ thống cung cấp, giống như một phần mềm đọc màn hình.
+Đường mặc định không cần root và không phải cài bất kỳ module nào: ứng dụng chỉ đọc nội dung giao diện do dịch vụ trợ năng của hệ thống cung cấp, giống như một phần mềm đọc màn hình. Lớp tăng cường tùy chọn qua LSPosed / Vector mới cần framework root — tắt theo mặc định, bật riêng cho từng ứng dụng, và có rủi ro tài khoản (xem [hướng dẫn tính năng](../cn/docs/feature-guide.md)); khi không bật, hành vi giống hệt như không có tiêm mã.
 
 </details>
 
@@ -193,7 +204,7 @@ Hình minh họa ranh giới dữ liệu: đọc giao diện chat và OCR đư�
 2. Thêm một dòng vào `adapters` trong `capture/ChatCaptureService.kt`.
 3. Không cần thay đổi phần phân tích, câu trả lời ứng viên, cửa sổ nổi hoặc chức năng điền lại.
 
-Trước tiên hãy dùng `adb shell uiautomator dump` để xem ứng dụng đích cung cấp những gì; hiện có bốn adapter chuyên biệt, ngoài ra còn có lối vào OCR thủ công cho các ứng dụng chưa được hỗ trợ:
+Trước tiên hãy dùng `adb shell uiautomator dump` để xem ứng dụng đích cung cấp những gì; hiện có sáu adapter chuyên biệt (QQ, TIM, X, 飞书, WhatsApp, Telegram), ngoài ra còn có lối vào OCR thủ công cho các ứng dụng chưa được hỗ trợ:
 
 | Ứng dụng | Tình trạng cây | Adapter thực hiện |
 |---|---|---|
@@ -235,7 +246,7 @@ cd cn
 - **X chỉ được kiểm chứng với giao diện tiếng Trung**: dấu phân cách `：`, cụm `上午 / 下午` và `Read` là kết quả thử trên giao diện tiếng Trung; giao diện tiếng Anh mới chỉ có phương án dự phòng và chưa kiểm chứng.
 - **Trò chuyện nhóm**: phân tích theo mô hình một-một, nên “đối phương” và thiết lập quan hệ có thể không chính xác trong nhóm.
 - **Tiếng Trung**: ngôn ngữ huấn luyện chính của Jev là tiếng Anh; câu hỏi dùng tiếng Anh, còn nội dung chat giữ nguyên tiếng Trung; nên thực hiện một loạt gán nhãn và hiệu chuẩn bằng các hội thoại thật của bạn (xem `cn/tools/jev/`).
-- **Truy xuất cơ sở tri thức dùng so khớp thẻ/tiêu đề**, không dùng truy xuất ngữ nghĩa; cần gắn thẻ cho ghi chú thì ghi chú đó mới có thể được khớp. Lịch sử được loại trùng theo “người nói + nguyên văn”, cùng một người lặp lại cùng một câu sẽ chỉ được ghi một lần.
+- **Truy xuất cơ sở tri thức dùng độ liên quan BM25** (tiêu đề, thẻ và nội dung đều tham gia chấm điểm), không dùng truy xuất ngữ nghĩa (vector); viết cụ thể, từ khóa khớp thì ghi chú dễ được chọn. Lịch sử được loại trùng theo “người nói + nguyên văn”, cùng một người lặp lại cùng một câu sẽ chỉ được ghi một lần.
 - **OCR phụ thuộc vào quyền chụp màn hình của hệ thống**: dịch vụ trợ năng phải được hệ thống cho phép chụp màn hình; Xiaomi / HyperOS có thể từ chối (khung phân tích sẽ hiện lý do thất bại); không thể chụp cửa sổ được bảo vệ (`FLAG_SECURE`).
 - **OCR chỉ nhận diện được phần đang hiện trên màn hình**: không thể đọc phần bị cắt của tin nhắn dài; có thể có chữ sai.
 - **Kích thước gói tăng**: mô hình tiếng Trung ngoại tuyến của ML Kit làm APK tăng từ khoảng 12 MB lên khoảng 27 MB và chỉ build cho arm64-v8a.

@@ -1,7 +1,6 @@
 package com.jev.probe
 
 import android.graphics.Bitmap
-import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -24,13 +23,10 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.jev.probe.bridge.BridgeStore
 import com.jev.probe.bridge.HookTargets
-import com.jev.probe.core.Analysis
 import com.jev.probe.core.ChatSnapshot
-import com.jev.probe.core.Choice
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
-import com.jev.probe.core.Score
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
@@ -43,15 +39,35 @@ import com.jev.probe.core.kb.TopicScope
 import com.jev.probe.jev.JudgeClient
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.jev.VisionClient
+import com.jev.probe.ui.card
+import com.jev.probe.ui.cardBtn
+import com.jev.probe.ui.appLabel
+import com.jev.probe.ui.confirm
+import com.jev.probe.ui.openUrl
+import com.jev.probe.ui.pct
+import com.jev.probe.ui.toast
+import com.jev.probe.ui.versionLabel
+import com.jev.probe.ui.cardTitle
+import com.jev.probe.ui.foldSection
+import com.jev.probe.ui.primaryBtn
+import com.jev.probe.ui.resultText
+import com.jev.probe.ui.dp
+import com.jev.probe.ui.edit
+import com.jev.probe.ui.header
+import com.jev.probe.ui.label
+import com.jev.probe.ui.round
+import com.jev.probe.ui.section
+import com.jev.probe.ui.text
 import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class SettingsActivity : AppCompatActivity() {
 
-    private lateinit var prefs: Prefs
-    private val worker = Executors.newSingleThreadExecutor()
-    private val main = Handler(Looper.getMainLooper())
+    // internal: src/debug 的 DebugAcceptance（试写 runner）要读.
+    internal lateinit var prefs: Prefs
+    internal val worker = Executors.newSingleThreadExecutor()
+    internal val main = Handler(Looper.getMainLooper())
 
     private val accent = Palette.brand()
     private val ink = Color.parseColor("#111827")
@@ -66,22 +82,8 @@ class SettingsActivity : AppCompatActivity() {
     /** 回到这个页面时重算人设区（用户可能刚从知识库页补完主题标签）。 */
     private var personaReload: (() -> Unit)? = null
 
-    /**
-     * 人设库的界面状态。列表只在内存里，读盘走 [reloadPersonas] —— 输入框每次
-     * 打字都会重画列表（要更新「生效中」标记），不能顺手读一次盘。
-     */
-    private var personaShelf: LinearLayout? = null
-    private var personaShelfLine: TextView? = null
-    private var personaDraft: EditText? = null
-    private var personaKnown: List<PersonaProfile> = emptyList()
-    private var personaProblem: String? = null
-    private var onPersonaTextChanged: (() -> Unit)? = null
-
     /** Selected provider index per card, held so Save can read it back. */
     private var judgeProviderIdx = 0
-
-    private fun dp(v: Int) = TypedValue.applyDimension(
-        TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).roundToInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -399,14 +401,23 @@ class SettingsActivity : AppCompatActivity() {
         val personaBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(foldSection("人设与语气", defaultOpen = true, personaBody))
         val personaWrap = card()
-        personaWrap.addView(text("人设决定回复的语气、称呼和分寸。下面是一个可以自己攒的库：" +
-            "写一份「销售·跟单」，点「用」就切过去，回复的口气立刻跟着变。", 12f, sub))
-
-        val shelfLine = text("人设库：读取中…", 12f, ink)
-        val shelfHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        personaWrap.addView(shelfLine.apply { setPadding(0, dp(12), 0, dp(2)) })
-        personaWrap.addView(shelfHost)
-        personaWrap.addView(personaShelfActions())
+        val activeLine = text("当前生效：读取中…", 12f, ink)
+        personaWrap.addView(text("专家 = 一份人设正文 + 头像/简介/标签/分类。库里有内置预设，" +
+            "也能自己新建；点「用」立刻切换回复口径。", 12f, sub))
+        personaWrap.addView(activeLine.apply { setPadding(0, dp(10), 0, dp(2)) })
+        val openExperts = TextView(this).apply {
+            text = "打开专家库"
+            textSize = 14f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(Color.WHITE); background = round(dp(10), accent)
+            setPadding(dp(14), dp(11), dp(14), dp(11))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+            setOnClickListener {
+                startActivity(android.content.Intent(this@SettingsActivity, ExpertActivity::class.java))
+            }
+        }
+        personaWrap.addView(openExperts)
 
         personaWrap.addView(label("人设原文（保存时写进设置，也可以直接改）"))
         val styleEdit = edit(prefs.style, "例：网调关系，我定规矩你执行；语气短句、命令式；主题：网调").apply {
@@ -422,7 +433,6 @@ class SettingsActivity : AppCompatActivity() {
             personaLine.setTextColor(if (card.hasContent() && !card.structured) warn else ink)
             personaScopeLine.text = PersonaStatus.scopeLine(
                 TopicScope.scopeOf(kbPool, card.topic), kbAlwaysOn)
-            renderPersonaShelf()
         }
 
         personaWrap.addView(styleEdit)
@@ -438,15 +448,48 @@ class SettingsActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) = refreshPersonaStatus()
         })
-        // 库的渲染要知道「现在这段文本对应哪一条」，所以把两个控件交给字段，
-        // 由 [renderPersonaShelf] 在任意时刻重画。
-        personaShelf = shelfHost
-        personaShelfLine = shelfLine
-        personaDraft = styleEdit
-        onPersonaTextChanged = { refreshPersonaStatus() }
         refreshPersonaStatus()
-        reloadPersonas()
         personaBody.addView(personaWrap)
+
+        /**
+         * 「当前生效的是谁」。只有 `Prefs.style` 是唯一真源，所以这里不做 id 匹配，
+         * 而是拿那段文本去库里比原文（[PersonaStore.activeOf]）—— 多存一份 id
+         * 就多一处能漂移的状态，而漂移没有报错可查。
+         */
+        fun refreshActiveLine() {
+            worker.execute {
+                val name = runCatching { PersonaStore.get(this).activeOf(prefs.style)?.name }.getOrNull()
+                val live = prefs.style
+                main.post {
+                    activeLine.text = when {
+                        name != null -> "当前生效：「" + name + "」"
+                        live.isBlank() -> "当前没有生效的人设 —— 回复只用默认风格。"
+                        else -> "当前生效：未存进库的自由文本（想留着就去专家库「新建」）"
+                    }
+                }
+            }
+        }
+
+        /**
+         * 从专家库回来时把「那边套用的新原文」接过来，**但只在不覆盖用户输入的前提下**：
+         *
+         * - 编辑框里的文本 == 上次对齐时的值 → 用户没在这里动过，采纳 `Prefs.style`；
+         * - 否则说明这里有一段还没保存的手工修改，绝不覆盖，只在状态行提示一句。
+         *
+         * 少了这个判断就是「用户正在改人设，切个屏回来被清空」—— 丢的是他自己写的字。
+         */
+        var styleBase = prefs.style
+        fun syncStyleFromPrefs() {
+            val live = prefs.style
+            val current = styleEdit.text?.toString().orEmpty()
+            if (live == current) { styleBase = live; return }
+            if (current == styleBase) {
+                styleEdit.setText(live)
+                styleBase = live
+            } else {
+                activeLine.text = "设置里有未保存的人设改动（「保存全部设置」时以这里为准）"
+            }
+        }
 
         // 参与检索的笔记要读盘，不能压在输入框的回显路径上：先载入一次，之后
         // 打字只做纯字符串的解析。
@@ -459,11 +502,11 @@ class SettingsActivity : AppCompatActivity() {
                 main.post { kbPool = pool; kbAlwaysOn = on; refreshPersonaStatus() }
             }
         }
-        // 用户可能刚在知识库页补完主题标签再回到设置页：数字得跟着走，否则这一区
-        // 会一直报着进页面时的旧条数，看着就像"补标签没生效"。人设库同理 ——
-        // 用户可能刚加了一条人设又绕回来，列表不能是旧的。
-        personaReload = { loadKbPool(); reloadPersonas() }
+        // 用户可能刚在知识库页补完主题标签、或刚从专家库套用了另一张人设回来：
+        // 数字和生效提示都得跟着走，否则这一区会一直报着进页面时的旧状态。
+        personaReload = { loadKbPool(); refreshActiveLine(); syncStyleFromPrefs() }
         loadKbPool()
+        refreshActiveLine()
 
         // =================== 分析 ===================
         val behaviorBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -597,9 +640,8 @@ class SettingsActivity : AppCompatActivity() {
                 .setPositiveButton("清空") { _, _ ->
                     KbStore.get(this).clearAll()
                     kbResult.text = "已清空知识库与历史"
-                    personaKnown = emptyList()
-                    personaProblem = null
-                    reloadPersonas()
+                    refreshActiveLine()
+                    syncStyleFromPrefs()
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -801,19 +843,10 @@ class SettingsActivity : AppCompatActivity() {
 
         setContentView(scroll)
 
-        // Debug-only acceptance hook. The drafting prompt is the thing the user
-        // judged ("给的建议也很不太对", and a grovelling role-play line in a
-        // flirting thread), and it can only be judged against a real model.
-        //   adb shell am start -n com.jev.probe/.SettingsActivity \
-        //       --ez tone_check true
-        // runs the REAL drafting path once over a fixed, synthetic thread and
-        // writes the candidates to files/jev-tone-check.txt. It never reads a
-        // real conversation, and it is not compiled into release builds.
-        if (((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) &&
-            intent?.getBooleanExtra("tone_check", false) == true
-        ) {
-            runToneCheck()
-        }
+        // 调试验收钩子：真实现只在 src/debug（同 FQCN 覆盖），release 里是
+        // main 的空实现 —— 会发真实模型请求的代码不进 release 包。触发命令见
+        // debug 变体 DebugAcceptance 的注释。
+        DebugAcceptance.onSettingsCreate(this)
     }
 
     /**
@@ -826,44 +859,6 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         personaReload?.invoke()
-    }
-
-    private fun runToneCheck() {
-        val probe = draftPrefs(SCRATCH_REPLY) {
-            judgeBaseUrl = prefs.judgeBaseUrl
-            judgeProtocol = prefs.judgeProtocol
-            judgeModel = prefs.judgeModel
-            judgeKey = prefs.judgeKey
-            replyBaseUrl = prefs.replyBaseUrl
-            replyKey = prefs.replyKey
-            replyModel = prefs.replyModel
-            contextHistoryCount = prefs.contextHistoryCount
-        }
-        worker.execute {
-            val demo = ChatSnapshot("试写", listOf(
-                Msg("other", "你今天怎么这么晚才回我？"),
-                Msg("me", "刚忙完，想你了"),
-                Msg("other", "切，谁信啊，说好的周末陪我去看电影呢")
-            ))
-            // A light teasing thread: the judgment says so, and the drafter has to
-            // follow it instead of writing for an imagined crisis.
-            val judgment = Analysis(
-                trueIntent = Choice("casual_chat", 0.7, emptyMap()),
-                dangerLevel = Score(1.0, 0.8, 9),
-                sheNeeds = Choice("nothing", 0.5, emptyMap()),
-                shouldReplyNow = 0.9,
-                bestAction = Choice("make_plan", 0.5, emptyMap()),
-                tensionResolved = 0.2, literalQuestion = 0.8,
-                rankedReplies = emptyList(), latencyMs = 0
-            )
-            val out = try {
-                ReplyClient(probe).draft(demo, prefs.relationship, null, 3, emptyList(), judgment, prefs.style)
-            } catch (e: Exception) {
-                listOf("FAILED: ${e.message}")
-            }
-            runCatching { File(filesDir, "jev-tone-check.txt").writeText(out.joinToString("\n---\n")) }
-            main.post { Toast.makeText(this, "试写完成：${out.size} 条", Toast.LENGTH_LONG).show() }
-        }
     }
 
     // Held as fields because several test buttons read each other's key box.
@@ -938,381 +933,12 @@ class SettingsActivity : AppCompatActivity() {
      * from under each other when two tests overlapped. The real config is never
      * touched either way.
      */
-    private fun draftPrefs(scratchName: String, fill: Prefs.() -> Unit): Prefs {
+    internal fun draftPrefs(scratchName: String, fill: Prefs.() -> Unit): Prefs {
         getSharedPreferences(scratchName, MODE_PRIVATE).edit().clear().commit()
         return Prefs(this, scratchName).apply(fill)
     }
 
-    /** Opens an external link; swallows the failure with a toast rather than crashing. */
-    private fun openUrl(url: String) {
-        runCatching {
-            startActivity(
-                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
-                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        }.onFailure {
-            Toast.makeText(this, "打不开浏览器", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun versionLabel(): String = try {
-        val pi = packageManager.getPackageInfo(packageName, 0)
-        "版本 v${pi.versionName}（${pi.longVersionCode}）"
-    } catch (e: Exception) {
-        "版本 —"
-    }
-
-    /** 1x1 white JPEG for the vision smoke test, via the real encoder path. */
-    private fun whitePixelJpegB64(): String {
-        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-        bmp.eraseColor(Color.WHITE)
-        return VisionClient.encodeJpeg(bmp)
-    }
-
-    private fun pct(d: Double?): String =
-        if (d == null) "?" else "${(d * 100).roundToInt()}%"
-
-    /** 一句确认框：套模板这类会盖掉用户手写内容的动作都得先问。 */
-    private fun confirm(title: String, msg: String, onYes: () -> Unit) {
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(title).setMessage(msg)
-            .setPositiveButton("确定") { _, _ -> onYes() }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    // ==================================================================== 人设库
     //
-    // 这一组方法只做三件事：把 `kb/personas.json` 读成内存列表、把列表画成行、
-    // 把用户点的动作落回库里。**当前生效的人设不存在库里** —— 它就是
-    // `personaDraft` 里的那段文本（保存时写进 `Prefs.style`），这里靠原文比对
-    // 反推「现在生效的是哪一条」。多加一份 id 就多一处可以漂移的状态。
-
-    /** 读盘。失败按空库处理（并把 [PersonaStore.lastProblem] 摆到界面上）。 */
-    private fun reloadPersonas() {
-        val store = PersonaStore.get(this)
-        worker.execute {
-            val list = runCatching { store.list() }.getOrDefault(emptyList())
-            val problem = runCatching { store.lastProblem }.getOrNull()
-            main.post {
-                personaKnown = list
-                personaProblem = problem
-                renderPersonaShelf()
-            }
-        }
-    }
-
-    /** 重画库：一行一条，外加「当前生效是谁」那一行。 */
-    private fun renderPersonaShelf() {
-        val host = personaShelf ?: return
-        host.removeAllViews()
-        val text = personaDraft?.text?.toString().orEmpty().trim()
-        val active = if (text.isEmpty()) null else personaKnown.firstOrNull { it.body.trim() == text }
-        personaShelfLine?.let { line ->
-            line.text = when {
-                personaProblem != null -> "⚠ ${personaProblem}"
-                active != null -> "当前生效：「${active.name}」"
-                personaKnown.isEmpty() -> "库是空的 —— 点「新建」写一份，或「恢复模板」找回内置那几张。"
-                text.isEmpty() -> "当前没有生效的人设 —— 回复只用默认风格。"
-                else -> "当前生效：未存进库的自由文本（想留着就点「新建」）"
-            }
-            line.setTextColor(if (personaProblem != null) warn else ink)
-        }
-        personaKnown.forEach { p -> host.addView(personaRow(p, active?.id == p.id)) }
-    }
-
-    private fun personaRow(p: PersonaProfile, active: Boolean): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = round(
-                dp(10),
-                if (active) Color.parseColor("#EFF6FF") else Color.parseColor("#F7F8FA"),
-                stroke = active
-            )
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(8) }
-        }
-        val titleRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-        }
-        titleRow.addView(text(p.name, 14f, ink, bold = true).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        if (active) titleRow.addView(text("生效中", 11f, accent, bold = true))
-        box.addView(titleRow)
-
-        val card = p.card()
-        box.addView(
-            text(
-                PersonaStatus.short(card), 11f,
-                if (card.hasContent() && !card.structured) warn else sub
-            ).apply { setPadding(0, dp(4), 0, 0) }
-        )
-
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0)
-        }
-        actions.addView(chip("用", active) { applyPersona(p) })
-        actions.addView(chip("改", false) { editPersonaDialog(p) })
-        actions.addView(chip("⋯", false) { personaMenu(p) })
-        box.addView(actions)
-        box.setOnClickListener { applyPersona(p) }
-        return box
-    }
-
-    private fun chip(label: String, on: Boolean, onClick: () -> Unit) = TextView(this).apply {
-        text = label; textSize = 12.5f; gravity = Gravity.CENTER
-        setTypeface(typeface, Typeface.BOLD)
-        setTextColor(if (on) Color.WHITE else accent)
-        background = round(dp(8), if (on) accent else Color.WHITE, stroke = !on)
-        setPadding(dp(14), dp(7), dp(14), dp(7))
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { rightMargin = dp(8) }
-        setOnClickListener { onClick() }
-    }
-
-    /** 新建 / 导入 / 导出 / 恢复模板。 */
-    private fun personaShelfActions(): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0)
-        }
-        val actions: List<Pair<String, () -> Unit>> = listOf(
-            "新建" to { editPersonaDialog(null) },
-            "导入" to { importPersonaDialog() },
-            "导出" to { exportPersonas() },
-            "恢复模板" to { restoreBuiltinPersonas() }
-        )
-        actions.forEach { (label, action) ->
-            row.addView(TextView(this).apply {
-                text = label; textSize = 12.5f; gravity = Gravity.CENTER
-                setTypeface(typeface, Typeface.BOLD); setTextColor(accent)
-                background = round(dp(9), Color.WHITE, stroke = true)
-                setPadding(dp(4), dp(9), dp(4), dp(9))
-                layoutParams = LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-                ).apply { rightMargin = dp(6) }
-                setOnClickListener { action() }
-            })
-        }
-        return row
-    }
-
-    /**
-     * 套用：文本换成这条，并**立刻**写进 `Prefs.style`。
-     *
-     * 不等「保存全部设置」是有意的 —— 「用」是一个明确动作，用户按了就该生效；
-     * 而 `styleEdit` 同时被改写，所以随后的「保存全部设置」写下去的还是同一段文本，
-     * 两条路径不会打架。
-     */
-    private fun applyPersona(p: PersonaProfile) {
-        personaDraft?.setText(p.body)
-        prefs.style = p.body
-        toast("已套用「${p.name}」")
-        renderPersonaShelf()
-        onPersonaTextChanged?.invoke()
-    }
-
-    /**
-     * 编辑 / 新建。正文实时回显「认出什么」，因为认不出键是静默的：
-     * 用户把「主题」写成「话题方向」，界面看不出差别，只有回复悄悄变回通用腔调。
-     */
-    private fun editPersonaDialog(existing: PersonaProfile?) {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(6), dp(16), dp(4))
-        }
-        val nameEdit = edit(existing?.name ?: "", "名字，例如：销售·跟单 / 客服 / 甲方")
-        val bodyEdit = edit(existing?.body ?: "", PERSONA_SKELETON).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 8; gravity = Gravity.TOP
-        }
-        val status = text("", 11.5f, sub).apply { setPadding(0, dp(6), 0, 0) }
-
-        fun refresh() {
-            val c = PersonaCard.parse(bodyEdit.text.toString())
-            status.text = PersonaStatus.line(c)
-            status.setTextColor(if (c.hasContent() && !c.structured) warn else sub)
-        }
-        bodyEdit.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) = refresh()
-        })
-
-        box.addView(label("名字")); box.addView(nameEdit)
-        box.addView(label("人设原文")); box.addView(bodyEdit)
-        box.addView(status)
-
-        val helpers = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0)
-        }
-        helpers.addView(chip("插入键骨架", false) {
-            if (bodyEdit.text.isNullOrBlank()) bodyEdit.setText(PERSONA_SKELETON)
-            else bodyEdit.setText(bodyEdit.text.toString().trimEnd() + "\n" + PERSONA_SKELETON)
-        })
-        helpers.addView(chip("收进语气示例", false) {
-            pullStyleSamples { lines ->
-                if (lines == null) {
-                    toast("知识库里还没有「语气示例」笔记：知识库 → 新建笔记 → 打开「语气示例」")
-                } else {
-                    val current = bodyEdit.text?.toString().orEmpty()
-                    bodyEdit.setText(
-                        if (current.contains("示例")) current.trimEnd() + "\n" + lines
-                        else current.trimEnd() + "\n示例：\n" + lines
-                    )
-                    toast("已把知识库里的语气示例收进这张卡")
-                }
-            }
-        })
-        box.addView(helpers)
-        box.addView(text("「收进语气示例」会把知识库里标了语气示例的笔记抄进这张卡的「示例：」段" +
-            "（它们本来也会单独进提示词，抄进来是让人设自带写法样本，换机器也不丢）。",
-            11f, sub).apply { setPadding(0, dp(6), 0, 0) })
-        refresh()
-
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(if (existing == null) "新建人设" else "编辑人设")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("保存") { _, _ ->
-                val name = nameEdit.text.toString().trim()
-                val body = bodyEdit.text.toString()
-                if (body.isBlank()) { toast("人设不能是空的"); return@setPositiveButton }
-                val saved = PersonaStore.get(this).save(name, body, existing?.id)
-                if (saved == null) {
-                    toast("保存失败：人设库写不进去（储存空间？）")
-                    return@setPositiveButton
-                }
-                // 改的是「正在生效」的那一条时，生效文本要跟着走，否则用户改完发现回复没变。
-                if (existing != null && personaDraft?.text?.toString()?.trim() == existing.body.trim()) {
-                    personaDraft?.setText(saved.body)
-                    prefs.style = saved.body
-                }
-                reloadPersonas()
-                onPersonaTextChanged?.invoke()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    /** 长按「⋯」：重命名 / 复制 / 导出正文 / 删除。 */
-    private fun personaMenu(p: PersonaProfile) {
-        val items = arrayOf("重命名", "复制一份", "导出这段正文（复制）", "删除")
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(p.name)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> renamePersonaDialog(p)
-                    1 -> {
-                        val copy = PersonaStore.get(this).duplicate(p.id)
-                        toast(if (copy == null) "复制失败" else "已复制成「${copy.name}」")
-                        reloadPersonas()
-                    }
-                    2 -> {
-                        copyToClipboard(PersonaStore.get(this).exportText(p.id))
-                        toast("正文已复制，可直接粘到别处")
-                    }
-                    else -> confirm("删除人设", "删掉「${p.name}」？人设库里的这一条会消失，" +
-                        "但已经套用到设置里的文本不受影响。") {
-                        PersonaStore.get(this).delete(p.id)
-                        reloadPersonas()
-                    }
-                }
-            }
-            .show()
-    }
-
-    private fun renamePersonaDialog(p: PersonaProfile) {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(6), dp(16), dp(4))
-        }
-        val nameEdit = edit(p.name, "新名字")
-        box.addView(nameEdit)
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("重命名")
-            .setView(box)
-            .setPositiveButton("保存") { _, _ ->
-                val name = nameEdit.text.toString().trim()
-                if (name.isBlank()) { toast("名字不能是空的"); return@setPositiveButton }
-                val saved = PersonaStore.get(this).save(name, p.body, p.id)
-                toast(if (saved == null) "改名失败" else "已改名为「${name}」")
-                reloadPersonas()
-                onPersonaTextChanged?.invoke()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    /** 导入：粘贴 JSON（本库导出的、手拼的）或一整张纯文本人设卡。 */
-    private fun importPersonaDialog() {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(6), dp(16), dp(4))
-        }
-        box.addView(text("粘贴人设：可以是这台机器「导出」出来的整段 JSON，" +
-            "也可以直接是一张人设卡的正文（第一行当名字）。", 12f, sub))
-        val input = edit("", "{\"version\":1,\"items\":[…]} 或 称呼：… 关系：…").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 8; gravity = Gravity.TOP
-        }
-        box.addView(input)
-        box.addView(chip("从剪贴板粘贴", false) {
-            input.setText(readClipboard())
-        })
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("导入人设")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("导入") { _, _ ->
-                val result = PersonaStore.get(this).importJson(input.text.toString())
-                toast(result.describe())
-                reloadPersonas()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    /** 导出：全量 JSON 进剪贴板 —— 不申请存储权限、不弹系统分享面板，够用。 */
-    private fun exportPersonas() {
-        val json = PersonaStore.get(this).exportJson()
-        copyToClipboard(json)
-        toast("已复制 ${personaKnown.size} 条人设的 JSON，粘到别的机器「导入」即可")
-    }
-
-    private fun restoreBuiltinPersonas() {
-        val added = PersonaStore.get(this).restoreBuiltins()
-        toast(if (added == 0) "内置模板都在库里了" else "补回 $added 张内置模板")
-        reloadPersonas()
-    }
-
-    /** 把知识库里的「语气示例」笔记抄成「我：…」行。空库回调 null。 */
-    private fun pullStyleSamples(onDone: (String?) -> Unit) {
-        worker.execute {
-            val lines = runCatching {
-                KbStore.get(this).notes()
-                    .filter { it.enabled && it.type == NOTE_TYPE_STYLE_SAMPLE }
-                    .flatMap { it.content.split('\n') }
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .take(6)
-            }.getOrDefault(emptyList())
-            main.post { onDone(if (lines.isEmpty()) null else lines.joinToString("\n") { "我：$it" }) }
-        }
-    }
-
-    private fun copyToClipboard(text: String) {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager ?: return
-        cm.setPrimaryClip(android.content.ClipData.newPlainText("jev-persona", text))
-    }
-
-    private fun readClipboard(): String {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager ?: return ""
-        return cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString().orEmpty()
-    }
-
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-
-    /** Horizontal selectable pills; calls [onPick] with the chosen index. */
     private fun pills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View =
         pillRow(options, initial, onPick).first
 
@@ -1437,12 +1063,11 @@ class SettingsActivity : AppCompatActivity() {
         return row
     }
 
-    /** 目标 App 的显示名；没装就退回包名。只是查一下，不触发任何加载。 */
-    private fun appLabel(pkg: String): String = runCatching {
-        @Suppress("DEPRECATION")
-        val info = packageManager.getApplicationInfo(pkg, 0)
-        packageManager.getApplicationLabel(info).toString()
-    }.getOrNull()?.takeIf { it.isNotBlank() } ?: pkg
+    private fun whitePixelJpegB64(): String {
+        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        bmp.eraseColor(Color.WHITE)
+        return VisionClient.encodeJpeg(bmp)
+    }
 
     /**
      * 注入层此刻连没连上。心跳带时间戳，超过两分钟就算过期（目标 App 被杀、
@@ -1455,108 +1080,10 @@ class SettingsActivity : AppCompatActivity() {
         val age = ((System.currentTimeMillis() - alive.at) / 1000L).coerceAtLeast(0L)
         return "状态：已连接 · 模块 v${alive.version} · ${age} 秒前心跳"
     }
-
-    // atoms
-    private fun header(t: String) = text(t, 24f, ink, bold = true).apply { setPadding(0, 0, 0, dp(4)) }
-    private fun section(t: String) = text(t, 12f, sub, bold = true).apply { setPadding(dp(2), dp(16), 0, dp(6)) }
-
-    /**
-     * 折叠组：38 个控件块平铺一页、真机要滚六屏以上（ui-overhaul 考察 P1），
-     * 按「连接 / 人设 / 行为 / 高级」分四组，默认只展开前面的组。控件本身
-     * 一行不动，只是从 root 换进组容器。
-     */
-    private fun foldSection(title: String, defaultOpen: Boolean, body: LinearLayout): View {
-        var open = defaultOpen
-        val chev = TextView(this).apply {
-            textSize = 15f; setTextColor(Color.parseColor("#6B7280")); setPadding(dp(8), 0, 0, 0)
-        }
-        val head = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(12), dp(2), dp(12))
-            setOnClickListener {
-                open = !open
-                chev.text = if (open) "▾" else "▸"
-                body.visibility = if (open) View.VISIBLE else View.GONE
-            }
-        }
-        head.addView(TextView(this).apply {
-            text = title; textSize = 16f; setTextColor(Color.parseColor("#111827"))
-            setTypeface(typeface, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        head.addView(chev)
-        chev.text = if (open) "▾" else "▸"
-        body.visibility = if (open) View.VISIBLE else View.GONE
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(head); addView(body)
-        }
-    }
-    private fun label(t: String) = text(t, 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) }
-    private fun cardTitle(t: String) = text(t, 16f, ink, bold = true).apply { setPadding(0, dp(10), 0, dp(4)) }
-    private fun resultText() = text("", 12.5f, sub).apply { setPadding(0, dp(10), 0, dp(2)) }
-
-    private fun card() = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = round(dp(14), Color.WHITE)
-        setPadding(dp(14), dp(4), dp(14), dp(14))
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { topMargin = dp(10) }
-    }
-
-    private fun edit(value: String, hint: String, password: Boolean = false) = EditText(this).apply {
-        setText(value); this.hint = hint; textSize = 14f; setTextColor(ink)
-        setHintTextColor(Color.parseColor("#9CA3AF"))
-        background = round(dp(8), Color.parseColor("#F3F4F6"))
-        setPadding(dp(10), dp(10), dp(10), dp(10))
-        // Masked, not VISIBLE_PASSWORD: an API key should not sit in plain sight.
-        if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2) }
-    }
-
-    private fun text(t: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
-        text = t; textSize = size; setTextColor(color); if (bold) setTypeface(typeface, Typeface.BOLD)
-    }
-
-    private fun primaryBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
-        text = label; textSize = 15f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
-        setTextColor(Color.WHITE); background = round(dp(12), accent)
-        setPadding(dp(16), dp(13), dp(16), dp(13))
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(18) }
-        setOnClickListener { onClick() }
-    }
-
-    /** Outlined button sized for inside a card. */
-    private fun cardBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
-        text = label; textSize = 14f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
-        setTextColor(accent); background = round(dp(10), Color.WHITE, stroke = true)
-        setPadding(dp(14), dp(10), dp(14), dp(10))
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) }
-        setOnClickListener { onClick() }
-    }
-
-    private fun round(radius: Int, color: Int, stroke: Boolean = false) = GradientDrawable().apply {
-        cornerRadius = radius.toFloat(); setColor(color); if (stroke) setStroke(dp(1), accent)
-    }
-
     override fun onDestroy() { super.onDestroy(); worker.shutdownNow() }
 
     companion object {
         private const val TAG = "JEVASSIST"
-
-        /**
-         * 新建人设时预填的键骨架。
-         *
-         * 预填而不是给个空框，理由和模板一样：这套键不是常识，用户不知道要写
-         * 「主题」才能让知识库跟着收窄。骨架摆在输入框里，用户只需要把冒号后面
-         * 补上自己的话 —— 而认不出的键是静默的，所以框下面还有实时回显。
-         */
-        private const val PERSONA_SKELETON =
-            "称呼：\n关系：\n语气：\n主题：\n情境：\n硬边界：\n避谈：\n示例：\n我："
 
         /** DeepSeek's official API has no vision model; say so instead of a 400. */
         private const val GUARD_NO_VISION =
@@ -1564,7 +1091,7 @@ class SettingsActivity : AppCompatActivity() {
 
         /** One scratch prefs file per test button; never the real config. */
         private const val SCRATCH_JUDGE = "jev_probe_scratch_judge"
-        private const val SCRATCH_REPLY = "jev_probe_scratch_reply"
+        internal const val SCRATCH_REPLY = "jev_probe_scratch_reply"
         private const val SCRATCH_VISION = "jev_probe_scratch_vision"
 
         private const val PRIVACY_URL = "https://github.com/emoeem/chartools/blob/main/cn/PRIVACY.md"

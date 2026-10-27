@@ -105,6 +105,9 @@ dependencies {
     testImplementation("org.json:json:20240303")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // 专家库的 2 列网格要它。显式钉版本：此前没人声明，RecyclerView 靠 material
+    // 传递解析成 1.0.0→1.1.0（2019 年），网格组件的版本等于由别人的 pom 决定。
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     // On-device OCR. The *bundled* Chinese model (not the play-services variant):
@@ -158,6 +161,9 @@ dependencies {
 // app (LedgerPrompt), so -Dledger.in / -Dledger.out is the same hand-over for the
 // session ledger. Two properties, one test file, no second assembler.
 tasks.withType<Test>().configureEach {
+    // ChatAppsRegistryTest 从这里定位模块内的 res / manifest，钳住注册表与
+    // xposed_scope / <queries> 之间的同步（同 global/core 的 jev.fixtures 先例）。
+    systemProperty("jev.moduleDir", projectDir.absolutePath)
     System.getProperty("aiming.dump")?.let { systemProperty("aiming.dump", it) }
     System.getProperty("roleplay.in")?.let { systemProperty("roleplay.in", it) }
     System.getProperty("roleplay.out")?.let { systemProperty("roleplay.out", it) }

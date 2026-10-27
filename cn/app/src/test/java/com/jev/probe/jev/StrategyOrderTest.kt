@@ -1,4 +1,4 @@
-package com.jev.probe.jev
+package com.jev.probe.core
 
 import com.jev.probe.core.RankedReply
 import org.junit.Assert.assertEquals

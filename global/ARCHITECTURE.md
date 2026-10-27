@@ -8,7 +8,9 @@ tap bubble
   → who is this? (first time only) core/scene, assistant/Settings (remembered per chat)
   → analyse                        core/engine/Analysis.kt   (2 Jev requests)
   → pick a stance, add details     core/engine/Goal.kt
-  → draft two replies              core/engine/Drafting.kt   (1 chat request, retried once)
+  → draft replies                  core/engine/Drafting.kt   (1 chat request; a request
+                                   is retried once, and an unparsable batch is
+                                   re-asked, so up to 4 chat requests worst case)
   → check and score each reply     core/engine/CandidateCheck.kt (Jev requests)
   → Fill                           core/session/Fill.kt, assistant/service
   (the user sends)
@@ -34,12 +36,14 @@ gateway.
   bounds, text, content descriptions).
 - `core/whatsapp/WhatsAppAdapter` classifies the page (chat, chat list, group) and
   turns rows into messages: sender by which side the bubble hugs, text, quoted text, media kind
-  (photo, document, voice note, video, sticker, deleted), date dividers and system
+  (photo, document, voice note, deleted), date dividers and system
   notices. It relies on WhatsApp's resource ids; the recorded screens in
   `fixtures/screendumps/whatsapp-2.26.38.73/` pin what it expects.
 - `assistant/service/WhatsApp.kt` scrolls the list upward screen by screen, waits
   for rows to settle (`a11y/RowStability`), and stops at 24 messages, the start of
-  the chat, 5 screens or 8 seconds. Then it scrolls back to the bottom.
+  the chat, 5 screens or 8 seconds. Then it scrolls back to the bottom. A
+  "read further" mode (`readMore`) widens this to 10 screens, 48 messages and
+  14 seconds.
 - `core/stitch/Stitcher` joins overlapping screens into one ordered list without
   duplicates. A fingerprint of the last messages detects that the chat changed
   while reading.
@@ -85,7 +89,8 @@ a reply that leaves it out cannot rank first.
 ## Drafting
 
 `Drafting` asks the drafting model (`deepseek/deepseek-chat-v3.1` by default,
-OpenRouter chat completions) for two replies as JSON. The prompt carries the
+OpenRouter chat completions) for three replies as JSON (the prompt says "exactly
+three"; parsing keeps the two best). The prompt carries the
 conversation as data, the relationship, the situation, the goal and spelling.
 Output is parsed defensively (fences, alternative keys, truncated JSON, loops) and
 cleaned.
@@ -99,13 +104,17 @@ cleaned.
   the goal covers (`beyond_goal`, `beyond_clarification`), taking the opposite
   stance, crossing a boundary they set, stating facts nobody gave
   (`unsupported_fact`), and the goal's own avoids.
-- **Confirm-only checks** that ask you to look before using it: admitting fault,
-  contradicting a date, time or amount you gave earlier, an unstated declaration.
+- **Confirm-only by goal**: admitting fault, contradicting a date, time or amount
+  you gave earlier, an unstated declaration. A stance goal decides per check
+  whether each of these blocks or merely asks you to look; most stance goals
+  treat them as hard checks, and only the goal's own `confirmChecks` (plus
+  `contradicts_earlier`) ask you to look before using the reply.
 - **G, goal completion**, on six levels from "Opposite or absent" to "Complete".
   A missing required item caps G at 3.
 - **E, delivery**: tone and fit for the relationship.
 
-The score is `S = 0.7 G + 0.3 E`, shown out of 5 with one decimal. Each reply gets a
+The score is `S = 0.7 G + 0.3 E` (E alone when the goal carries no decision),
+shown out of 5 with one decimal. Each reply gets a
 state, ranked in this order: eligible, awaiting confirmation, needs an edit,
 unscored, failed, needs a rewrite. "Top pick" goes only to an eligible reply whose
 judgement was not split and that is more than 0.2 ahead of the next.
@@ -114,13 +123,16 @@ judgement was not split and that is more than 0.2 ahead of the next.
 
 `RunBudget` caps a round at 17 model requests and 90 seconds of waiting. A failed
 request is retried once with the identical body; authentication errors are not
-retried. The user can cancel at any time.
+retried. The user can cancel at any time; cancellation is cooperative — in-flight
+requests finish and their results are dropped by generation.
 
 ## Fill
 
-`core/session/Fill.kt` decides whether Fill may write: the same chat must still be
+`AssistantSession` decides whether Fill may write (`fillAt`/`writeBox` in
+`core/session/AssistantSession.kt`): the same chat must still be
 open (by a hash of the title), and an existing draft in the box is replaced only
-after asking. The service then sets the text of WhatsApp's input field. There is
+after asking. `core/session/Fill.kt` holds the write-and-read-back procedure; the
+service then sets the text of WhatsApp's input field. There is
 no code path that clicks the send button or triggers the IME enter action.
 
 ## Diagnostics

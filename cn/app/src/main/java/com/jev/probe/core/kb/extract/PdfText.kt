@@ -4,7 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
-import com.jev.probe.capture.ocr.MlKitOcr
+import com.jev.probe.core.ocr.OcrEngine
+import com.jev.probe.core.ocr.OcrLine
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
@@ -60,14 +61,16 @@ internal object PdfText {
      *
      * The caller must not be the main thread: the OCR callback is delivered on
      * the main looper, so blocking here while waiting for it would deadlock.
+     * The engine is injected: core.kb.extract must not construct capture's
+     * [com.jev.probe.capture.ocr.MlKitOcr] itself (that import would point
+     * core back at capture).
      *
      * @return how many pages were actually recognized.
      */
-    fun extractScanned(file: File, maxPages: Int, sink: TextSink): Int {
+    fun extractScanned(file: File, maxPages: Int, sink: TextSink, ocr: OcrEngine): Int {
         var done = 0
         ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { fd ->
             PdfRenderer(fd).use { renderer ->
-                val ocr = MlKitOcr()
                 val pages = minOf(renderer.pageCount, maxPages)
                 for (index in 0 until pages) {
                     // The explicit label matters: `use` is nested three deep
@@ -113,9 +116,9 @@ internal object PdfText {
      * this background worker wants. Returns an empty list on timeout — a page
      * that will not recognize is not worth failing the whole import over.
      */
-    private fun recognize(ocr: MlKitOcr, bitmap: Bitmap): List<com.jev.probe.capture.ocr.OcrLine> {
+    private fun recognize(ocr: OcrEngine, bitmap: Bitmap): List<OcrLine> {
         val latch = CountDownLatch(1)
-        var result: List<com.jev.probe.capture.ocr.OcrLine> = emptyList()
+        var result: List<OcrLine> = emptyList()
         ocr.recognize(bitmap, null) { lines ->
             result = lines
             latch.countDown()

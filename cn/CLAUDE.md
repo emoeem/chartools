@@ -42,7 +42,7 @@
   `POST https://openrouter.ai/api/alpha/decisions`，model `typesafe/jev-1.13`，
   body `{model, state, questions}`，答案在 `answers`。实测 7 题一次约 900 ms、约 1000 输入 token、0.00004 美元。
 - Jev 主训练语言是英文：**题目的 instructions 和 criteria 用英文写，state 里的聊天内容保留中文原文。**
-- 知识库 / 上下文数据在 `filesDir/kb` 下的 JSON 文件（`notes.json` / `contacts.json` / `logs/<contactId>.json`）；`KbStore` 单锁 + 原子写（先写 `.tmp` 再 rename）。`ContextBuilder` 只做 alwaysOn 笔记全带 + 标签/标题包含匹配（不做语义检索、不打分），**不自动建档、历史默认关闭（`contextEnabled=false`）**。
+- 知识库 / 上下文数据在 `filesDir/kb` 下的 JSON 文件（`notes.json` / `contacts.json` / `logs/<contactId>.json`）；`KbStore` 单锁 + 原子写（先写 `.tmp` 再 rename）。`ContextBuilder` 做 alwaysOn 笔记全带 + BM25 相关度检索（`LexicalSearch`，标题/标签/正文都参与，minScore=0.15，最多 5 条，匹配窗口 30 条消息），不做语义（向量）检索，**不自动建档、历史默认关闭（`contextEnabled=false`）**。
 - Kotlin 字符串模板 `$x` 后面紧跟中文标点（如 `」`、`）`）会被解析成标识符的一部分，导致 `Unresolved reference` 编译错误；**一律写成 `${x}`**。D 阶段在 `KbStore.kt` / `KbSelfCheck.kt` 踩过。
 - OCR 层在 `capture/ocr`：`ScreenCapture` 限频 ≥1s + 失败退避（1s→2s→4s→8s→16s→30s 封顶），错误码 1/2/3/4/6 各给一句人话；`MlKitOcr` 用 bundled 中文模型。适配器契约：`extract` 返回 `null` = 不在聊天窗，返回空消息列表 = 在聊天窗但树里没正文——只有后者才触发 OCR 兜底。
 - 无障碍 XML 加了 `android:canTakeScreenshot="true"`，**改完必须把无障碍关掉再重新开启才生效**，否则 `takeScreenshot` 直接回 errorCode 2。`ScreenCapture` 已按可换宿主的方式封装。

@@ -58,9 +58,6 @@ class SkillStore private constructor(app: Context) {
         return out
     }
 
-    fun enabledRefs(): List<SkillRef> =
-        list().filter { it.enabled }.map { SkillRef(it.name, it.description) }
-
     fun find(name: String): Skill? = list().firstOrNull { it.name == name }
 
     fun setEnabled(name: String, on: Boolean) {

@@ -52,6 +52,10 @@ import com.jev.probe.core.Msg
  */
 class TelegramAdapter : ChatAppAdapter {
     override val pkg = "org.telegram.messenger"
+    override val displayName = "Telegram"
+
+    // Telegram 的 composer 也是普通可编辑节点（无稳定 id）。
+    override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? = findEditableNode(root)
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels

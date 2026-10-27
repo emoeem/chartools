@@ -9,6 +9,8 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+import com.jev.probe.core.ocr.OcrEngine
+import com.jev.probe.core.ocr.OcrLine
 import java.util.concurrent.Executors
 
 /**

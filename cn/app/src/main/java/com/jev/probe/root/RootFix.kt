@@ -3,7 +3,7 @@ package com.jev.probe.root
 import android.content.Context
 import android.content.pm.PackageManager
 import android.provider.Settings
-import com.jev.probe.capture.ChatCaptureService
+import com.jev.probe.core.CapturePresence
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.Trace
 
@@ -117,14 +117,14 @@ internal object RootFix {
     private const val RECONNECT_WAIT_MS = 4_000L
 
     /**
-     * 无障碍。判据**不是**"设置里写着开着"，而是 [ChatCaptureService.live] ——
+     * 无障碍。判据**不是**"设置里写着开着"，而是 [CapturePresence.live] ——
      * 这两件事在真机上被实测证明可以不一致（覆盖安装 / 开机之后设置还开着、
      * 服务已经没了）。要干什么由 [A11ySettings.plan] 这个纯函数算。
      */
     private fun enableA11y(ctx: Context, flavor: () -> String): FixStep {
         val name = "无障碍"
         val cur = readA11y(ctx)
-        val plan = A11ySettings.plan(cur, ChatCaptureService.live)
+        val plan = A11ySettings.plan(cur, CapturePresence.live)
         if (plan is A11yPlan.Already) return FixStep(name, true, plan.why)
         val writes = (plan as A11yPlan.Write).values
 
@@ -180,15 +180,15 @@ internal object RootFix {
      * 时候也是"开着"的，用它当成功判据就是这个 bug 本身。
      *
      * 服务在同一个进程里（清单里没有 `android:process`），所以 `onServiceConnected`
-     * 会直接把 [ChatCaptureService.live] 翻成 true，这里轮询就能看到。
+     * 会直接把 [CapturePresence.live] 翻成 true，这里轮询就能看到。
      */
     private fun awaitLive(timeoutMs: Long = RECONNECT_WAIT_MS): Boolean {
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
-            if (ChatCaptureService.live) return true
+            if (CapturePresence.live) return true
             Thread.sleep(150)
         }
-        return ChatCaptureService.live
+        return CapturePresence.live
     }
 
     private fun grantOverlay(ctx: Context, pkg: String, flavor: () -> String): FixStep {
