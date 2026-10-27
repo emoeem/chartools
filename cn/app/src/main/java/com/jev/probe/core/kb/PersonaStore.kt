@@ -486,11 +486,14 @@ class PersonaStore private constructor(context: Context) {
 
         val items = current.toMutableList()
         missing.forEach { items += it.toProfile() }
+        // 台账必须在写盘**之前**补上：`writeLocked` 序列化的是此刻的 `seeded`。
+        // 反过来写（先写盘再记台账）文件里就永远少这几笔 —— 真机实测过，
+        // 补进来的 10 张预设只活在 `items` 里，`seeded` 停在 4，台账等于说谎。
+        missing.forEach { seeded += it.key }
         if (!writeLocked(items)) {
             lastProblem = "有新的内置专家没写进人设库（储存空间？），下次启动会再试"
             return current
         }
-        missing.forEach { seeded += it.key }
         return items
     }
 

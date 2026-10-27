@@ -163,6 +163,33 @@ class PersonaMigrationTest {
     }
 
     @Test
+    fun toppingUpWritesTheNewKeysIntoTheLedgerNotJustTheItems() = withDir { dir ->
+        // 真机抓到的回归：补预设时先把 `items` 写盘、再把 key 记进 `seeded`，
+        // 于是文件里的 `seeded` 永远停在旧的几条 —— `items` 有 14 张，
+        // 台账说只有 4 张播过。台账一旦和事实不符，"播过就是播过" 这条前提就废了。
+        writeRaw(
+            dir,
+            v2(
+                seeded = listOf("roleplay.dom"),
+                removed = emptyList(),
+                items = listOf(item("psn-a", "网调·我是主", "称呼：主人", key = "roleplay.dom", builtin = true))
+            )
+        )
+
+        store(dir).list()
+
+        val root = JSONObject(kbFile(dir).readText(Charsets.UTF_8))
+        val seededOnDisk = root.getJSONArray("seeded").let { a ->
+            (0 until a.length()).map { a.getString(it) }.toSet()
+        }
+        assertEquals(
+            "补进来的每张预设都必须落进 seeded[]，否则台账和 items 对不上",
+            PersonaPresets.PRESETS.map { it.key }.toSet(),
+            seededOnDisk
+        )
+    }
+
+    @Test
     fun aDeletedPresetIsNotToppedUpBecauseOfItsTombstone() = withDir { dir ->
         writeRaw(
             dir,
