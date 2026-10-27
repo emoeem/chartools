@@ -114,11 +114,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         if (judgeProvider == PROVIDER_DEEPSEEK) PROTO_CHAT else PROTO_DECISIONS
     }
 
-    /** Back-compat alias so older call sites keep compiling. */
-    var openRouterKey: String
-        get() = judgeKey
-        set(v) { judgeKey = v }
-
     // ---------------------------------------------------------------- reply
 
     /** OpenAI-compatible base, up to and including `/v1`. */
@@ -274,11 +269,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getInt(K_CTX_COUNT, 30)
         set(v) = sp.edit().putInt(K_CTX_COUNT, v).apply()
 
-    /** Auto-summarize a contact once enough history accumulates. */
-    var autoSummary: Boolean
-        get() = sp.getBoolean(K_AUTO_SUMMARY, true)
-        set(v) = sp.edit().putBoolean(K_AUTO_SUMMARY, v).apply()
-
     /**
      * Drop remembered history older than this many days; 0 keeps everything
      * (the per-contact file is already capped at `KbStore.MAX_LOG` entries).
@@ -289,11 +279,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         set(v) = sp.edit().putInt(K_LOG_RETENTION, if (v in RETENTION_CHOICES) v else 0).apply()
 
     // ------------------------------------------------------------ OCR (B)
-
-    /** Run generic OCR capture on apps with no dedicated adapter. */
-    var ocrForUnknownApps: Boolean
-        get() = sp.getBoolean(K_OCR_UNKNOWN, true)
-        set(v) = sp.edit().putBoolean(K_OCR_UNKNOWN, v).apply()
 
     /** Fall back to OCR when an adapted app's node tree comes back empty. */
     var ocrFallback: Boolean
@@ -402,17 +387,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     var candidateCount: Int
         get() = sp.getInt(K_CANDIDATES, 3).coerceIn(1, 3)
         set(v) = sp.edit().putInt(K_CANDIDATES, v.coerceIn(1, 3)).apply()
-
-    /** Where the analysis card sits in [pkg] (px), or null for the default top position. */
-    fun cardPosition(pkg: String): Pair<Int, Int>? {
-        val x = sp.getInt(K_CARD_X + pkg, -1)
-        val y = sp.getInt(K_CARD_Y + pkg, -1)
-        return if (x < 0 || y < 0) null else x to y
-    }
-
-    fun saveCardPosition(pkg: String, x: Int, y: Int) {
-        sp.edit().putInt(K_CARD_X + pkg, x).putInt(K_CARD_Y + pkg, y).apply()
-    }
 
     /** Auto-analyze on every incoming message; if false, user taps to analyze. */
     var autoAnalyze: Boolean
@@ -589,7 +563,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_REVIEW_KEY = "review_key"
         private const val K_REVIEW_MODEL = "review_model"
         private const val K_CTX_COUNT = "context_history_count"
-        private const val K_AUTO_SUMMARY = "auto_summary"
         private const val K_MUTED_APPS = "muted_auto_apps"
         private const val K_INJECT_APPS = "inject_apps"
         private const val K_COMPARE_SOURCES = "compare_sources"
@@ -598,7 +571,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_ROOT_FIX_AT = "root_fix_at"
         private const val K_ROOT_FIX_REPORT = "root_fix_report"
         private const val K_LOG_RETENTION = "log_retention_days"
-        private const val K_OCR_UNKNOWN = "ocr_unknown_apps"
         private const val K_OCR_FALLBACK = "ocr_fallback"
         private const val K_OCR_AUTO = "ocr_auto_analyze"
         private const val K_OCR_INTERVAL = "ocr_poll_interval"
@@ -618,8 +590,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_BUBBLE_X = "bubble_x"
         private const val K_AUTO = "auto_analyze"
         private const val K_CANDIDATES = "candidate_count"
-        private const val K_CARD_X = "card_x_"
-        private const val K_CARD_Y = "card_y_"
 
         const val PROVIDER_BOCHA = "bocha"
         const val PROVIDER_OPENROUTER = "openrouter"

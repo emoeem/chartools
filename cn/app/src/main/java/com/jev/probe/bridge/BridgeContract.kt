@@ -15,7 +15,6 @@ object BridgeContract {
     /** 备用通道要绑的组件：指定 App 与类名，不走隐式 Intent。 */
     const val OWNER_PACKAGE = "com.jev.probe"
     const val SERVICE_CLASS = "com.jev.probe.bridge.BridgeConnectionService"
-    const val RECEIVER_CLASS = "com.jev.probe.bridge.BridgeReceiver"
 
     /**
      * 广播通道的动作。**这是真机上唯一走得通的方向。**

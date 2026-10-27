@@ -10,7 +10,6 @@ import com.jev.probe.core.skill.SkillHit
 import com.jev.probe.core.skill.SkillMatcher
 import com.jev.probe.core.skill.SkillRef
 import com.jev.probe.core.skill.SkillResources
-import com.jev.probe.jev.ReplyClient
 import com.jev.probe.core.skill.SkillStore
 
 /**
@@ -19,8 +18,20 @@ import com.jev.probe.core.skill.SkillStore
  *
  * Deliberately dumb and cheap (v1.3 revision): exact name/alias matching, BM25
  * note matching over character bigrams, a token budget. No embeddings, no
- * auto-created contacts, no network.
+ * auto-created contacts. The only model work it may trigger — history summary
+ * and the session ledger — arrives through [HistorySummarizer] /
+ * [LedgerRefresher]; pass null and nothing leaves the device. Keeping the port
+ * here is what stops core.kb from importing jev (a model client) back.
  */
+/** 上一路端口：把一段旧历史压成一句摘要；失败返回 null，调用方自己兜底。 */
+fun interface HistorySummarizer {
+    fun summarize(transcript: String): String?
+}
+
+/** 上一路端口：旧台账 + 新增历史 → 新台账；失败返回 null，沿用旧台账。 */
+fun interface LedgerRefresher {
+    fun rebuild(previous: Ledger?, transcript: String, coveredUntil: Long): Ledger?
+}
 object ContextBuilder {
 
     /**
@@ -92,7 +103,9 @@ object ContextBuilder {
         snapshot: ChatSnapshot,
         app: String,
         prefs: Prefs,
-        skillHint: String = ""
+        skillHint: String = "",
+        historySummarizer: HistorySummarizer? = null,
+        ledgerRefresher: LedgerRefresher? = null
     ): ChatContext {
         val store = KbStore.get(context)
         val title = snapshot.title ?: ""
@@ -102,7 +115,7 @@ object ContextBuilder {
 
         // 2. History — recorded and injected only with the user's opt-in.
         val historyResult = if (prefs.contextEnabled && contact != null)
-            historyFor(store, contact, snapshot, app, prefs) else HistoryResult(emptyList(), null)
+            historyFor(store, contact, snapshot, app, prefs, historySummarizer, ledgerRefresher) else HistoryResult(emptyList(), null)
         val history = historyResult.recent
         val effectiveContact = if (contact != null && !historyResult.summary.isNullOrBlank())
             contact.copy(autoSummary = historyResult.summary) else contact
@@ -196,7 +209,7 @@ object ContextBuilder {
 
     private fun historyFor(
         store: KbStore, contact: Contact, snapshot: ChatSnapshot, app: String,
-        prefs: Prefs
+        prefs: Prefs, historySummarizer: HistorySummarizer?, ledgerRefresher: LedgerRefresher?
     ): HistoryResult {
         val now = System.currentTimeMillis()
         store.appendLog(contact.id, snapshot.messages.map { LogEntry(it.side, it.text, now, app) })
@@ -208,8 +221,10 @@ object ContextBuilder {
         val summary = if (all.size > 60) {
             val old = all.dropLast(20)
             val source = LedgerPolicy.transcript(old)
-            if (source.isNotBlank() && store.historySummaryNeedsRefresh(contact.id, old.lastOrNull()?.ts ?: now)) {
-                runCatching { ReplyClient(prefs).summarize(source).take(200) }
+            if (source.isNotBlank() && historySummarizer != null &&
+                store.historySummaryNeedsRefresh(contact.id, old.lastOrNull()?.ts ?: now)
+            ) {
+                runCatching { historySummarizer.summarize(source)?.take(200) }
                     .getOrNull()?.takeIf { it.isNotBlank() }?.also {
                         store.saveHistorySummary(contact.id, it, old.lastOrNull()?.ts ?: now)
                     } ?: existing
@@ -225,7 +240,7 @@ object ContextBuilder {
         return HistoryResult(
             if (n == 0) emptyList() else visible.takeLast(n),
             summary,
-            ledgerFor(store, contact, all, prefs)
+            ledgerFor(store, contact, all, prefs, ledgerRefresher)
         )
     }
 
@@ -245,7 +260,8 @@ object ContextBuilder {
         store: KbStore,
         contact: Contact,
         all: List<LogEntry>,
-        prefs: Prefs
+        prefs: Prefs,
+        ledgerRefresher: LedgerRefresher?
     ): Ledger? {
         if (!prefs.ledgerEnabled || all.isEmpty()) return null
         val lastTs = all.last().ts
@@ -258,9 +274,11 @@ object ContextBuilder {
         if (fresh.isEmpty()) return previous
         val source = LedgerPolicy.transcript(fresh)
         if (source.isBlank()) return previous
-        val built = runCatching { ReplyClient(prefs).rebuildLedger(previous, source, lastTs) }
-            .onFailure { Trace.log("ledger build failed: ${it.message}") }
-            .getOrNull() ?: return previous
+        val built = ledgerRefresher?.let {
+            runCatching { it.rebuild(previous, source, lastTs) }
+                .onFailure { e -> Trace.log("ledger build failed: ${e.message}") }
+                .getOrNull()
+        } ?: return previous
         val conflicts = LedgerCheck.conflicts(built)
         if (conflicts.isNotEmpty()) {
             // 台账是增量更新的，最容易出的错是同一个称呼被写成两种 ——

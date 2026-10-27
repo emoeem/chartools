@@ -38,7 +38,7 @@ The upstream authors were not involved in these changes and do not endorse them;
 ## Why Jev?
 
 - **It assesses the conversation before drafting a reply.** Most tools simply ask a model to write a response. Jev first uses an assessment model to identify the other person's intent, gauge the risk, and decide whether a reply can wait. That assessment guides its suggestions.
-- **It leaves your chat apps alone.** No hooking, modified app packages, access to app APIs or accounts, or database reads. Jev uses Android's accessibility service to read the conversation currently visible on your screen.
+- **It leaves your chat apps alone by default.** No hooking, modified app packages, access to app APIs or accounts, or database reads. Jev uses Android's accessibility service to read the conversation currently visible on your screen. An *optional* injection enhancement layer (LSPosed / Vector) exists — off by default, enabled per app, falling back to the accessibility path the moment it cannot read.
 - **You're always in control of sending.** Jev only fills in the text field. It never sends messages automatically or interacts with transfers, red packets, or payment collection.
 - **One core, multiple platforms.** Tested on real devices with QQ, TIM, and X; Feishu uses OCR to read message text; WhatsApp is verified against screen recordings. Adding another app takes an adapter of just a few dozen lines.
 - **It has context about your contacts and your life.** A local knowledge base and contact profiles supply relevant notes and conversation history during analysis, keeping replies consistent with the background you've provided.
@@ -75,6 +75,8 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk bash gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Gradle locates the SDK through `ANDROID_HOME` (or `ANDROID_SDK_ROOT`), or a `local.properties` file you create in the build directory with one line: `sdk.dir=/absolute/path/to/Android/Sdk`. `local.properties` is machine-specific and git-ignored.
+
 The original upstream release APK lives in the upstream repository's [Releases](https://github.com/jev-chat/jev-chat-jarvis/releases). It is a different application under a different package name (upstream `jev-assistant-v1.7-release.apk`), so the two never overwrite each other and cannot upgrade in place.
 
 **2. Add your API key.** Open the app, go to Settings, and find the API section. It has three cards: Assessment API, Reply API, and Vision API. For the simplest setup, enter an [OpenRouter](https://openrouter.ai/) API key under Assessment API and leave the other two blank; they will inherit the same key. OpenRouter is not required: the Assessment API also has a "DeepSeek" preset, and a DeepSeek key works there on its own. DeepSeek serves no Jev judgment model, so that preset switches the assessment route to OpenAI chat mode, answering the same question set as a prompt (see below). To change the reply model (the default is `deepseek/deepseek-chat-v3.1`; Gemini and OpenAI are subject to regional restrictions in mainland China), choose a preset under Reply API, such as OpenRouter, DeepSeek, or Tongyi-compatible, or enter a custom URL. Each card has its own connection test.
@@ -91,7 +93,7 @@ If you previously installed a debug build, uninstall it before installing the re
 
 ### Conversation Assessment and Suggested Replies
 
-- In about one second, the assessment model returns the other person's intent, a risk level from 1 to 9, what they want, whether you should reply right away, and the best next action, along with confidence scores.
+- In about one second, the assessment model returns the other person's intent, a risk level from 0 to 9, what they want, whether you should reply right away, and the best next action, along with confidence scores.
 - The generation model drafts three conversational replies. The assessment model ranks them by suitability and assigns each a percentage score.
 - Tap a reply in the overlay to copy it or insert it into the text field. Insertion uses `ACTION_SET_TEXT`, with clipboard paste as a fallback. **Jev never sends the message.**
 
@@ -99,22 +101,22 @@ If you previously installed a debug build, uninstall it before installing the re
 
 Open Settings, then Analysis, then "Knowledge Base and Contacts."
 
-- **Notes:** Each note has a title, content, tags, and an option to always include it. Notes marked for inclusion are sent with every analysis. Other notes are included only when their title or a tag appears in the conversation title or the last six messages, up to five matching notes. Import multiple notes by pasting text with blank lines between entries; the first line of each entry becomes its title.
+- **Notes:** Each note has a title, content, tags, and an option to always include it. Notes marked for inclusion are sent with every analysis. Other notes are matched by BM25 relevance (title, tags and content all score), up to five matching notes. Import multiple notes by pasting text with blank lines between entries; the first line of each entry becomes its title.
 - **Contacts:** Store a name, aliases (one per line), relationship, and notes. A profile is applied when the conversation title matches the name or an alias. Matching ignores case, leading and trailing whitespace, and member counts at the end of group names. Long-press the floating bubble to save the current conversation as a contact.
-- **History:** "Record chat history (stored locally only)" is off by default. When enabled, each analysis includes the most recent N messages (30 by default), excluding messages already visible on screen.
+- **History:** "Record chat history (stored locally only)" is off by default. When enabled, each analysis includes the most recent N messages (30 by default in settings; at most 20 are injected into the writing context by the internal budget), excluding messages already visible on screen.
 - **Deletion:** The knowledge base and history live in the app's private directory. Use "Clear knowledge base and history" in Settings to delete both. Neither is written to logs or committed to Git.
 - The top of the overlay panel shows "Knowledge base: N entries · History: M messages" so you can see how much context was included.
 
 ### APIs and Models
 
 - Set a separate URL, key, and model for assessment, replies, and vision.
-- The built-in "Bocha Jev" assessment preset appears first as of v1.4, ahead of OpenRouter, TypeSafe Direct, and Custom. Selecting it fills in `https://jev.bocha.cn` and model `bocha-jev-v1`, which uses the same protocol as TypeSafe. The settings screen displays the official URL with a copy button. The service is currently free for a limited time. Fresh installs default to Bocha Jev; existing assessment configurations retain their provider and key.
+- The built-in "Bocha Jev" assessment preset is one of several built-ins (OpenRouter, Bocha Jev, TypeSafe Direct, Vercel, OpenCode Zen, DeepSeek, Tongyi-compatible). Selecting it fills in `https://jev.bocha.cn` and model `bocha-jev-v1`, which uses the same protocol as TypeSafe. The settings screen displays the official URL with a copy button. The service is currently free for a limited time. Fresh installs default to OpenRouter; existing assessment configurations retain their provider and key.
 - The "Vercel" assessment preset uses `https://ai-gateway.vercel.sh/typesafe` and model `typesafe-ai/jev`. Supply a [Vercel AI Gateway](https://vercel.com/ai-gateway/models/jev) key. It uses the same protocol as TypeSafe Direct (`POST /v1/systemone`).
 - The "OpenCode Zen" assessment preset uses `https://opencode.ai/zen` and model `jev-1.13`, with free output and input at $0.042 per million tokens. An assessment uses roughly 1,000 input tokens. Supply an [OpenCode Zen](https://opencode.ai/zen) key. This also uses the TypeSafe Direct protocol (`POST /v1/systemone`). For free input as well, manually switch to `jev-1.13-free`, a limited-time option with restricted functionality.
 - The Assessment API can also run on DeepSeek: the "DeepSeek" preset uses `https://api.deepseek.com/v1` and model `deepseek-chat` with a DeepSeek key. DeepSeek serves no Jev judgment model, so selecting it switches the assessment protocol to OpenAI chat mode: the same seven questions are rendered into a prompt and the chat model answers in the same JSON shape, so intent, danger level, what they need, whether to reply now, and candidate ranking all keep working.
 - The Assessment API now has a "Jev protocol / OpenAI chat mode" pair of pills that decides how the route speaks. The Jev protocol sends the questions to a Jev judgment model (TypeSafe family, calibrated answers); chat mode sends them to an ordinary chat model, whose probabilities and danger levels are its own estimates — less accurate than Jev, and each judgment carries the whole question set (roughly 2,000–3,000 input tokens, slower and costlier than Jev). Presets pick the right one for you (DeepSeek = chat mode, the rest = Jev protocol); a custom address can be either. Upgrading leaves the old route untouched.
 - Built-in presets include OpenRouter, TypeSafe Direct, Vercel, OpenCode Zen, DeepSeek, and Tongyi-compatible services. Each card has a connection test.
-- A single key is enough: leave the reply and vision settings blank to inherit the assessment API configuration.
+- A single key is enough: leave the reply and vision **keys** blank and they fall back along the chain (vision → reply → assessment). Addresses and models do not inherit — a blank reply route defaults to OpenRouter (with DeepSeek as the assessment provider, either configure DeepSeek for replies too or keep the OpenRouter default and supply an OpenRouter key).
 - On upgrade from an older version, your existing key is migrated to the new three-card layout once.
 
 ### Message Capture and OCR
@@ -136,7 +138,7 @@ No. Jev only puts your chosen reply into the text field. You always press Send y
 <details>
 <summary><b>Do I need root or Xposed? Could my account get banned?</b></summary>
 
-No root access or extra modules are needed. Jev does not modify chat app packages, inject code into their processes, or access their APIs or account systems. It only reads UI content exposed by Android's accessibility service, much like a screen reader.
+The default path needs no root access and no extra modules: Jev only reads UI content exposed by Android's accessibility service, much like a screen reader. The optional injection enhancement layer (LSPosed / Vector) does require a root framework — it is off by default, enabled per app, and carries account risk (see the [feature guide](../cn/docs/feature-guide.md)); without it the app behaves exactly as if no injection existed.
 
 </details>
 
@@ -230,6 +232,8 @@ cd cn
 ./gradlew assembleRelease    # Requires signing properties outside the repo; set JEV_KEYSTORE_PROPS to their path
 ```
 
+> If `./gradlew` fails with "Permission denied" on a fresh clone, run `chmod +x gradlew` once (the bit is fixed in this repo's index) or use `bash gradlew …`.
+
 - `cn/app/`: Android app written in Kotlin using traditional Views.
   - `capture/`: Accessibility capture, including per-app adapters in `ChatAppAdapter.kt`, dispatch and foreground keep-alive in `ChatCaptureService.kt`, and screenshots and offline recognition in `ocr/`.
   - `jev/`: Jev client and question sets. `overlay/`: Floating UI. `core/`: Configuration and data models, including knowledge base storage and context assembly in `core/kb/`.
@@ -247,7 +251,7 @@ cd cn
 - **X has only been tested with the Chinese UI:** Parsing has been verified with `：`, `上午` / `下午` (AM / PM), and `Read` as they appear in the Chinese UI. An English fallback exists but has not been verified.
 - **Group chats:** Analysis assumes a one-to-one conversation, so its interpretation of "the other person" and relationship settings may be inaccurate in groups.
 - **Chinese conversations:** Jev is trained primarily in English. Assessment questions are in English, while chat content stays in Chinese. For better calibration, label a set of your own real conversations; see `cn/tools/jev/`.
-- **Knowledge base retrieval uses title and tag substring matching**, not semantic search. Tag notes carefully so they can be found. History is deduplicated by sender and exact message text, so the same person repeating the same message is recorded only once.
+- **Knowledge base retrieval uses BM25 term-frequency relevance** (title, tags and content all participate), not semantic (vector) search; concrete wording with matching keywords is what gets a note picked. History is deduplicated by sender and exact message text, so the same person repeating the same message is recorded only once.
 - **OCR requires system permission to take screenshots:** Xiaomi / HyperOS may deny screenshot access to the accessibility service; the panel shows the reason when capture fails. Protected windows (`FLAG_SECURE`) cannot be captured.
 - **OCR only reads what is visible:** It cannot recover the hidden portion of a truncated message, and recognition errors are possible.
 - **Larger APK:** The bundled offline Chinese ML Kit model increases the APK size from about 12 MB to about 27 MB. Builds support `arm64-v8a` only.

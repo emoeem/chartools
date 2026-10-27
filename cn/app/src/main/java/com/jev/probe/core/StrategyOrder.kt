@@ -1,6 +1,4 @@
-package com.jev.probe.jev
-
-import com.jev.probe.core.RankedReply
+package com.jev.probe.core
 
 /**
  * The judge already decides *what kind of move* to make (`best_action`), while the
@@ -11,6 +9,9 @@ import com.jev.probe.core.RankedReply
  * This maps the action onto the strategy that performs it and promotes that row.
  * The probabilities still come from the judge — only the display order changes, so
  * nothing here can fake a score. Ordering is stable: the rest keep their rank.
+ *
+ * Lives in core (not jev) because its only caller is the overlay's rendering —
+ * UI policy, not transport.
  */
 internal object StrategyOrder {
 

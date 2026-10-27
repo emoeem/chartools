@@ -23,6 +23,7 @@ import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
 import com.jev.probe.root.FixStep
 import com.jev.probe.root.RootFix
+import com.jev.probe.capture.ChatApps
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -67,18 +68,9 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(container)
         setContentView(scroll)
 
-        // Debug-only acceptance hooks. Neither screen is exported, so the trigger
-        // enters here and is forwarded / handled here:
-        //   adb shell am start -n com.jev.probe/.MainActivity --ez tone_check true
-        //   adb shell am start -n com.jev.probe/.MainActivity --ez root_fix true
-        // root_fix exists because the real path (boot / package-replaced receiver) is
-        // not something adb can replay on demand without a reboot or a reinstall.
-        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-            if (intent?.getBooleanExtra("tone_check", false) == true) {
-                startActivity(Intent(this, SettingsActivity::class.java).putExtra("tone_check", true))
-            }
-            if (intent?.getBooleanExtra("root_fix", false) == true) runRootFix(quiet = false)
-        }
+        // 调试验收钩子（tone_check / root_fix 回放）：真实现只在 src/debug，
+        // release 是 main 的空实现。见 debug 变体 DebugAcceptance 的注释。
+        DebugAcceptance.onMainActivityCreate(this, intent)
 
         // Self-heal on launch. This is the "I have to tap accessibility again every
         // time I open the app" complaint: the setting may still say enabled while
@@ -95,7 +87,7 @@ class MainActivity : AppCompatActivity() {
         container.removeAllViews()
 
         container.addView(text("小助手", 24f, ink, bold = true))
-        container.addView(text("在聊天 App 旁读对方消息（已支持 QQ、TIM、X、飞书、WhatsApp、Telegram、微信），给出判断和候选回复。发送始终由你手动点。",
+        container.addView(text("在聊天 App 旁读对方消息（已支持 " + ChatApps.all.joinToString("、") { it.displayName } + "、微信），给出判断和候选回复。发送始终由你手动点。",
             13f, sub).apply { setPadding(0, dp(6), 0, dp(16)) })
 
         val a11y = isA11yEnabled()
@@ -410,7 +402,7 @@ class MainActivity : AppCompatActivity() {
      * 把自愈放到后台线程。`su` 可能一直在等 KernelSU 的授权框 —— 那正是这块按钮
      * 这辈子第一次被点到的情况，在主线程上等就是 ANR。
      */
-    private fun runRootFix(quiet: Boolean) {
+    internal fun runRootFix(quiet: Boolean) {
         if (fixing) return
         fixing = true
         val app = this

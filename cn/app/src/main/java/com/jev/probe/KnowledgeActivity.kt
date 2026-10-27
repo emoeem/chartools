@@ -35,6 +35,7 @@ import com.jev.probe.core.skill.SkillMatcher
 import com.jev.probe.core.skill.SkillRef
 import com.jev.probe.core.skill.SkillStore
 import com.jev.probe.jev.ReplyClient
+import com.jev.probe.capture.ChatApps
 import kotlin.math.roundToInt
 
 /**
@@ -510,13 +511,7 @@ class KnowledgeActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun appLabel(pkg: String): String = when (pkg) {
-        "com.tencent.mobileqq" -> "QQ"
-        "com.tencent.tim" -> "TIM"
-        "com.ss.android.lark" -> "飞书"
-        "com.twitter.android" -> "X"
-        else -> pkg
-    }
+    private fun appLabel(pkg: String): String = ChatApps.forPackage(pkg)?.displayName ?: pkg
 
     // ----------------------------------------------------------------- skills
 

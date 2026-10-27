@@ -12,10 +12,11 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jev.probe.capture.ocr.MlKitOcr
-import com.jev.probe.capture.ocr.OcrLine
+import com.jev.probe.core.ocr.OcrLine
 import com.jev.probe.capture.ocr.ScreenCapture
 import com.jev.probe.core.BubbleRect
 import com.jev.probe.bridge.SnapshotDiff
+import com.jev.probe.core.CapturePresence
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Intensity
 import com.jev.probe.core.Msg
@@ -26,6 +27,7 @@ import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.effectiveRelationship
 import com.jev.probe.jev.ReplyPrompt
+import com.jev.probe.jev.ReplyClient
 import com.jev.probe.core.safety.SafetyBlockedException
 import com.jev.probe.jev.HttpScope
 import com.jev.probe.jev.JevClient
@@ -56,9 +58,10 @@ open class ChatCaptureService : AccessibilityService() {
     private val analysisCalls = AnalysisCallRunner()
     private val conversationState = CaptureConversationState()
 
-    /** Adapted chat apps, keyed by package name. Apps in [BLOCKED_PKGS] are
-     *  never read at all (see [maybeCapture] / [onAccessibilityEvent]). */
-    private val adapters = listOf(QQAdapter(), TimAdapter(), XAdapter(), FeishuAdapter(), WhatsAppAdapter(), TelegramAdapter()).associateBy { it.pkg }
+    /** Adapted chat apps, keyed by package name. The one registry lives in
+     *  [ChatApps]; Apps in [BLOCKED_PKGS] are never read at all (see
+     *  [maybeCapture] / [onAccessibilityEvent]). */
+    private val adapters get() = ChatApps.byPackage
 
     /**
      * 能力阶梯 L1。**可选**：没装框架、没开开关、模块没跑，它一律返回 null，
@@ -413,7 +416,7 @@ open class ChatCaptureService : AccessibilityService() {
             // this branch meant every window-state change called showIdle(null),
             // which switches the overlay to BUBBLE mode and tears the card down —
             // the "悬浮显示的内容一会出现一会没有" flicker.
-            if (ForegroundPolicy.needsIdlePark(fg, adapters.keys, WECHAT_PKG)) {
+            if (ForegroundPolicy.needsIdlePark(fg, ChatApps.packages, WECHAT_PKG)) {
                 val target = rootInActiveWindow?.let { targetFor(it) }
                 if (session.target != target) leaveConversation()
                 foregroundPkg = fg!!
@@ -518,7 +521,7 @@ open class ChatCaptureService : AccessibilityService() {
                 Trace.log("cap empty read held ${now - emptySinceAt}ms on $pkg")
                 return
             }
-            if (prefs.ocrFallback && pkg !in NO_SCREENSHOT_PKGS) {
+            if (prefs.ocrFallback && ChatApps.forPackage(pkg)?.allowScreenshot != false) {
                 // Gate BEFORE the shot, not after the OCR. Feishu's tree is empty
                 // on every content-changed event, and a successful shot resets the
                 // failure backoff — so without this the caret blinking or an
@@ -810,7 +813,7 @@ open class ChatCaptureService : AccessibilityService() {
     private fun canCaptureNow(pkg: String?): Boolean {
         if (pkg.isNullOrBlank() || isBlocked(pkg)) return false
         if (adapters.containsKey(pkg) || pkg == WECHAT_PKG) return true
-        return pkg !in NO_SCREENSHOT_PKGS
+        return ChatApps.forPackage(pkg)?.allowScreenshot != false
     }
 
     /**
@@ -895,9 +898,14 @@ open class ChatCaptureService : AccessibilityService() {
         val client = JevClient(prefs)
 
         submitAnalysis {
+            // 台账/摘要的模型调用走 ContextBuilder 的端口注入进来：core.kb 不许
+            // import jev（方向反了），而注入实现只在这里构造。
+            val replyClient = ReplyClient(prefs)
             val ctx = try {
                 ContextBuilder.build(this, snapshot, token.target.pkg, prefs,
-                    ReplyPrompt.judgmentWords(lastJudgment))
+                    ReplyPrompt.judgmentWords(lastJudgment),
+                    historySummarizer = { transcript -> replyClient.summarize(transcript) },
+                    ledgerRefresher = { prev, source, until -> replyClient.rebuildLedger(prev, source, until) })
             } catch (e: Exception) {
                 Log.w(TAG, "context build failed: " + e.javaClass.simpleName)
                 null
@@ -1112,7 +1120,7 @@ open class ChatCaptureService : AccessibilityService() {
         // Blocked apps: a manual "截屏识别一次" must NOT take a screenshot there —
         // just show the notice (a manual tap always shows it).
         if (isBlocked(pkg)) { showBlocked(auto = false); return }
-        if (pkg in NO_SCREENSHOT_PKGS) { overlay?.showError("这个应用里不使用截屏识别"); return }
+        if (ChatApps.forPackage(pkg)?.allowScreenshot == false) { overlay?.showError("这个应用里不使用截屏识别"); return }
         // WeChat: the pixel path already knows how to find the bubbles and their
         // sides, so a manual tap must go through it rather than whole-screen OCR
         // (which cannot tell who said what).
@@ -1511,7 +1519,7 @@ open class ChatCaptureService : AccessibilityService() {
             override fun isCurrent(token: ConversationSession.Token): Boolean = this@ChatCaptureService.isCurrent(token)
             override fun post(delayMs: Long, action: () -> Unit) { main.postDelayed({ action() }, delayMs) }
             override fun copyToClipboard(text: String) = this@ChatCaptureService.copyToClipboard(text)
-        })
+        }, ChatApps::forPackage)
     }
 
     /** Fill without blocking the main thread; all retries re-resolve the original target. */
@@ -1592,16 +1600,12 @@ open class ChatCaptureService : AccessibilityService() {
         private const val TAG = "JEVASSIST"
 
         /**
-         * 本进程里有没有一个**活着的**服务实例。和 `enabled_accessibility_services`
-         * 那一格是两件事：那一格只说"用户在设置里开着"，这里说的是"真的在跑"。
-         *
-         * 无障碍服务和本 App 的界面在同一个进程（清单里没写 `android:process`），
-         * 所以这个静态量就是主页和"一键修复"能拿到的最准的信号 —— 进程被杀后默认
-         * false 也对（服务跟着死了）。
+         * 本进程里有没有一个**活着的**服务实例。状态本体在 [CapturePresence]
+         * —— root 的一键修复只读那个，不必 import 本类。语义见那边。
          */
-        @Volatile
-        var live = false
-            private set
+        var live: Boolean
+            get() = CapturePresence.live
+            private set(value) { CapturePresence.live = value }
 
         /** Grace period before a "not a chat" read really leaves the conversation. */
         private const val LEAVE_CONFIRM_MS = 1200L
@@ -1609,10 +1613,6 @@ open class ChatCaptureService : AccessibilityService() {
         /** Apps that are never read: they protect their content against screen
          *  reading or screenshots, so any capture attempt there is off-limits.
          *  No adapter, no capture, only a one-time "not supported" notice. */
-        /** Supported apps that are read through the node tree only and never
-         *  screenshotted: no OCR fallback, no manual "截屏识别一次". */
-        private val NO_SCREENSHOT_PKGS = setOf(WhatsAppRules.PACKAGE)
-
         private val BLOCKED_PKGS = setOf("cn.soulapp.android")
 
         /**

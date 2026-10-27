@@ -7,6 +7,7 @@ import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import java.io.File
 import java.io.InputStream
+import com.jev.probe.core.ocr.OcrEngine
 
 /**
  * Import a document the user picked into plain-text chunks.
@@ -100,8 +101,13 @@ object DocImport {
      *
      * @param allowOcr run on-device OCR when a PDF turns out to have no text
      *        layer. False turns a scanned PDF into a clear error instead.
+     * @param ocr the OCR engine for scanned PDFs. The activity constructs it;
+     *        null means a scanned PDF reports the same clear error as
+     *        `allowOcr = false` instead of reaching into capture from here.
      */
-    fun import(context: Context, uri: Uri, allowOcr: Boolean = true): Result {
+    fun import(
+        context: Context, uri: Uri, allowOcr: Boolean = true, ocr: OcrEngine? = null
+    ): Result {
         val name = displayName(context, uri)
         val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull()
 
@@ -113,7 +119,7 @@ object DocImport {
 
         try {
             val format = sniffFormat(copy, name, mime)
-            return extract(context, format, name, copy, allowOcr)
+            return extract(context, format, name, copy, allowOcr, ocr)
         } catch (e: OutOfMemoryError) {
             // OutOfMemoryError is not an Exception; catching it is deliberate —
             // a document too large to parse should produce a message, and by the
@@ -146,7 +152,9 @@ object DocImport {
      * document is treated as an HTML page, because `sniffFormat` would otherwise
      * call raw markup "plain text" and the note would be full of tags.
      */
-    fun importUrl(context: Context, url: String, allowOcr: Boolean = true): Result {
+    fun importUrl(
+        context: Context, url: String, allowOcr: Boolean = true, ocr: OcrEngine? = null
+    ): Result {
         val clean = url.trim()
         if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
             return failure(DocFormat.UNKNOWN, clean, "只支持 http/https 开头的网址")
@@ -168,7 +176,7 @@ object DocImport {
             } else {
                 bySniff
             }
-            return extract(context, format, name, copy, allowOcr)
+            return extract(context, format, name, copy, allowOcr, ocr)
         } catch (e: OutOfMemoryError) {
             return failure(DocFormat.UNKNOWN, name, "网页内容太大，内存不足，无法解析")
         } catch (e: Exception) {
@@ -273,7 +281,8 @@ object DocImport {
         format: DocFormat,
         name: String,
         file: File,
-        allowOcr: Boolean
+        allowOcr: Boolean,
+        ocr: OcrEngine?
     ): Result {
         val sink = TextSink(MAX_CHARS)
         var text: String? = null
@@ -301,14 +310,14 @@ object DocImport {
 
                     // Nothing to read. Some scans carry a stray text layer (a page
                     // number, a watermark); it is kept only if OCR finds nothing.
-                    !allowOcr -> return failure(
+                    !allowOcr || ocr == null -> return failure(
                         format, name, "这是扫描件（没有文字层）；OCR 关闭时无法导入"
                     )
 
                     else -> {
                         val ocrSink = TextSink(MAX_CHARS)
                         val pages = try {
-                            PdfText.extractScanned(file, PdfText.MAX_OCR_PAGES, ocrSink)
+                            PdfText.extractScanned(file, PdfText.MAX_OCR_PAGES, ocrSink, ocr)
                         } catch (e: Exception) {
                             return failure(format, name, "OCR 失败：${e.javaClass.simpleName}")
                         }

@@ -243,7 +243,7 @@ JDK 17 + Android SDK（platform 35），在 `global/` 目录下运行：
 - `fixtures/`：录下的屏幕和测试语料。
 - `tools/`：dump 阅读器和一个简单的 OpenRouter 客户端。
 - `docs/`：[测试](docs/TESTING.md)和[诊断](docs/DIAGNOSTICS.md)（英文）。
-- `apk/`：签好名的 release 包。
+- `apk/`：本机构建出的签名 release 包（git 忽略；仓库本身不带安装包）。
 
 贡献规则：
 - 不允许加入任何发送消息的路径。

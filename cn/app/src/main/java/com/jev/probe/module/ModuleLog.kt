@@ -52,6 +52,4 @@ internal object ModuleLog {
         t.stackTrace.take(8).joinToString("<-") { "${it.className}#${it.methodName}" }
     }.getOrDefault("frames=?")
 
-    /** 诊断快照（内存副本，调用方自己决定怎么用）。 */
-    fun tail(): List<String> = synchronized(lock) { ring.toList() }
 }

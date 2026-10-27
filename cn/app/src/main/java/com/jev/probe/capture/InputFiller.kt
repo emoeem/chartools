@@ -13,7 +13,11 @@ import android.view.accessibility.AccessibilityNodeInfo
  * is worse than no write. Every step re-resolves the originating conversation, so
  * a chat switch mid-retry can never land the text in the wrong window.
  */
-internal class InputFiller(private val host: Host) {
+internal class InputFiller(
+    private val host: Host,
+    /** 输入框定位交给适配器契约（[ChatAppAdapter.findInput]）；查不到 = 剪贴板。 */
+    private val adapterFor: (String) -> ChatAppAdapter?
+) {
 
     /** What the filler needs from the service; everything else stays out here. */
     interface Host {
@@ -37,16 +41,7 @@ internal class InputFiller(private val host: Host) {
         if (!host.isCurrent(token)) return null
         val root = host.activeRoot() ?: return null
         if (host.targetOf(root) != token.target) return null
-        val input = when (token.target.pkg) {
-            "com.tencent.mobileqq" -> root.findAccessibilityNodeInfosByViewId("com.tencent.mobileqq:id/input").firstOrNull()
-            "com.tencent.tim" -> root.findAccessibilityNodeInfosByViewId("com.tencent.tim:id/input").firstOrNull()
-            "com.ss.android.lark" -> root.findAccessibilityNodeInfosByViewId("com.ss.android.lark:id/kb_rich_text_content").firstOrNull()
-            // Twitter and Telegram publish their composer as an ordinary editable
-            // node (no stable id), so the generic finder is the only handle.
-            "com.twitter.android" -> findEditable(root)
-            "org.telegram.messenger" -> findEditable(root)
-            else -> null // Unknown apps support explicit clipboard copy, not unverified writes.
-        }
+        val input = adapterFor(token.target.pkg)?.findInput(root)
         // Re-read the node after SET_TEXT: the accessibility cache may still
         // contain the previous draft even though the write already succeeded.
         input ?: return null
@@ -84,27 +79,5 @@ internal class InputFiller(private val host: Host) {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-    }
-
-    /**
-     * The one editable node under [root], or null. More than one editable means we
-     * cannot tell the composer from a search box or a nickname field, so nothing is
-     * written and the caller copies instead.
-     */
-    private fun findEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.addLast(root)
-        var guard = 0
-        var found: AccessibilityNodeInfo? = null
-        while (stack.isNotEmpty() && guard < 5000) {
-            guard++
-            val node = stack.removeLast()
-            if (node.isEditable && node.isVisibleToUser && node.isEnabled && !node.isPassword) {
-                if (found != null) return null // Ambiguous editor: clipboard only.
-                found = node
-            }
-            for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
-        }
-        return if (stack.isEmpty()) found else null
     }
 }

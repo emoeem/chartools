@@ -99,7 +99,6 @@ class KbStore private constructor(context: Context) {
 
     fun notes(): List<Note> = synchronized(lock) { loadNotes().toList() }
 
-    fun note(id: String): Note? = synchronized(lock) { loadNotes().firstOrNull { it.id == id } }
 
     /** Insert or replace by id. Returns false when it did not reach disk. */
     fun saveNote(note: Note): Boolean = synchronized(lock) {

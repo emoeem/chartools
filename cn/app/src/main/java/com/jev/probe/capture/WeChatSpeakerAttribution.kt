@@ -1,6 +1,6 @@
 package com.jev.probe.capture
 
-import com.jev.probe.capture.ocr.OcrLine
+import com.jev.probe.core.ocr.OcrLine
 import kotlin.math.abs
 
 /**

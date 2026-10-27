@@ -10,6 +10,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.jev.probe.capture.ocr.MlKitOcr
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.Note
@@ -133,9 +134,12 @@ class DocImportActivity : AppCompatActivity() {
             val newPending = ArrayList<Pending>()
             val lines = ArrayList<String>()
             val text = StringBuilder()
+            // OCR 引擎在这里构造（UI 层持有 Android 依赖）；core.kb.extract 只
+            // 认 OcrEngine 接口，不 import capture。
+            val ocr = MlKitOcr()
             for (uri in uris) {
                 val result = try {
-                    DocImport.import(this@DocImportActivity, uri)
+                    DocImport.import(this@DocImportActivity, uri, ocr = ocr)
                 } catch (e: Exception) {
                     null
                 }

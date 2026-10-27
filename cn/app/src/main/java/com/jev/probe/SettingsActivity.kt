@@ -1,7 +1,6 @@
 package com.jev.probe
 
 import android.graphics.Bitmap
-import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -24,13 +23,10 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.jev.probe.bridge.BridgeStore
 import com.jev.probe.bridge.HookTargets
-import com.jev.probe.core.Analysis
 import com.jev.probe.core.ChatSnapshot
-import com.jev.probe.core.Choice
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
-import com.jev.probe.core.Score
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
@@ -49,9 +45,10 @@ import kotlin.math.roundToInt
 
 class SettingsActivity : AppCompatActivity() {
 
-    private lateinit var prefs: Prefs
-    private val worker = Executors.newSingleThreadExecutor()
-    private val main = Handler(Looper.getMainLooper())
+    // internal: src/debug 的 DebugAcceptance（试写 runner）要读.
+    internal lateinit var prefs: Prefs
+    internal val worker = Executors.newSingleThreadExecutor()
+    internal val main = Handler(Looper.getMainLooper())
 
     private val accent = Palette.brand()
     private val ink = Color.parseColor("#111827")
@@ -801,19 +798,10 @@ class SettingsActivity : AppCompatActivity() {
 
         setContentView(scroll)
 
-        // Debug-only acceptance hook. The drafting prompt is the thing the user
-        // judged ("给的建议也很不太对", and a grovelling role-play line in a
-        // flirting thread), and it can only be judged against a real model.
-        //   adb shell am start -n com.jev.probe/.SettingsActivity \
-        //       --ez tone_check true
-        // runs the REAL drafting path once over a fixed, synthetic thread and
-        // writes the candidates to files/jev-tone-check.txt. It never reads a
-        // real conversation, and it is not compiled into release builds.
-        if (((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) &&
-            intent?.getBooleanExtra("tone_check", false) == true
-        ) {
-            runToneCheck()
-        }
+        // 调试验收钩子：真实现只在 src/debug（同 FQCN 覆盖），release 里是
+        // main 的空实现 —— 会发真实模型请求的代码不进 release 包。触发命令见
+        // debug 变体 DebugAcceptance 的注释。
+        DebugAcceptance.onSettingsCreate(this)
     }
 
     /**
@@ -826,44 +814,6 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         personaReload?.invoke()
-    }
-
-    private fun runToneCheck() {
-        val probe = draftPrefs(SCRATCH_REPLY) {
-            judgeBaseUrl = prefs.judgeBaseUrl
-            judgeProtocol = prefs.judgeProtocol
-            judgeModel = prefs.judgeModel
-            judgeKey = prefs.judgeKey
-            replyBaseUrl = prefs.replyBaseUrl
-            replyKey = prefs.replyKey
-            replyModel = prefs.replyModel
-            contextHistoryCount = prefs.contextHistoryCount
-        }
-        worker.execute {
-            val demo = ChatSnapshot("试写", listOf(
-                Msg("other", "你今天怎么这么晚才回我？"),
-                Msg("me", "刚忙完，想你了"),
-                Msg("other", "切，谁信啊，说好的周末陪我去看电影呢")
-            ))
-            // A light teasing thread: the judgment says so, and the drafter has to
-            // follow it instead of writing for an imagined crisis.
-            val judgment = Analysis(
-                trueIntent = Choice("casual_chat", 0.7, emptyMap()),
-                dangerLevel = Score(1.0, 0.8, 9),
-                sheNeeds = Choice("nothing", 0.5, emptyMap()),
-                shouldReplyNow = 0.9,
-                bestAction = Choice("make_plan", 0.5, emptyMap()),
-                tensionResolved = 0.2, literalQuestion = 0.8,
-                rankedReplies = emptyList(), latencyMs = 0
-            )
-            val out = try {
-                ReplyClient(probe).draft(demo, prefs.relationship, null, 3, emptyList(), judgment, prefs.style)
-            } catch (e: Exception) {
-                listOf("FAILED: ${e.message}")
-            }
-            runCatching { File(filesDir, "jev-tone-check.txt").writeText(out.joinToString("\n---\n")) }
-            main.post { Toast.makeText(this, "试写完成：${out.size} 条", Toast.LENGTH_LONG).show() }
-        }
     }
 
     // Held as fields because several test buttons read each other's key box.
@@ -938,7 +888,7 @@ class SettingsActivity : AppCompatActivity() {
      * from under each other when two tests overlapped. The real config is never
      * touched either way.
      */
-    private fun draftPrefs(scratchName: String, fill: Prefs.() -> Unit): Prefs {
+    internal fun draftPrefs(scratchName: String, fill: Prefs.() -> Unit): Prefs {
         getSharedPreferences(scratchName, MODE_PRIVATE).edit().clear().commit()
         return Prefs(this, scratchName).apply(fill)
     }
@@ -1564,7 +1514,7 @@ class SettingsActivity : AppCompatActivity() {
 
         /** One scratch prefs file per test button; never the real config. */
         private const val SCRATCH_JUDGE = "jev_probe_scratch_judge"
-        private const val SCRATCH_REPLY = "jev_probe_scratch_reply"
+        internal const val SCRATCH_REPLY = "jev_probe_scratch_reply"
         private const val SCRATCH_VISION = "jev_probe_scratch_vision"
 
         private const val PRIVACY_URL = "https://github.com/emoeem/chartools/blob/main/cn/PRIVACY.md"
