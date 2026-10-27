@@ -139,7 +139,15 @@ object ContextBuilder {
         //    a body (L2) only when the evidence is clear: either the user pinned
         //    the skill to every round, or the local matcher scores a real hit.
         //    L3 (资源文件) 只在 L2 命中后再按本轮对话挑两三篇。
-        val skills = SkillStore.get(context).list().filter { it.enabled }
+        // S4 灰度：开关关着就一行都不变（`allowedSkillNames` 会原样返回全量），
+        // 打开且当前专家写了 skillRefs 时，才只留它点名的技能。
+        val allSkills = SkillStore.get(context).list().filter { it.enabled }
+        val boundRefs = if (prefs.expertBindingEnabled)
+            PersonaStore.get(context).activeOf(prefs.style)?.skillRefs.orEmpty() else emptyList()
+        val allowedNames = ExpertBinding
+            .allowedSkillNames(prefs.expertBindingEnabled, boundRefs, allSkills.map { it.name })
+            .toSet()
+        val skills = allSkills.filter { it.name in allowedNames }
         val hay = haystack(snapshot)
         val skillHay = if (skillHint.isBlank()) hay else "$hay $skillHint"
         val pinned = skills.filter { it.always }.take(MAX_PINNED_SKILLS).map {

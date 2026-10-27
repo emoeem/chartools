@@ -162,6 +162,22 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getBoolean(K_CTX_ENABLED, false)
         set(v) = sp.edit().putBoolean(K_CTX_ENABLED, v).apply()
 
+    // ------------------------------------------------------ expert binding (S4)
+
+    /**
+     * 专家绑定灰度开关：**默认关**。
+     *
+     * 关着的时候装配链路与今天逐字相同（技能 = 全局 enabled 全量），打开后
+     * `ContextBuilder` 只加载当前专家 `skillRefs` 指向的那几个技能。
+     *
+     * 为什么必须有这个开关而不是直接生效：绑定改变的是**送进提示词的技能清单**，
+     * 也就是回复内容本身。这种改动一旦出错，表现是「回复风格莫名其妙变了」，
+     * 没有报错、没有崩溃、单测也未必抓到 —— 只能靠默认关闭 + 逐字回归锁兜住。
+     */
+    var expertBindingEnabled: Boolean
+        get() = sp.getBoolean(K_EXPERT_BINDING, false)
+        set(v) = sp.edit().putBoolean(K_EXPERT_BINDING, v).apply()
+
     // ----------------------------------------------------- ledger & review (S1)
 
     /**
@@ -557,6 +573,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_VISION_KEY = "vision_key"
         private const val K_VISION_MODEL = "vision_model"
         private const val K_CTX_ENABLED = "context_enabled"
+        private const val K_EXPERT_BINDING = "expert_binding_enabled"
         private const val K_LEDGER = "ledger_enabled"
         private const val K_REVIEW = "review_enabled"
         private const val K_REVIEW_BASE = "review_base_url"
