@@ -27,6 +27,7 @@ class PurityTest {
         val pure = listOf(
             "core/kb/PersonaProfile.kt",
             "core/kb/ExpertCatalog.kt",
+            "core/kb/ExpertPack.kt",
             "core/kb/ExpertBinding.kt",
             "ui/ExpertCard.kt"
         )

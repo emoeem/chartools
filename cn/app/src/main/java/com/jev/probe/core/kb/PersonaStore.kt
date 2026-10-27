@@ -283,6 +283,31 @@ class PersonaStore private constructor(context: Context) {
         added
     }
 
+    /**
+     * 从**专家目录**（[ExpertPack]，331 位）装一位进「我的专家库」。
+     *
+     * 和 [restoreBuiltins] 的区别是「谁主动」：那里是用户点「恢复内置模板」批量补
+     * 14 张，这里是用户在专家库里点了某一位。相同的是两条台账规则 ——
+     * **装过就记 `seeded`**（下次启动不再当新预设播）、**从 `removed` 里划掉**
+     * （用户主动反悔）。
+     *
+     * 已经装过（同 `presetKey`）就直接返回那一条，**不写第二份**：目录卡片和
+     * 库里条目会在列表里并排出现，复制一份重名条目是这类功能最典型的翻车。
+     *
+     * 台账更新在 [writeLocked] **之前**：`writeLocked` 序列化的就是此刻的 `seeded`，
+     * 反过来写文件里就永远少这几笔（见 [topUpLocked] 里那次真机抓到的回归）。
+     */
+    fun install(preset: PersonaPreset): PersonaProfile? = synchronized(lock) {
+        val items = loadLocked().toMutableList()
+        items.firstOrNull { it.presetKey.isNotEmpty() && it.presetKey == preset.key }
+            ?.let { return@synchronized it }
+        val entry = preset.toProfile()
+        items += entry
+        seeded += preset.key
+        removed -= preset.key
+        if (writeLocked(items)) entry else null
+    }
+
     // ------------------------------------------------------- 导入 / 导出
 
     /**
@@ -643,19 +668,15 @@ private data class Incoming(
     )
 }
 
-/** 预设 → 条目。`presetKey` 就是这里种下的，台账全靠它。 */
+/**
+ * 预设 → 条目。`presetKey` 就是这里种下的，台账全靠它。
+ *
+ * 实现在 [asProfile]（`ExpertPack.kt`，纯 Kotlin）：目录里的 331 位专家也要走同一条
+ * 派生路径，两份 13 行代码各写一次，漂移起来的症状是「从目录加入的专家少了分类」，
+ * 而那种 bug 不报错。
+ */
 private fun PersonaPreset.toProfile(id: String = PersonaStore.newId()): PersonaProfile =
-    PersonaProfile(
-        id = id,
-        name = name,
-        body = body.trim(),
-        builtin = true,
-        avatar = avatar,
-        description = description,
-        tags = tags,
-        category = category,
-        presetKey = key
-    )
+    asProfile(id).copy(body = body.trim())
 
 // ------------------------------------------------------------- org.json 小工具
 

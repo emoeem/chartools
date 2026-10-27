@@ -26,10 +26,13 @@ import androidx.recyclerview.widget.RecyclerView
 import com.jev.probe.core.Palette
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.ExpertCatalog
+import com.jev.probe.core.kb.ExpertPack
+import com.jev.probe.core.kb.ExpertShelf
 import com.jev.probe.core.kb.ExpertSort
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
 import com.jev.probe.core.kb.PersonaCard
+import com.jev.probe.core.kb.PersonaPreset
 import com.jev.probe.core.kb.PersonaProfile
 import com.jev.probe.core.kb.PersonaStatus
 import com.jev.probe.core.kb.PersonaStore
@@ -75,6 +78,11 @@ class ExpertActivity : AppCompatActivity() {
     private val warn = Color.parseColor("#B45309")
 
     private var items: List<PersonaProfile> = emptyList()
+    /** 专家目录（331 位）。只读货架，读一次缓存住，页面里再怎么操作都不重读。 */
+    @Volatile
+    private var pack: List<PersonaPreset> = emptyList()
+    @Volatile
+    private var packLoaded = false
     private var category: String? = null
     private var sort: ExpertSort = ExpertSort.COMPREHENSIVE
     private var query: String = ""
@@ -110,7 +118,7 @@ class ExpertActivity : AppCompatActivity() {
         bar.addView(textButton("导出") { exportAll() })
         bar.addView(textButton("⋯") { pageMenu() })
         root.addView(bar)
-        root.addView(text("预设专家 + 自建专家。点卡片看详情，点「用」立刻切换回复口径。", 12f, Color.parseColor("#6B7280")))
+        root.addView(text("331 位专家目录 + 你自建的。点卡片看详情，点「用」立刻切换回复口径。", 12f, Color.parseColor("#6B7280")))
 
         // ---- 搜索 ----
         val search = edit("", "搜名字、简介、标签或正文").apply {
@@ -191,10 +199,19 @@ class ExpertActivity : AppCompatActivity() {
 
     private fun reload() {
         worker.execute {
-            val list = runCatching { store.list() }.getOrDefault(emptyList())
+            val mine = runCatching { store.list() }.getOrDefault(emptyList())
             val problem = runCatching { store.lastProblem }.getOrNull()
+            if (!packLoaded) {
+                // 目录解析失败不算错误：退化成「只有我自己的专家」，页面照常用。
+                val json = runCatching {
+                    assets.open(ExpertPack.ASSET).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                }.getOrNull()
+                pack = if (json == null) emptyList() else ExpertPack.parse(json).presets
+                packLoaded = true
+            }
+            val merged = ExpertShelf.merge(mine, pack)
             main.post {
-                items = list
+                items = merged
                 if (problem != null) toast("⚠ $problem")
                 rebuildCategories()
                 rebuildSorts()
@@ -208,10 +225,11 @@ class ExpertActivity : AppCompatActivity() {
         val shown = ExpertCatalog.browse(items, category, query, sort)
         adapter.submitList(shown)
         emptyHint.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
-        statusLine.text = if (items.isEmpty()) {
-            "库里还没有专家 —— 点「新建专家」，或从右上角「⋯」恢复内置模板。"
-        } else {
-            "共 ${items.size} 个专家 · 当前显示 ${shown.size} 个"
+        val mine = items.count { !ExpertShelf.isFromPack(it) }
+        statusLine.text = when {
+            items.isEmpty() -> "库里还没有专家 —— 点「新建专家」，或从右上角「⋯」恢复内置模板。"
+            mine == 0 -> "目录 ${items.size} 位专家 · 当前显示 ${shown.size} 个"
+            else -> "共 ${items.size} 位（我的 $mine · 目录 ${items.size - mine}）· 当前显示 ${shown.size} 个"
         }
     }
 
@@ -274,13 +292,41 @@ class ExpertActivity : AppCompatActivity() {
         box.addView(label("正文"))
         box.addView(text(p.body, 11.5f, Color.parseColor("#111827")))
 
-        AlertDialog.Builder(this)
-            .setTitle("专家详情")
+        val fromPack = ExpertShelf.isFromPack(p)
+        val builder = AlertDialog.Builder(this)
+            .setTitle(if (fromPack) "专家详情 · 目录" else "专家详情")
             .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("用这个专家") { _, _ -> applyExpert(p) }
-            .setNeutralButton("编辑") { _, _ -> editDialog(p) }
-            .setNegativeButton("更多") { _, _ -> moreMenu(p) }
-            .show()
+        if (fromPack) {
+            // 目录条目是**货架上的样品**：点「加入」才会变成库里的一条（能改名、能删）。
+            // 「用这个专家」也允许，只是它会先把样品落库 —— 否则热度没地方记。
+            builder.setNeutralButton("加入我的专家库") { _, _ -> installOnly(p) }
+        } else {
+            builder.setNeutralButton("编辑") { _, _ -> editDialog(p) }
+        }
+        builder.setNegativeButton(if (fromPack) "关闭" else "更多") { _, _ ->
+            if (!fromPack) moreMenu(p)
+        }
+        builder.show()
+    }
+
+    /** 目录条目 → 它对应的预设。不在目录里（用户自建）返回 null。 */
+    private fun presetOf(p: PersonaProfile): PersonaPreset? =
+        if (!ExpertShelf.isFromPack(p)) null
+        else pack.firstOrNull { ExpertShelf.packId(it.key) == p.id }
+
+    private fun installOnly(p: PersonaProfile) {
+        val preset = presetOf(p) ?: run {
+            toast("这条不是目录里的专家")
+            return
+        }
+        worker.execute {
+            val saved = runCatching { store.install(preset) }.getOrNull()
+            main.post {
+                toast(if (saved == null) "加入失败（储存空间？）" else "已加入「${saved.name}」，现在能改能删")
+                reload()
+            }
+        }
     }
 
     /**
@@ -292,7 +338,15 @@ class ExpertActivity : AppCompatActivity() {
     private fun applyExpert(p: PersonaProfile) {
         prefs.style = p.body
         worker.execute {
-            runCatching { store.touch(p.id) }
+            // 目录条目第一次被用时先落库：热度要记在一条真实的库条目上，
+            // 否则「最热」对 331 位目录专家永远是 0（货架不记热度）。
+            val preset = presetOf(p)
+            val live = if (preset != null) {
+                runCatching { store.install(preset) }.getOrNull()
+            } else {
+                store.get(p.id)
+            }
+            live?.let { runCatching { store.touch(it.id) } }
             main.post {
                 toast("已套用「${p.name}」")
                 setResult(RESULT_OK)
@@ -302,6 +356,19 @@ class ExpertActivity : AppCompatActivity() {
     }
 
     private fun moreMenu(p: PersonaProfile) {
+        if (ExpertShelf.isFromPack(p)) {
+            // 长按目录条目：不能改名/删除（它不是用户的东西），只能加入或复制正文。
+            AlertDialog.Builder(this)
+                .setTitle(p.name)
+                .setItems(arrayOf("加入我的专家库", "复制这段正文")) { _, which ->
+                    if (which == 0) installOnly(p) else {
+                        copyToClipboard(p.body)
+                        toast("正文已复制")
+                    }
+                }
+                .show()
+            return
+        }
         val actions = arrayOf("重命名", "复制一份", "导出这段正文（复制）", "删除")
         AlertDialog.Builder(this)
             .setTitle(p.name)

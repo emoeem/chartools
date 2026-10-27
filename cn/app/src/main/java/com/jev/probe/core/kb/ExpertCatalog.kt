@@ -38,6 +38,14 @@ object ExpertCatalog {
     /** 内置分类的**固定顺序**（界面 tab 的顺序）。用户自建的分类排在后面。 */
     val CATEGORIES: List<String> = listOf("情感", "销售", "职场", "客服", "日常")
 
+    /**
+     * 全部分类的展示顺序 = 五个老分类 + 专家目录的 22 个 division。
+     *
+     * 老分类必须在前：手写那 14 张预设全在它们里面，而目录的 331 位专家一个都不在。
+     * 让「技术工程」排到「情感」前面，老用户会以为自己的卡没了。
+     */
+    val ORDER: List<String> = CATEGORIES + ExpertPack.CATEGORY_ORDER.filter { it !in CATEGORIES }
+
     /** 没有分类的条目归到这里（只在真有这种条目时出现）。 */
     const val UNCATEGORIZED: String = "未分类"
 
@@ -53,8 +61,8 @@ object ExpertCatalog {
     fun categories(items: List<PersonaProfile>): List<String> {
         val present = items.map { it.categoryOrBlank }.toSet()
         val out = ArrayList<String>()
-        CATEGORIES.forEach { if (it in present) out += it }
-        present.filter { it.isNotBlank() && it !in CATEGORIES }
+        ORDER.forEach { if (it in present) out += it }
+        present.filter { it.isNotBlank() && it !in ORDER }
             .sorted()
             .forEach { out += it }
         if (present.any { it.isBlank() }) out += UNCATEGORIZED
