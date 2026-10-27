@@ -24,7 +24,8 @@ This branch keeps developing on top of upstream v1.7, and all of that work lives
 
 - **Capture layer:** new Telegram and TIM adapters; WeChat runs on a read-only "screenshot + on-device OCR" path (bubble colour decides the sides); OCR grouping, speaker attribution, and recent-reply dedup.
 - **Knowledge base:** on-device document import (PDF / Word / EPUB / web pages; scanned files fall back to on-device OCR), skill packs (Agent Skills, matched against the conversation), contact profiles and ledgers.
-- **Persona library:** personas are now a user-managed library (create / rename / duplicate / delete / import / export / restore built-ins) instead of three hard-coded templates, with per-contact personas and keys for topic, hard limits, "avoid saying", safeword, amber light and example lines.
+- **Persona library:** personas are now a user-managed library (create / rename / duplicate / delete / import / export / restore built-ins) instead of three hard-coded templates, with 14 starter cards (relationships / sales / workplace / support / everyday) plus per-contact personas and keys for topic, hard limits, "avoid saying", safeword, amber light and example lines.
+- **Expert library (a read-only catalogue of 331):** an "expert" is one persona body plus an avatar, one-line description, tags, category and usage count. Alongside the hand-written presets the APK ships a catalogue drawn from [MichengAI/dsh-agency-agents](https://github.com/MichengAI/dsh-agency-agents): 331 experts across 22 divisions (engineering / design / marketing / sales / finance / healthcare / legal / academic …), and **nothing enters your library until you tap it**. The persona text in Settings stays the single source of truth — there is no stored "currently selected expert" — and avatar, description, tags, category and usage count are used only for browsing and sorting, never in the prompt.
 - **Manual generate:** a regenerate control on the card header, in the long-press menu and in the persistent notification; it re-drafts from the current snapshot, captures the screen first when there is none, and says why when neither is possible; a round stuck for more than 8 seconds can be taken over manually.
 - **Reply naturalness (P0):** the first draft is now written *after* the assessment (with a 2-second blind-draft fallback); relationship resolution is "contact relationship over global"; the candidate strategy contract is count-aware (asking for 2 candidates no longer demands 3 strategies); a new "avoid" persona key separates "stop the round when the other person mentions it" from "never say it in my reply"; low-confidence assessments are downgraded to a hint instead of stated as fact.
 - **Optional injection layer:** read-only enhancements through LSPosed / Vector — off by default, enabled per app, and falling back to the accessibility path (with the reason noted in Trace) the moment it cannot read.
@@ -106,6 +107,16 @@ Open Settings, then Analysis, then "Knowledge Base and Contacts."
 - **History:** "Record chat history (stored locally only)" is off by default. When enabled, each analysis includes the most recent N messages (30 by default in settings; at most 20 are injected into the writing context by the internal budget), excluding messages already visible on screen.
 - **Deletion:** The knowledge base and history live in the app's private directory. Use "Clear knowledge base and history" in Settings to delete both. Neither is written to logs or committed to Git.
 - The top of the overlay panel shows "Knowledge base: N entries · History: M messages" so you can see how much context was included.
+
+### Expert Library
+
+Open Settings → "Personas and tone" → "Open expert library".
+
+- **Two layers:** your own library (rename, edit, delete, export) and a read-only catalogue shipped inside the APK (331 experts across 22 divisions). The catalogue holds samples only: nothing enters your library until you tap it.
+- **"Use this expert" means add, then apply:** the expert's persona body is written into the persona text in Settings (still the single source of truth) and one use is counted (the data behind "most used"). "Add to my library" only adds it and leaves the current persona alone. Once an expert is in your library, the catalogue stops showing a duplicate of it.
+- **Only the body reaches the prompt:** tone and rules all come from the topic / address / tone / situation / rules / example lines inside the body; avatar, description, tags, category and usage count are used only for browsing and sorting.
+- **Grid and retrieval:** a two-column card grid, a category drawer, search across name, description, tags and body, and three sort orders (overall / most used / newest), with 14 starter cards plus create, duplicate, import/export, delete and restore built-ins.
+- **Expert bindings (gradual release, off by default):** an expert can name the skills to load and the apps it appears in; with the switch on, only the named skills load, and with it off the assembly path is identical to before.
 
 ### APIs and Models
 

@@ -24,7 +24,8 @@ Nhánh này tiếp tục phát triển dựa trên bản gốc v1.7, toàn bộ 
 
 - **Lớp thu thập:** thêm adapter Telegram và TIM; WeChat đi theo đường chỉ đọc "chụp màn hình + OCR trên máy" (màu bong bóng quyết định bên trái/phải); gom nhóm OCR, gán người nói, khử trùng lặp trả lời gần đây.
 - **Kho tri thức:** nhập tài liệu trên máy (PDF / Word / EPUB / trang web; bản scan tự chuyển sang OCR trên máy), gói kỹ năng (Agent Skills, tự khớp theo hội thoại), hồ sơ liên hệ và sổ ghi.
-- **Thư viện nhân vật:** nhân vật trở thành thư viện do người dùng tự quản (tạo / đổi tên / nhân bản / xoá / nhập / xuất / khôi phục mẫu), thay cho ba mẫu cứng; hỗ trợ nhân vật riêng cho từng liên hệ và các khoá chủ đề, giới hạn cứng, "tránh nói", từ an toàn, đèn vàng, câu ví dụ.
+- **Thư viện nhân vật:** nhân vật trở thành thư viện do người dùng tự quản (tạo / đổi tên / nhân bản / xoá / nhập / xuất / khôi phục mẫu), thay cho ba mẫu cứng, với 14 thẻ khởi đầu (quan hệ / bán hàng / công sở / chăm sóc khách hàng / đời thường); hỗ trợ nhân vật riêng cho từng liên hệ và các khoá chủ đề, giới hạn cứng, "tránh nói", từ an toàn, đèn vàng, câu ví dụ.
+- **Thư viện chuyên gia (danh mục chỉ đọc 331 vị):** một "chuyên gia" = một phần thân nhân vật + ảnh đại diện, mô tả một dòng, thẻ, phân loại và số lần dùng. Ngoài các mẫu viết tay, APK còn đóng gói danh mục lấy từ [MichengAI/dsh-agency-agents](https://github.com/MichengAI/dsh-agency-agents): 331 vị thuộc 22 lĩnh vực (kỹ thuật / thiết kế / marketing / bán hàng / tài chính / y tế / pháp lý / học thuật …), và **chỉ vào thư viện của bạn khi bạn bấm chọn**. Phần nội dung nhân vật trong Cài đặt vẫn là nguồn duy nhất — không lưu "đang chọn chuyên gia nào" — còn ảnh, mô tả, thẻ, phân loại và số lần dùng chỉ dùng để duyệt và sắp xếp, không bao giờ vào prompt.
 - **Tạo thủ công:** nút tạo lại trên đầu thẻ, trong menu nhấn giữ và trong thông báo thường trực; có ảnh chụp hiện tại thì tạo lại ngay, không có thì đọc màn hình một lần, đều không được thì nói rõ lý do; một vòng bị kẹt quá 8 giây có thể bị tiếp quản thủ công.
 - **Độ tự nhiên của trả lời (P0):** bản nháp đầu tiên được viết *sau* khi có phán đoán (dự phòng viết mù sau 2 giây); quan hệ ưu tiên "quan hệ của liên hệ hơn quan hệ toàn cục"; hợp đồng chiến lược ứng viên biết số lượng (xin 2 ứng viên không còn đòi 3 chiến lược); khoá nhân vật mới "tránh nói" tách "dừng cả vòng khi đối phương nhắc tới" khỏi "trả lời của tôi không được nói ra"; phán đoán có độ tin cậy thấp chỉ còn là gợi ý, không bị nói như sự thật.
 - **Lớp can thiệp tùy chọn:** tăng cường chỉ đọc qua LSPosed / Vector — mặc định tắt, bật theo từng ứng dụng, không đọc được thì lập tức quay về đường accessibility và ghi lý do vào Trace.
@@ -104,6 +105,16 @@ Tại Cài đặt → Phân tích → “Cơ sở tri thức và liên hệ”.
 - **Lịch sử**: “Ghi lại lịch sử trò chuyện (chỉ lưu trên máy)” mặc định tắt; khi bật, mỗi lần phân tích sẽ kèm N tin nhắn gần nhất (mặc định 30 trong cài đặt; bộ ngân sách nội bộ tối đa đưa 20 tin vào ngữ cảnh soạn) và tự động loại bỏ phần đã hiển thị trên màn hình.
 - **Xóa**: cơ sở tri thức và lịch sử đều nằm trong thư mục riêng của ứng dụng; nút “Xóa cơ sở tri thức và lịch sử” trong cài đặt xóa toàn bộ chỉ bằng một lần nhấn, không ghi vào nhật ký, không đưa vào git. Xem [chính sách quyền riêng tư](../cn/PRIVACY.md) để biết các loại dữ liệu cụ thể, mục đích, bên nhận và cách lưu giữ.
 - Phần đầu khung phân tích trong cửa sổ nổi hiển thị một dòng “Cơ sở tri thức N mục · Lịch sử M mục” để tiện xác nhận những gì đã được đưa vào.
+
+### Thư viện chuyên gia
+
+Tại Cài đặt → “Nhân vật và giọng điệu” → “Mở thư viện chuyên gia”.
+
+- **Hai tầng:** thư viện của bạn (đổi tên, sửa, xoá, xuất) và danh mục chỉ đọc đóng gói trong APK (331 vị thuộc 22 lĩnh vực). Danh mục chỉ là mẫu: chỉ vào thư viện khi bạn bấm chọn.
+- **“Dùng chuyên gia này” = thêm vào rồi áp dụng:** phần thân nhân vật được ghi vào đoạn văn bản nhân vật trong Cài đặt (vẫn là nguồn duy nhất) và ghi nhận một lần dùng (dữ liệu cho sắp xếp “dùng nhiều”). “Thêm vào thư viện” chỉ thêm, không đổi nhân vật hiện tại. Khi đã có trong thư viện, danh mục không hiển thị thêm bản trùng.
+- **Chỉ phần thân vào prompt:** giọng điệu và quy tắc đều đến từ chủ đề / cách gọi / giọng điệu / tình huống / quy tắc / câu ví dụ trong phần thân; ảnh, mô tả, thẻ, phân loại và số lần dùng chỉ dùng để duyệt và sắp xếp.
+- **Lưới và tìm kiếm:** lưới thẻ hai cột, ngăn phân loại, tìm theo tên / mô tả / thẻ / phần thân, ba kiểu sắp xếp (tổng hợp / dùng nhiều / mới nhất), 14 thẻ khởi đầu cùng tạo, nhân bản, nhập/xuất, xoá và khôi phục mẫu.
+- **Ràng buộc chuyên gia (bản xám, mặc định tắt):** chuyên gia có thể chỉ định kỹ năng cần nạp và ứng dụng sẽ xuất hiện; khi bật chỉ nạp các kỹ năng được chỉ định, khi tắt đường lắp ghép giống hệt trước đây.
 
 ### API và mô hình
 
