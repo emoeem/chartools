@@ -236,8 +236,8 @@ class JevClient(private val prefs: Prefs) {
      * and protocol, so switching either provider invalidates it.
      */
     private fun judgeKey(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext?): String =
-        listOf(snapshot.signature(), relationship, prefs.judgeModel, prefs.effectiveJudgeProtocol(),
-            ctxKey(ctx, relationship)).joinToString("\u001e")
+        ReplyCacheKey.judge(snapshot.signature(), relationship, prefs.judgeModel,
+            prefs.effectiveJudgeProtocol(), ctxKey(ctx, relationship))
 
     private fun cacheKey(
         snapshot: ChatSnapshot,
@@ -255,9 +255,10 @@ class JevClient(private val prefs: Prefs) {
         val judgmentKey = judgment?.let {
             listOf(it.trueIntent?.choice, it.dangerLevel?.score, it.sheNeeds?.choice, it.bestAction?.choice).joinToString("|")
         }.orEmpty()
-        return listOf(snapshot.signature(), relationship, prefs.style, prefs.replyModel, count,
-            avoid.joinToString("\u001f"), ctxKey, ledgerKey, judgmentKey,
-            intensity.name).joinToString("\u001e")
+        return ReplyCacheKey.reply(
+            signature = snapshot.signature(), relationship = relationship, style = prefs.style,
+            replyModel = prefs.replyModel, count = count, avoid = avoid, ctxKey = ctxKey,
+            ledgerKey = ledgerKey, judgmentKey = judgmentKey, intensity = intensity.name)
     }
 
     /** The knowledge/context half of both cache keys: what the model was told. */
