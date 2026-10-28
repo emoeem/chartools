@@ -419,18 +419,30 @@ class ExpertActivity : AppCompatActivity() {
             .setItems(actions) { _, which ->
                 when (which) {
                     0 -> renameDialog(p)
-                    1 -> {
-                        val copy = store.duplicate(p.id)
-                        toast(if (copy == null) "复制失败" else "已复制成「${copy.name}」")
-                        reload()
+                    1 -> worker.execute {
+                        val copy = runCatching { store.duplicate(p.id) }.getOrNull()
+                        main.post {
+                            if (isDestroyed) return@post
+                            toast(if (copy == null) "复制失败" else "已复制成「${copy.name}」")
+                            reload()
+                        }
                     }
-                    2 -> {
-                        copyToClipboard(store.exportText(p.id))
-                        toast("正文已复制，可直接粘到别处")
+                    2 -> worker.execute {
+                        val body = runCatching { store.exportText(p.id) }.getOrDefault("")
+                        main.post {
+                            if (isDestroyed) return@post
+                            copyToClipboard(body)
+                            toast("正文已复制，可直接粘到别处")
+                        }
                     }
                     else -> confirm("删除专家", "删掉「${p.name}」？已经套用到设置里的文本不受影响。") {
-                        store.delete(p.id)
-                        reload()
+                        worker.execute {
+                            runCatching { store.delete(p.id) }
+                            main.post {
+                                if (isDestroyed) return@post
+                                reload()
+                            }
+                        }
                     }
                 }
             }
@@ -453,9 +465,14 @@ class ExpertActivity : AppCompatActivity() {
                     toast("名字不能是空的")
                     return@setPositiveButton
                 }
-                val saved = store.save(name, p.body, p.id)
-                toast(if (saved == null) "改名失败" else "已改名为「$name」")
-                reload()
+                worker.execute {
+                    val saved = runCatching { store.save(name, p.body, p.id) }.getOrNull()
+                    main.post {
+                        if (isDestroyed) return@post
+                        toast(if (saved == null) "改名失败" else "已改名为「$name」")
+                        reload()
+                    }
+                }
             }
             .setNegativeButton("取消", null)
             .show()
@@ -545,18 +562,34 @@ class ExpertActivity : AppCompatActivity() {
                     .map { it.trim() }.filter { it.isNotEmpty() }
 
                 if (existing == null) {
-                    val created = store.create(name, body, avatar, desc, tags, cat)
-                    toast(if (created == null) "保存失败：人设库写不进去" else "已创建「${created.name}」")
-                } else {
-                    val saved = store.save(name, body, existing.id)
-                    if (saved == null) {
-                        toast("保存失败：人设库写不进去")
-                        return@setPositiveButton
+                    worker.execute {
+                        val msg = runCatching {
+                            val created = store.create(name, body, avatar, desc, tags, cat)
+                            if (created == null) "保存失败：人设库写不进去" else "已创建「${created.name}」"
+                        }.getOrElse { "保存失败：${it.javaClass.simpleName}" }
+                        main.post {
+                            if (isDestroyed) return@post
+                            toast(msg)
+                            reload()
+                        }
                     }
-                    store.updateMeta(existing.id, name, avatar, desc, tags, cat)
-                    toast("已保存「${saved.name}」")
+                } else {
+                    worker.execute {
+                        val msg = runCatching {
+                            val saved = store.save(name, body, existing.id)
+                            if (saved == null) "保存失败：人设库写不进去"
+                            else {
+                                store.updateMeta(existing.id, name, avatar, desc, tags, cat)
+                                "已保存「${saved.name}」"
+                            }
+                        }.getOrElse { "保存失败：${it.javaClass.simpleName}" }
+                        main.post {
+                            if (isDestroyed) return@post
+                            toast(msg)
+                            reload()
+                        }
+                    }
                 }
-                reload()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -581,17 +614,33 @@ class ExpertActivity : AppCompatActivity() {
             .setTitle("导入专家")
             .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("导入") { _, _ ->
-                val result = store.importJson(input.text.toString())
-                toast(result.describe())
-                reload()
+                val raw = input.text.toString()
+                worker.execute {
+                    val result = runCatching { store.importJson(raw) }.getOrNull()
+                    main.post {
+                        if (isDestroyed) return@post
+                        toast(result?.describe() ?: "导入失败")
+                        reload()
+                    }
+                }
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
     private fun exportAll() {
-        copyToClipboard(store.exportJson())
-        toast("已复制 ${items.size} 个专家的 JSON，粘到别的机器「导入」即可")
+        val count = items.size
+        worker.execute {
+            val json = runCatching { store.exportJson() }.getOrDefault("")
+            main.post {
+                if (isDestroyed) return@post
+                if (json.isEmpty()) toast("导出失败：人设库读不出来")
+                else {
+                    copyToClipboard(json)
+                    toast("已复制 $count 个专家的 JSON，粘到别的机器「导入」即可")
+                }
+            }
+        }
     }
 
     private fun pageMenu() {
@@ -599,10 +648,13 @@ class ExpertActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setItems(actions) { _, which ->
                 when (which) {
-                    0 -> {
-                        val added = store.restoreBuiltins()
-                        toast(if (added == 0) "内置模板都在库里了" else "补回 $added 张内置模板")
-                        reload()
+                    0 -> worker.execute {
+                        val added = runCatching { store.restoreBuiltins() }.getOrDefault(0)
+                        main.post {
+                            if (isDestroyed) return@post
+                            toast(if (added == 0) "内置模板都在库里了" else "补回 $added 张内置模板")
+                            reload()
+                        }
                     }
                     else -> AlertDialog.Builder(this)
                         .setTitle("关于")

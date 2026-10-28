@@ -309,20 +309,25 @@ class KnowledgeActivity : AppCompatActivity() {
             .setView(wrapScroll(box))
             .setPositiveButton("导入") { _, _ ->
                 val chunks = input.text.toString().split(Regex("\\r?\\n[ \\t]*\\r?\\n"))
-                var n = 0
-                chunks.forEach { chunk ->
+                // 收齐再一次写盘：saveNote 每条都全量重写 notes.json，粘贴 N 段
+                // 就是 N 次全文件序列化压在主线程上（DocImportActivity 为同一个
+                // 问题已经换过 saveNotes，这里补齐）。
+                val fresh = chunks.mapNotNull { chunk ->
                     val lines = chunk.trim().split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-                    if (lines.isNotEmpty()) {
-                        store.saveNote(Note(
-                            id = KbStore.newId(),
-                            title = lines.first(),
-                            content = lines.drop(1).joinToString("\n")
-                        ))
-                        n++
-                    }
+                    if (lines.isEmpty()) null else Note(
+                        id = KbStore.newId(),
+                        title = lines.first(),
+                        content = lines.drop(1).joinToString("\n")
+                    )
                 }
-                toast(if (n == 0) "没解析出内容" else "已导入 $n 条")
-                render()
+                Thread {
+                    val n = if (fresh.isEmpty()) 0 else store.saveNotes(fresh)
+                    runOnUiThread {
+                        if (isDestroyed) return@runOnUiThread
+                        toast(if (n == 0) "没解析出内容" else "已导入 $n 条")
+                        render()
+                    }
+                }.start()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -535,8 +540,18 @@ class KnowledgeActivity : AppCompatActivity() {
             guide.addView(twoButtons("导入并启用", {
                 confirm("导入内置技能包",
                     "把随 APK 打包的「狗头军师」方法论导入技能库并启用？可在技能列表随时停用。") {
-                    toast(skills.importBundled(this, SkillStore.BUNDLED_PACK, enable = true))
-                    render()
+                    // 解包 40+ 个文件是实打实的磁盘 IO，不压主线程。
+                    toast("正在导入…")
+                    Thread {
+                        val msg = runCatching {
+                            skills.importBundled(this@KnowledgeActivity, SkillStore.BUNDLED_PACK, enable = true)
+                        }.getOrElse { "导入失败：${it.javaClass.simpleName}" }
+                        runOnUiThread {
+                            if (isDestroyed) return@runOnUiThread
+                            toast(msg)
+                            render()
+                        }
+                    }.start()
                 }
             }, null, null))
             container.addView(guide)
