@@ -55,6 +55,14 @@ open class ChatCaptureService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newFixedThreadPool(2)
 
+    /**
+     * 截图像素扫描专用单线程。1080×2376 ≈ 256 万像素：10MB 数组分配 + getPixels +
+     * 洪泛填充合计几十到一百多毫秒，压在主线程上就是微信聊天期间的周期性掉帧。
+     * 与 analysis 共用的 worker 两条线程在跑模型调用时会把像素活饿着排队，
+     * 所以单开一条；onDestroy 里随 worker 一起关。
+     */
+    private val pixelWorker = Executors.newSingleThreadExecutor()
+
     private val analysisCalls = AnalysisCallRunner()
     private val conversationState = CaptureConversationState()
 
@@ -76,6 +84,13 @@ open class ChatCaptureService : AccessibilityService() {
     }
     private lateinit var prefs: Prefs
     private var overlay: OverlayController? = null
+
+    /**
+     * 服务级单例。以前每个入口各 `JevClient(prefs)` 一份，内存缓存只活一轮：
+     * judgeCache 注释里「换一组时同一会话免重判」从未生效过。Prefs 全属性读穿透，
+     * 改设置下一次调用就生效，不需要重建 client。
+     */
+    private val jev: JevClient by lazy { JevClient(prefs) }
 
     private var lastSignature by conversationState::lastSignature
     private var activePkg by conversationState::activePkg
@@ -238,7 +253,35 @@ open class ChatCaptureService : AccessibilityService() {
         return ConversationSession.Target(pkg, root.windowId, title, messagesSignature)
     }
 
-    private fun isCurrent(token: ConversationSession.Token): Boolean {
+    /**
+     * 会话身份的时间盒缓存。同一条 token 在 400ms 内查过且为 **true**，就直接信
+     * 上一次：流式生成期间每个可见块、每次回调都查一遍身份，每次都是全树 extract
+     * （几千个节点的逐个 binder IPC），生成中的掉帧一大半是它。
+     *
+     * 只信「真」：false 永不缓存（失败是罕见路径，重查没有成本）；快速路径之前
+     * 还要先过一遍 [ConversationSession.accepts]——会话一被 invalidate（离开聊天、
+     * 新一轮 begin）revision 就变，这里立刻回落到全查，缓存绝不会盖掉「已离开」。
+     * 仅主线程调用（见各回调），字段无需锁。[fillInput] 入口传 fresh=true 强制
+     * 全查：填入前必须看一眼真窗口。
+     */
+    private var currentCheckToken: ConversationSession.Token? = null
+    private var currentCheckAt = 0L
+    private var currentCheckOk = false
+
+    private fun isCurrent(token: ConversationSession.Token, fresh: Boolean = false): Boolean {
+        val now = SystemClock.uptimeMillis()
+        if (!fresh && currentCheckOk && currentCheckToken === token &&
+            now - currentCheckAt < CURRENT_CHECK_BOX_MS &&
+            !destroyed && prefs.enabled && session.accepts(token)
+        ) return true
+        val ok = isCurrentUncached(token)
+        currentCheckToken = token
+        currentCheckAt = now
+        currentCheckOk = ok
+        return ok
+    }
+
+    private fun isCurrentUncached(token: ConversationSession.Token): Boolean {
         if (destroyed || !prefs.enabled || !session.accepts(token)) return false
         val live = rootInActiveWindow?.let { targetFor(it) }
         // A null re-extract is a transient accessibility glitch (list animation,
@@ -450,7 +493,10 @@ open class ChatCaptureService : AccessibilityService() {
     private fun maybeCapture() {
         // The chat app is back (or never left): a pending hide confirmation is moot.
         main.removeCallbacks(confirmAwayHide)
-        val root = rootInActiveWindow ?: run { leaveConversation(); overlay?.hide(); return }
+        // null 重读是无障碍瞬态故障（窗口切换、IME 动画），不是离开聊天的证据：
+        // 比照 [confirmLeave] 给宽限，宽限后仍读不到才拆。会话还没建立时
+        // [scheduleLeave] 仍然立即拆，原语义不变。
+        val root = rootInActiveWindow ?: run { scheduleLeave(); return }
         val pkg = root.packageName?.toString()
         // Blocked apps — no tree read, no screenshot, no OCR, no fill. A
         // content-changed / scrolled event there only re-shows the one-time
@@ -625,7 +671,7 @@ open class ChatCaptureService : AccessibilityService() {
 
         regenerating = true
         armRoundWatchdog()
-        val client = JevClient(prefs)
+        val client = jev
         overlay?.beginRegenerate()
         submitAnalysis {
             val refined = try {
@@ -671,7 +717,7 @@ open class ChatCaptureService : AccessibilityService() {
         armRoundWatchdog()
         val avoid = (overlay?.currentReplyTexts().orEmpty() + recentReplies.asAvoid()).distinct()
         overlay?.beginMore()
-        val client = JevClient(prefs)
+        val client = jev
         val rel = lastCtx.effectiveRelationship(prefs.relationship)
         val ctx = lastCtx
         submitAnalysis {
@@ -729,7 +775,7 @@ open class ChatCaptureService : AccessibilityService() {
         armRoundWatchdog()
         val avoid = (overlay?.currentReplyTexts().orEmpty() + recentReplies.asAvoid()).distinct()
         overlay?.beginRegenerate()
-        val client = JevClient(prefs)
+        val client = jev
         val rel = lastCtx.effectiveRelationship(prefs.relationship)
         val ctx = lastCtx
         val count = prefs.candidateCount
@@ -798,7 +844,17 @@ open class ChatCaptureService : AccessibilityService() {
                 if (lastJudgment != null) regenerateReplies(s, "手动换一组")
                 else { pendingSnapshot = s; runAnalysis() }
             }
-            is ManualGenerate.Decision.CaptureFirst -> captureThenGenerate(pkg)
+            is ManualGenerate.Decision.CaptureFirst -> {
+                // 与 Regenerate 分支同一把刀：忙超 8s 的卡死轮先解锁，否则
+                // captureThenGenerate 拿到内容后 runAnalysis() 会被 analyzing 静默挡掉，
+                // 用户看到的就是「点了没反应」。decide 保证走到这里只有两种情况：
+                // 不忙，或者忙已超时——正常在路上的轮次不会被这一刀碰到。
+                if (ManualGenerate.shouldForceTakeOver(busyAge)) {
+                    Trace.log("manual generate force take-over (capture-first) after ${busyAge}ms")
+                    cancelInFlight()
+                }
+                captureThenGenerate(pkg)
+            }
             is ManualGenerate.Decision.Explain -> {
                 if (decision.transient) overlay?.toast(decision.reason)
                 else overlay?.showError(decision.reason)
@@ -895,7 +951,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.beginRound()
         overlay?.setNote(snapshot.note)
         val count = prefs.candidateCount
-        val client = JevClient(prefs)
+        val client = jev
 
         submitAnalysis {
             // 台账/摘要的模型调用走 ContextBuilder 的端口注入进来：core.kb 不许
@@ -1123,8 +1179,13 @@ open class ChatCaptureService : AccessibilityService() {
         if (ChatApps.forPackage(pkg)?.allowScreenshot == false) { overlay?.showError("这个应用里不使用截屏识别"); return }
         // WeChat: the pixel path already knows how to find the bubbles and their
         // sides, so a manual tap must go through it rather than whole-screen OCR
-        // (which cannot tell who said what).
-        if (pkg == WECHAT_PKG) { maybeCaptureWeChat(root, manual = true); return }
+        // (which cannot tell who said what). root 仍可能是 null（pkg 是从残留的
+        // foregroundPkg 回退来的）：此刻进像素路径只会 NPE，说一句让人重试。
+        if (pkg == WECHAT_PKG) {
+            root?.let { maybeCaptureWeChat(it, manual = true) }
+                ?: overlay?.toast("无法确认当前窗口，请稍后重试")
+            return
+        }
         // Top bar text, if this app has one we can read; else the first OCR line.
         val title = root?.let {
             findTitleInActionBar(it, Int.MAX_VALUE, resources.displayMetrics.widthPixels, resources, 0.15, 0.85)
@@ -1258,61 +1319,76 @@ open class ChatCaptureService : AccessibilityService() {
                     ocr.scaleX = res.scaleX; ocr.scaleY = res.scaleY
                     ocr.originX = res.originX; ocr.originY = res.originY
                     val bmp = res.bitmap
-                    val px = IntArray(bmp.width * bmp.height)
-                    runCatching { bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height) }
-                    val boxes = WeChatBubbles.find(px, bmp.width, bmp.height)
-                    val band = Rect(0, 0, bmp.width, (bmp.height * WeChatBubbles.TITLE_BAND).toInt())
-                    ocr.recognize(bmp, band) { lines ->
-                        val picked = OcrGrouping.pickTitle(lines, bmp.width)
-                        // The title IS the session identity, so the anti-flicker
-                        // rule (accept a changed pick only on a consecutive
-                        // repeat) lives in [WeChatTitleState] and is unit tested.
-                        weChatTitle = weChatTitle.accept(picked, windowId)
-                        val title = weChatTitle.title
-                        Trace.log("wx boxes=${boxes.size} titleLines=${lines.size} titleLen=${title?.length ?: -1}")
-                        observeTarget(ConversationSession.Target(WECHAT_PKG, windowId, title))
-                        val token = session.token()
-                        if (token == null) {
-                            runCatching { bmp.recycle() }
-                            ocrBusy = false
-                            return@recognize
-                        }
-                        if (boxes.isEmpty()) {
-                            // Chat list, an empty chat, or a screen the pixel
-                            // rules do not understand: nothing to read here.
-                            runCatching { bmp.recycle() }
-                            finishOcrSnapshot(ChatSnapshot(title, emptyList()), WECHAT_PKG, manual, token)
-                            return@recognize
-                        }
-                        val sx = ocr.scaleX; val sy = ocr.scaleY
-                        val ox = ocr.originX; val oy = ocr.originY
-                        val rects = boxes.map { b ->
-                            BubbleRect(Rect(
-                                (b.left / sx).toInt() + ox, (b.top / sy).toInt() + oy,
-                                (b.right / sx).toInt() + ox, (b.bottom / sy).toInt() + oy), b.side)
-                        }
-                        Log.i(TAG, "wx: ${rects.size} bubbles (windowId=$windowId)")
-                        // Group sender names are rendered just above incoming bubbles,
-                        // outside their rectangles. OCR that conversation band once so
-                        // sender attribution can be separated from bubble text. If no
-                        // sender labels are found, the old 1:1 me/other semantics remain.
-                        val speakerRegion = Rect(
-                            0,
-                            (bmp.height * WeChatBubbles.TITLE_BAND).toInt(),
-                            bmp.width,
-                            (bmp.height * BOTTOM_CROP).toInt()
-                        )
-                        ocr.recognize(bmp, speakerRegion) { speakerLines ->
-                            val labels = WeChatSpeakerAttribution.labelsFor(speakerLines, boxes)
-                            val speakers = WeChatSpeakerAttribution.assign(boxes, labels)
-                            Trace.log("wx speakers labels=${labels.size} members=${speakers.count { it.startsWith("member:") }} unknown=${speakers.count { it == "unknown" }}")
-                            ocrByRects(
-                                bmp, rects, title, WECHAT_PKG, token,
-                                speakers = speakers, manual = manual, voiceBoxes = boxes
-                            )
+                    // 像素扫描不压主线程（见 [pixelWorker]）：算完回主线程继续走 OCR。
+                    pixelWorker.execute {
+                        val px = IntArray(bmp.width * bmp.height)
+                        runCatching { bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height) }
+                        val boxes = WeChatBubbles.find(px, bmp.width, bmp.height)
+                        main.post {
+                            if (destroyed) { runCatching { bmp.recycle() }; return@post }
+                            weChatOcrWithBoxes(bmp, boxes, windowId, manual)
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * 像素扫描回来后的微信 OCR 流程：先认标题带（标题就是会话身份），再按气泡
+     * 逐个识别。从 [ocrCaptureWeChat] 的截图回调里拆出来，让像素扫描可以挪去
+     * [pixelWorker]，OCR 本身仍留在主线程（MlKitOcr 的回调约定）。
+     */
+    private fun weChatOcrWithBoxes(bmp: Bitmap, boxes: List<WeChatBubbles.Box>, windowId: Int, manual: Boolean) {
+        val band = Rect(0, 0, bmp.width, (bmp.height * WeChatBubbles.TITLE_BAND).toInt())
+        ocr.recognize(bmp, band) { lines ->
+            val picked = OcrGrouping.pickTitle(lines, bmp.width)
+            // The title IS the session identity, so the anti-flicker
+            // rule (accept a changed pick only on a consecutive
+            // repeat) lives in [WeChatTitleState] and is unit tested.
+            weChatTitle = weChatTitle.accept(picked, windowId)
+            val title = weChatTitle.title
+            Trace.log("wx boxes=${boxes.size} titleLines=${lines.size} titleLen=${title?.length ?: -1}")
+            observeTarget(ConversationSession.Target(WECHAT_PKG, windowId, title))
+            val token = session.token()
+            if (token == null) {
+                runCatching { bmp.recycle() }
+                ocrBusy = false
+                return@recognize
+            }
+            if (boxes.isEmpty()) {
+                // Chat list, an empty chat, or a screen the pixel
+                // rules do not understand: nothing to read here.
+                runCatching { bmp.recycle() }
+                finishOcrSnapshot(ChatSnapshot(title, emptyList()), WECHAT_PKG, manual, token)
+                return@recognize
+            }
+            val sx = ocr.scaleX; val sy = ocr.scaleY
+            val ox = ocr.originX; val oy = ocr.originY
+            val rects = boxes.map { b ->
+                BubbleRect(Rect(
+                    (b.left / sx).toInt() + ox, (b.top / sy).toInt() + oy,
+                    (b.right / sx).toInt() + ox, (b.bottom / sy).toInt() + oy), b.side)
+            }
+            Log.i(TAG, "wx: ${rects.size} bubbles (windowId=$windowId)")
+            // Group sender names are rendered just above incoming bubbles,
+            // outside their rectangles. OCR that conversation band once so
+            // sender attribution can be separated from bubble text. If no
+            // sender labels are found, the old 1:1 me/other semantics remain.
+            val speakerRegion = Rect(
+                0,
+                (bmp.height * WeChatBubbles.TITLE_BAND).toInt(),
+                bmp.width,
+                (bmp.height * BOTTOM_CROP).toInt()
+            )
+            ocr.recognize(bmp, speakerRegion) { speakerLines ->
+                val labels = WeChatSpeakerAttribution.labelsFor(speakerLines, boxes)
+                val speakers = WeChatSpeakerAttribution.assign(boxes, labels)
+                Trace.log("wx speakers labels=${labels.size} members=${speakers.count { it.startsWith("member:") }} unknown=${speakers.count { it == "unknown" }}")
+                ocrByRects(
+                    bmp, rects, title, WECHAT_PKG, token,
+                    speakers = speakers, manual = manual, voiceBoxes = boxes
+                )
             }
         }
     }
@@ -1436,26 +1512,32 @@ open class ChatCaptureService : AccessibilityService() {
         // own messages into an incoming conversation and produced advice for
         // answering myself. Boxes are in bitmap coordinates, exactly like the OCR
         // line bounds, so they compare directly.
-        val boxes = runCatching {
-            val px = IntArray(bmp.width * bmp.height)
-            bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
-            WeChatBubbles.find(px, bmp.width, bmp.height)
-        }.getOrDefault(emptyList())
-        ocr.recognize(bmp, region) { lines ->
-            runCatching { bmp.recycle() }
-            val msgs = OcrGrouping.group(lines, boxes)
-            val unknown = msgs.count { it.side == OcrGrouping.SIDE_UNKNOWN }
-            val note = when {
-                msgs.isEmpty() -> null
-                unknown == msgs.size -> OCR_NOTE
-                unknown > 0 -> "$OCR_PARTIAL_NOTE$unknown 条"
-                else -> null
+        // 像素扫描不压主线程（见 [pixelWorker]），算完回主线程再进 OCR。
+        pixelWorker.execute {
+            val boxes = runCatching {
+                val px = IntArray(bmp.width * bmp.height)
+                bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                WeChatBubbles.find(px, bmp.width, bmp.height)
+            }.getOrDefault(emptyList())
+            main.post {
+                if (destroyed) { runCatching { bmp.recycle() }; return@post }
+                ocr.recognize(bmp, region) { lines ->
+                    runCatching { bmp.recycle() }
+                    val msgs = OcrGrouping.group(lines, boxes)
+                    val unknown = msgs.count { it.side == OcrGrouping.SIDE_UNKNOWN }
+                    val note = when {
+                        msgs.isEmpty() -> null
+                        unknown == msgs.size -> OCR_NOTE
+                        unknown > 0 -> "$OCR_PARTIAL_NOTE$unknown 条"
+                        else -> null
+                    }
+                    Trace.log("ocr whole boxes=${boxes.size} msgs=${msgs.size} me=${msgs.count { it.side == "me" }} " +
+                        "other=${msgs.count { it.side == "other" }} unknown=$unknown")
+                    val title = treeTitle?.takeIf { it.isNotBlank() }
+                        ?: lines.firstOrNull()?.text?.trim()?.take(24)
+                    finishOcrSnapshot(ChatSnapshot(title, msgs, note = note), pkg, manual, token)
+                }
             }
-            Trace.log("ocr whole boxes=${boxes.size} msgs=${msgs.size} me=${msgs.count { it.side == "me" }} " +
-                "other=${msgs.count { it.side == "other" }} unknown=$unknown")
-            val title = treeTitle?.takeIf { it.isNotBlank() }
-                ?: lines.firstOrNull()?.text?.trim()?.take(24)
-            finishOcrSnapshot(ChatSnapshot(title, msgs, note = note), pkg, manual, token)
         }
     }
 
@@ -1524,7 +1606,8 @@ open class ChatCaptureService : AccessibilityService() {
 
     /** Fill without blocking the main thread; all retries re-resolve the original target. */
     private fun fillInput(token: ConversationSession.Token, text: String) {
-        if (!isCurrent(token)) { overlay?.toast("会话已变化，请重新分析后填入"); return }
+        // 填入是唯一要写别的 App 输入框的动作：时间盒在这里不适用，必须全查。
+        if (!isCurrent(token, fresh = true)) { overlay?.toast("会话已变化，请重新分析后填入"); return }
         filler.fill(token, text) { ok ->
             if (!isCurrent(token)) return@fill
             if (ok) overlay?.toast("已填入，确认后自己发送")
@@ -1593,6 +1676,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.hide()
         overlay = null
         worker.shutdownNow()
+        pixelWorker.shutdownNow()
         analysisCalls.close()
     }
 
@@ -1609,6 +1693,9 @@ open class ChatCaptureService : AccessibilityService() {
 
         /** Grace period before a "not a chat" read really leaves the conversation. */
         private const val LEAVE_CONFIRM_MS = 1200L
+
+        /** 会话身份时间盒的宽度（见 [isCurrent]）；400ms 内的重复全树 extract 折叠掉。 */
+        private const val CURRENT_CHECK_BOX_MS = 400L
 
         /** Apps that are never read: they protect their content against screen
          *  reading or screenshots, so any capture attempt there is off-limits.
