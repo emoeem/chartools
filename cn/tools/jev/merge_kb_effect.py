@@ -15,6 +15,8 @@
 import argparse
 import json
 
+from safeguards import write_text
+
 # 与 eval_kb_effect.py 同一张领域词表；改一处要改两处。
 DOMAIN_WORDS = [
     "主人", "调教", "任务", "安全词", "红灯", "契约", "奴", "服从", "规矩", "奖励",
@@ -114,7 +116,7 @@ def main():
         "每臂的判分次数不一样（缺分不会被补），所以别把小数点后第二位当真。",
     ]
     text = "\n".join(lines) + "\n"
-    open(args.out, "w", encoding="utf-8").write(text)
+    write_text(args.out, text)
     print(text)
 
 

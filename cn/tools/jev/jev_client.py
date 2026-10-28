@@ -9,6 +9,8 @@ import time
 import urllib.error
 import urllib.request
 
+from safeguards import check_http_url
+
 API_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "typesafe/jev-1.13"
 MAX_RETRIES = 3
@@ -64,7 +66,7 @@ def ask(state: dict, questions: dict, timeout: float = 20) -> dict:
     last_body = ""
     for attempt in range(MAX_RETRIES + 1):
         req = urllib.request.Request(
-            API_URL,
+            check_http_url(API_URL),
             data=payload,
             method="POST",
             headers={

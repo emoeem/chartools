@@ -24,6 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_roleplay import api_key, post  # noqa: E402
+from safeguards import dump_json  # noqa: E402
 
 BRIEF_TITLE = "网调领域卡（自动预扫）"
 
@@ -130,8 +131,7 @@ def main():
         "tags": ["领域卡", args.topic],
         "updatedAt": 1760000000000,
     }
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump([note], f, ensure_ascii=False)
+    dump_json(args.out, [note])
     print("写出 %s" % args.out)
     return 0
 

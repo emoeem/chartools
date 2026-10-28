@@ -34,6 +34,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_roleplay import api_key, parse_candidates, post, redact  # noqa: E402
+from safeguards import dump_json, safe_out, write_text  # noqa: E402
 
 DEFAULT_ARMS = os.path.join("app", "build", "scratch", "kb_effect_arms.json")
 DEFAULT_OUT = os.path.join("_reports", "kb-effect_report.md")
@@ -283,11 +284,8 @@ def main() -> int:
             p("")
 
     out = "\n".join(sb)
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    open(args.out, "w", encoding="utf-8").write(out)
-    os.makedirs(os.path.dirname(args.raw), exist_ok=True)
-    json.dump({"arms": present, "reference": ref, "rows": rows},
-              open(args.raw, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    write_text(args.out, out)
+    dump_json(args.raw, {"arms": present, "reference": ref, "rows": rows}, indent=1)
     print("\n报告：%s" % args.out)
     print("原始：%s" % args.raw)
     print("；".join("%s: 专属串 %d / 领域词 %.1f / 盲评 %.2f" % (

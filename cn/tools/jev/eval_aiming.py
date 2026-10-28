@@ -31,6 +31,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from safeguards import check_http_url
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE = os.path.join(REPO, "tools", "jev", "fixtures", "aiming_set.json")
 DEFAULT_DUMP = os.path.join(REPO, "app", "build", "aiming_prompts.json")
@@ -102,8 +104,9 @@ def ask(base: str, model: str, key: str, system: str, user: str, timeout: float,
         },
         ensure_ascii=False,
     ).encode("utf-8")
+    url = check_http_url(base.rstrip("/") + "/chat/completions")
     req = urllib.request.Request(
-        base.rstrip("/") + "/chat/completions",
+        url,
         data=body,
         headers={
             "Content-Type": "application/json",

@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -435,18 +436,23 @@ def main() -> None:
     ap.add_argument("--check", action="store_true", help="只校验生成物是否与上游一致")
     args = ap.parse_args()
 
+    # 输出路径收敛进仓库根：--out 来自 CLI，`..` 或绝对路径不该写到仓库外。
+    repo_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    out_path = os.path.realpath(os.path.join(repo_root, args.out))
+    if not (out_path == repo_root or out_path.startswith(repo_root + os.sep)):
+        sys.exit(f"输出路径必须落在仓库内（{repo_root}）：{args.out}")
+
     data = collect(args.src)
     self_check(data)
     text = json.dumps(data, ensure_ascii=False, indent=1) + "\n"
     if args.check:
-        cur = open(args.out, encoding="utf-8").read() if os.path.exists(args.out) else ""
+        cur = open(out_path, encoding="utf-8").read() if os.path.exists(out_path) else ""
         if cur != text:
             sys.exit("生成物与上游不一致，请重跑 tools/gen_experts.py")
         print(f"OK {len(data['experts'])} experts, {len(text)} bytes, hash {data['contentHash']}")
         return
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    pathlib.Path(out_path).write_text(text, encoding="utf-8")
     print(
         f"wrote {args.out}: {len(data['experts'])} experts, {len(text)} bytes, "
         f"{len(data['categories'])} categories, hash {data['contentHash']}"
