@@ -235,7 +235,9 @@ class PersonaStore private constructor(context: Context) {
         val key = items[at].presetKey
         items.removeAt(at)
         if (key.isNotBlank()) removed += key
-        writeLocked(items)
+        val ok = writeLocked(items)
+        if (!ok) reloadLedgerLocked()
+        ok
     }
 
     /** 复制一份，名字加「副本」。返回新的那条。 */
@@ -279,7 +281,10 @@ class PersonaStore private constructor(context: Context) {
                 added++
             }
         }
-        if (added > 0 && !writeLocked(items)) return@synchronized 0
+        if (added > 0 && !writeLocked(items)) {
+            reloadLedgerLocked()
+            return@synchronized 0
+        }
         added
     }
 
@@ -305,7 +310,9 @@ class PersonaStore private constructor(context: Context) {
         items += entry
         seeded += preset.key
         removed -= preset.key
-        if (writeLocked(items)) entry else null
+        val ok = writeLocked(items)
+        if (!ok) reloadLedgerLocked()
+        if (ok) entry else null
     }
 
     // ------------------------------------------------------- 导入 / 导出
@@ -516,6 +523,7 @@ class PersonaStore private constructor(context: Context) {
         // 补进来的 10 张预设只活在 `items` 里，`seeded` 停在 4，台账等于说谎。
         missing.forEach { seeded += it.key }
         if (!writeLocked(items)) {
+            reloadLedgerLocked()
             lastProblem = "有新的内置专家没写进人设库（储存空间？），下次启动会再试"
             return current
         }
@@ -565,6 +573,30 @@ class PersonaStore private constructor(context: Context) {
             Log.w(TAG, "write ${f.name} failed: ${e.javaClass.simpleName}")
             runCatching { tmp.delete() }
             false
+        }
+    }
+
+    /**
+     * 写盘失败时把台账从磁盘重新对齐。
+     *
+     * [install] / [topUpLocked] / [restoreBuiltins] / [delete] 都是**先**动内存里的
+     * `seeded` / `removed` **再** [writeLocked]（那个顺序本身是对的：写盘序列化的
+     * 就是此刻的台账）。但写失败返回时，内存里的台账已经带着没落盘的改动——
+     * 若同一个进程里随后另一次写盘成功，幻影 key 会被一并持久化，「装过=不再
+     * 播种」从此对不上事实。每次 [loadLocked] 本来就会刷新台账，这里只是把
+     * 「写失败到下一次读盘」之间的那个窗口关掉。
+     */
+    private fun reloadLedgerLocked() {
+        val f = file
+        val doc = if (f.isFile) runCatching { decode(f.readText(Charsets.UTF_8)) }.getOrNull() else null
+        if (doc != null) {
+            seeded.clear(); seeded.addAll(doc.seeded)
+            removed.clear(); removed.addAll(doc.removed)
+        } else {
+            // 文件没了或读不出：回到「全新播种」的台账状态，与 loadLocked 的
+            // 处理一致（items 的处理是调用方的事，这里只管台账）。
+            seeded.clear()
+            removed.clear()
         }
     }
 

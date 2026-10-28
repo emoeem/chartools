@@ -23,6 +23,8 @@ import time
 import urllib.error
 import urllib.request
 
+from safeguards import check_http_url
+
 URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "typesafe/jev-1.13"
 
@@ -77,7 +79,7 @@ def post(state: dict, key: str) -> tuple[int, str, float]:
         ensure_ascii=False,
     ).encode("utf-8")
     req = urllib.request.Request(
-        URL,
+        check_http_url(URL),
         data=body,
         headers={
             "Authorization": f"Bearer {key}",

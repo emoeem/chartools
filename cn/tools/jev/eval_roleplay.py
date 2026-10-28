@@ -47,6 +47,8 @@ import time
 import urllib.error
 import urllib.request
 
+from safeguards import check_http_url, dump_json, safe_out
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE = os.path.join(REPO, "tools", "jev", "fixtures", "roleplay_set.json")
 WORK = os.path.join(REPO, "app", "build")
@@ -90,11 +92,12 @@ def api_key() -> str:
 
 
 def post(base: str, key: str, body: dict, timeout: float, attempts: int = 3) -> dict:
+    url = check_http_url(base.rstrip("/") + "/chat/completions")
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     last = None
     for i in range(attempts):
         req = urllib.request.Request(
-            base.rstrip("/") + "/chat/completions", data=data,
+            url, data=data,
             headers={"Content-Type": "application/json",
                      "Authorization": "Bearer " + key,
                      "Accept": "application/json"},
@@ -151,13 +154,13 @@ def dump_prompts(requests: list[dict], path: str) -> list[dict]:
     One round per input file, and the output is deleted first. Gradle decides
     `testDebugUnitTest` is UP-TO-DATE when the same command line runs twice, and
     that silently hands back the *previous* round's dump — which is exactly how
-    the first baseline lost half its rounds. A missing id is fatal instead.
+        the first baseline lost half its rounds. A missing id is fatal instead.
     """
+    path = safe_out(path)
     os.makedirs(WORK, exist_ok=True)
     tag = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(path)).strip("_") or "dump"
-    inp = os.path.join(WORK, "roleplay_in_%s.json" % tag)
-    with open(inp, "w", encoding="utf-8") as fh:
-        json.dump(requests, fh, ensure_ascii=False, indent=1)
+    inp = safe_out(os.path.join(WORK, "roleplay_in_%s.json" % tag))
+    dump_json(inp, requests, indent=1)
     if os.path.exists(path):
         os.remove(path)
     cmd = GRADLE + ["-Droleplay.in=" + inp, "-Droleplay.out=" + path]
@@ -190,12 +193,12 @@ def dump_ledger_prompts(requests: list[dict], path: str) -> list[dict]:
 
     The ledger prompt has exactly one copy and it lives in Kotlin
     (`LedgerPrompt`), so the script must not assemble it — otherwise the ledger
-    the A/B injects is not the ledger the app would build.
+        the A/B injects is not the ledger the app would build.
     """
+    path = safe_out(path)
     os.makedirs(WORK, exist_ok=True)
-    inp = os.path.join(WORK, "ledger_in.json")
-    with open(inp, "w", encoding="utf-8") as fh:
-        json.dump(requests, fh, ensure_ascii=False, indent=1)
+    inp = safe_out(os.path.join(WORK, "ledger_in.json"))
+    dump_json(inp, requests, indent=1)
     if os.path.exists(path):
         os.remove(path)
     cmd = GRADLE_LEDGER + ["-Dledger.in=" + inp, "-Dledger.out=" + path]
@@ -275,8 +278,7 @@ def build_ledgers(cases: list[dict], base: str, model: str, key: str, timeout: f
     if not out:
         raise SystemExit("一份台账都没建起来——台账臂跑出来的数字会等于无台账臂，"
                          "这样的对比没有意义")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, ensure_ascii=False, indent=1)
+    dump_json(path, out, indent=1)
     print("台账已写入 %s（%d/%d 份）" % (path, len(out), len(cases)))
     return out
 
@@ -598,19 +600,19 @@ def main() -> int:
                   % args.repeat)
     print("模型：%s @ %s；评分：%s" % (args.model, args.base, judge_model))
 
-    with open(args.out, "w", encoding="utf-8") as fh:
-        json.dump({"model": args.model, "base": args.base, "judge_model": judge_model,
-                   "temperature": args.temperature, "repeat": args.repeat,
-                   "ledger_arm": args.ledger,
-                   "ledger_cases": sorted(ledgers),
-                   "runs": list(runs.values()),
-                   "summary": {"hard": hard_total, "must_not_ship": ship_fail,
-                               "blocked": gate_blocked,
-                               "hook_hit": hook_total - hook_miss, "hook_total": hook_total,
-                               "first": {k: mean(first_sum[k]) for k in dims},
-                               "first_sd": {k: sd(first_sum[k]) for k in dims},
-                               "best": {k: mean(best_sum[k]) for k in dims}}},
-                  fh, ensure_ascii=False, indent=1)
+    dump_json(args.out, {
+        "model": args.model, "base": args.base, "judge_model": judge_model,
+        "temperature": args.temperature, "repeat": args.repeat,
+        "ledger_arm": args.ledger,
+        "ledger_cases": sorted(ledgers),
+        "runs": list(runs.values()),
+        "summary": {"hard": hard_total, "must_not_ship": ship_fail,
+                    "blocked": gate_blocked,
+                    "hook_hit": hook_total - hook_miss, "hook_total": hook_total,
+                    "first": {k: mean(first_sum[k]) for k in dims},
+                    "first_sd": {k: sd(first_sum[k]) for k in dims},
+                    "best": {k: mean(best_sum[k]) for k in dims}}},
+        indent=1)
     print("原始结果：%s" % args.out)
     return 1 if (hard_total or ship_fail) else 0
 

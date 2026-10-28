@@ -22,7 +22,9 @@ internal object OcrGrouping {
     const val SIDE_UNKNOWN = "?"
 
     private val PURE_TIME = Regex("""\d{1,2}[:：]\d{2}""")
-    private val TAIL_TIME = Regex("""\d{1,2}[:：]\d{2}$""")
+    // 要求时间戳前面有空白：飞书粘连在气泡尾部的回执（「已读 14:32」）带空格，
+    // 照剥；真实消息以时间收尾（「会议改到10:30」）没有空格，不能吃掉结尾。
+    private val TAIL_TIME = Regex("""\s\d{1,2}[:：]\d{2}$""")
 
     /**
      * Group recognised lines into messages by vertical gaps: a gap taller than the
@@ -86,6 +88,9 @@ internal object OcrGrouping {
                 if (t.endsWith(tail)) { t = t.removeSuffix(tail).trim(); changed = true }
             }
             TAIL_TIME.find(t)?.let { t = t.substring(0, it.range.first).trim(); changed = true }
+            // 整条只剩一个时间戳（系统时间元素被 OCR 当气泡的残留）照旧清空；
+            // 时间粘在正文上（「会议改到10:30」）到不了这里，不吃饭原文。
+            if (PURE_TIME.matches(t)) { t = ""; changed = true }
         }
         return t
     }

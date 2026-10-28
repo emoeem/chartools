@@ -630,21 +630,33 @@ class SettingsActivity : AppCompatActivity() {
         })
         val kbResult = resultText()
         card2b.addView(cardBtn("清空知识库与历史") {
-            val c = KbStore.get(this).counts()
-            val personas = runCatching { PersonaStore.get(this).count() }.getOrDefault(0)
-            androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle("清空知识库与历史")
-                .setMessage("将删除 ${c.notes} 条笔记、${c.contacts} 个联系人、${c.logLines} 条聊天历史，" +
-                    "以及 ${personas} 份人设（人设库会回到内置模板）。" +
-                    "密钥、白名单等设置不受影响。不可恢复。")
-                .setPositiveButton("清空") { _, _ ->
-                    KbStore.get(this).clearAll()
-                    kbResult.text = "已清空知识库与历史"
-                    refreshActiveLine()
-                    syncStyleFromPrefs()
+            // counts() 要锁内逐个联系人读日志文件，clearAll() 是整目录递归删除：
+            // 历史一多，这两下都够在主线程上卡出一次可感知的停顿。
+            worker.execute {
+                val c = KbStore.get(this).counts()
+                val personas = runCatching { PersonaStore.get(this).count() }.getOrDefault(0)
+                main.post {
+                    if (isDestroyed) return@post
+                    androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("清空知识库与历史")
+                        .setMessage("将删除 ${c.notes} 条笔记、${c.contacts} 个联系人、${c.logLines} 条聊天历史，" +
+                            "以及 ${personas} 份人设（人设库会回到内置模板）。" +
+                            "密钥、白名单等设置不受影响。不可恢复。")
+                        .setPositiveButton("清空") { _, _ ->
+                            worker.execute {
+                                KbStore.get(this).clearAll()
+                                main.post {
+                                    if (isDestroyed) return@post
+                                    kbResult.text = "已清空知识库与历史"
+                                    refreshActiveLine()
+                                    syncStyleFromPrefs()
+                                }
+                            }
+                        }
+                        .setNegativeButton("取消", null)
+                        .show()
                 }
-                .setNegativeButton("取消", null)
-                .show()
+            }
         })
         // Deliberately low-key: a developer aid, not a user feature.
         card2b.addView(text("自检", 12f, sub).apply {

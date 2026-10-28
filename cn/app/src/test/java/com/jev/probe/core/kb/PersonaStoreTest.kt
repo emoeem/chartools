@@ -182,4 +182,29 @@ class PersonaStoreTest {
         assertEquals("日常 副本 2", two?.name)
         assertEquals(src.body, one?.body)
     }
+
+    @Test
+    fun aFailedInstallLeavesNoPhantomKeyInTheLedger() = withStore { store, dir ->
+        // 先播种落盘（播种路径写失败会按设计退回内存重试，测不了写失败），
+        // 再用一个不在预设台账里的合成 key 走 install 的真实写路径。
+        store.list()
+        val preset = PersonaPreset(
+            key = "test.phantom", name = "幻影测试", body = "称呼：你",
+            category = "", tags = emptyList(), description = "", avatar = ""
+        )
+        // 把 writeAtomic 的临时文件位置占成一个目录：tmp.writeText 必炸，
+        // 等价于一次磁盘写失败。
+        val tmp = File(dir, "kb/personas.json.tmp")
+        assertTrue(tmp.mkdirs())
+        assertNull(store.install(preset))
+        // 台账在写失败后必须回到磁盘上的状态——若幻影 key 留在内存里，同一
+        // 会话内任何一次成功的写盘都会把它持久化，「装过=不再播种」从此说谎。
+        assertFalse(store.ledger().first.contains(preset.key))
+        // 有了这次成功的写盘，窗口期内的污染就该现形了；它没现形。
+        assertNotNull(store.save("自建的一条", "称呼：你"))
+        assertFalse(store.ledger().first.contains(preset.key))
+        // 台账干净，同一位专家随后能正常装进来。
+        assertNotNull(store.install(preset))
+        assertTrue(store.ledger().first.contains(preset.key))
+    }
 }

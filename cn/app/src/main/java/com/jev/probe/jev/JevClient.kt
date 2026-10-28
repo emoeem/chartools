@@ -7,6 +7,9 @@ import com.jev.probe.core.Prefs
 import com.jev.probe.core.RankedReply
 import com.jev.probe.core.Trace
 import com.jev.probe.core.kb.ChatContext
+import com.jev.probe.core.kb.NOTE_TYPE_STYLE_SAMPLE
+import com.jev.probe.core.kb.StyleSource
+import com.jev.probe.core.kb.effectiveRelationship
 import java.util.LinkedHashMap
 
 /**
@@ -232,12 +235,12 @@ class JevClient(private val prefs: Prefs) {
 
     /**
      * Everything the judge prompt is built from. Same shape as the reply key minus
-     * the reply-only inputs (count, avoid, style) plus the judge route's own model
-     * and protocol, so switching either provider invalidates it.
+     * the reply-only inputs (count, avoid, style, params, ledger) plus the judge
+     * route's own model and protocol, so switching either provider invalidates it.
      */
     private fun judgeKey(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext?): String =
-        ReplyCacheKey.judge(snapshot.signature(), relationship, prefs.judgeModel,
-            prefs.effectiveJudgeProtocol(), ctxKey(ctx, relationship))
+        ReplyCacheKey.judge(snapshot.title.orEmpty(), snapshot.signature(), relationship,
+            prefs.judgeModel, prefs.effectiveJudgeProtocol(), judgeCtxKey(ctx, relationship))
 
     private fun cacheKey(
         snapshot: ChatSnapshot,
@@ -248,26 +251,62 @@ class JevClient(private val prefs: Prefs) {
         judgment: Analysis?,
         intensity: Intensity = Intensity.AUTO
     ): String {
-        val ctxKey = ctxKey(ctx, relationship)
+        // 键里的 style 必须是**真正进提示词**的那段：联系人写了专用人设时它压过
+        // Prefs.style，只锁 prefs.style 的话，改联系人专用人设会同键命中旧人设的
+        // 候选（和专家库那次是同一类静默等价）。
+        val effectiveStyle = StyleSource.resolve(prefs.style, ctx?.contact?.persona).text
+        val ctxKey = replyCtxKey(ctx, relationship)
         // 台账进的是回复提示词，不进 Jev 的 state，所以它只进回复缓存键：
         // 台账一重建，上一轮的候选就必须作废。
         val ledgerKey = ctx?.ledger?.render().orEmpty()
+        // 置信度驱动低置信度降级块，shouldReplyNow 驱动「可不急回」附加行——
+        // 两个都改提示词，漏了就是判断变了、候选没变。
         val judgmentKey = judgment?.let {
-            listOf(it.trueIntent?.choice, it.dangerLevel?.score, it.sheNeeds?.choice, it.bestAction?.choice).joinToString("|")
+            listOf(
+                it.trueIntent?.choice, it.trueIntent?.confidence,
+                it.dangerLevel?.score, it.sheNeeds?.choice, it.bestAction?.choice,
+                it.shouldReplyNow
+            ).joinToString("|")
         }.orEmpty()
         return ReplyCacheKey.reply(
-            signature = snapshot.signature(), relationship = relationship, style = prefs.style,
+            title = snapshot.title.orEmpty(), signature = snapshot.signature(),
+            relationship = relationship, style = effectiveStyle,
             replyModel = prefs.replyModel, count = count, avoid = avoid, ctxKey = ctxKey,
-            ledgerKey = ledgerKey, judgmentKey = judgmentKey, intensity = intensity.name)
+            ledgerKey = ledgerKey, judgmentKey = judgmentKey, intensity = intensity.name,
+            params = replyParams())
     }
 
-    /** The knowledge/context half of both cache keys: what the model was told. */
-    private fun ctxKey(ctx: ChatContext?, relationship: String): String =
-        ctx?.let {
-            it.background(relationship) + "|" +
-                it.history.joinToString("|") { h -> h.side + ":" + h.text } + "|" +
-                it.skills.joinToString("|") { h -> h.ref.name + ":" + h.body }
-        }.orEmpty()
+    /** 采样与开关打包成一个分量：语言 / 长度 / 温度 / 两个惩罚 / 证据复查 + 模型。 */
+    private fun replyParams(): String = listOf(
+        prefs.replyLanguage, prefs.replyLength, prefs.replyTemperature,
+        prefs.replyFrequencyPenalty, prefs.replyPresencePenalty,
+        prefs.reviewEnabled, prefs.effectiveReviewModel()
+    ).joinToString("|")
+
+    /**
+     * 判断侧读的上下文：background + history + skills。风格样本与 L1 技能目录是
+     * 写给写手的（见 [replyCtxKey]），判断侧刻意不看——不进判断键，免得换个
+     * 技能目录就把判断缓存全作废。
+     */
+    private fun judgeCtxKey(ctx: ChatContext?, relationship: String): String =
+        ctx?.let { ctxKeyBase(it, relationship) }.orEmpty()
+
+    /**
+     * 回复侧的上下文 = 判断侧那三样 + 风格样本笔记（`knowledgeBlock` 逐条引用）
+     * + 技能 L1 目录（`skillNote` 永远骑在 user prompt 最前面）。后两样谁都进
+     * 提示词，谁就得进键。
+     */
+    private fun replyCtxKey(ctx: ChatContext?, relationship: String): String {
+        ctx ?: return ""
+        val styleSamples = ctx.notes.filter { it.type == NOTE_TYPE_STYLE_SAMPLE }
+            .joinToString("|") { it.id + ":" + it.content }
+        return ctxKeyBase(ctx, relationship) + "|" + styleSamples + "|" + ctx.catalogue
+    }
+
+    private fun ctxKeyBase(ctx: ChatContext, relationship: String): String =
+        ctx.background(relationship) + "|" +
+            ctx.history.joinToString("|") { h -> h.side + ":" + h.text } + "|" +
+            ctx.skills.joinToString("|") { h -> h.ref.name + ":" + h.body }
 
     /** Judge + replies, sequential. Used by the settings connectivity test. */
     fun analyze(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext? = null): Analysis {

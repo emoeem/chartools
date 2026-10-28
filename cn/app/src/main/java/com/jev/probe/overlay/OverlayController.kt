@@ -586,7 +586,11 @@ class OverlayController(private val ctx: Context) {
     fun showJudgment(a: Analysis) {
         judgment = a; errorMsg = null; judgeWaiting = false
         stopTickerIfIdle()
-        render(); flashIfCollapsed()
+        render()
+        // 收起态下 render() 因 riskPill == null 早退，胶囊读数会永远停在最后一秒；
+        // 判断落地后胶囊要切到危险度（见 renderCapsule 的状态表）。
+        if (mode == Mode.BUBBLE) renderCapsule()
+        flashIfCollapsed()
     }
 
     fun showDraftFirst(draft: List<RankedReply>, onFill: (String) -> Unit) {
@@ -597,6 +601,7 @@ class OverlayController(private val ctx: Context) {
         repliesWaiting = false
         stopTickerIfIdle()
         render()
+        if (mode == Mode.BUBBLE) renderCapsule()
     }
 
     fun showJudgeFailure(msg: String) {
@@ -616,6 +621,7 @@ class OverlayController(private val ctx: Context) {
         moreWaiting = false
         stopTickerIfIdle()
         render()
+        if (mode == Mode.BUBBLE) renderCapsule()
     }
 
     /**
@@ -721,6 +727,8 @@ class OverlayController(private val ctx: Context) {
         if (repliesWaiting) { repliesWaiting = false; moreWaiting = false; if (replies.isNullOrEmpty()) replyError = "生成超时" }
         stopTicker()
         render()
+        // 超时收场在收起态也要把胶囊从秒数切回常态，否则读数永久卡死。
+        if (mode == Mode.BUBBLE) renderCapsule()
     }
 
     private fun flashIfCollapsed() {

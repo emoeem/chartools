@@ -26,20 +26,24 @@ internal object ReplyCacheKey {
     private const val ITEM = "\u001f"
 
     /**
-     * 回复缓存键。**十个分量，缺一个就会串味**：
+     * 回复缓存键。**十四个分量，缺一个就会串味**：
      *
+     * - `title` 会话标题（两个无 KB 会话的末几条消息可能逐字相同，没有它就串台）
      * - `signature` 聊天快照指纹（消息本身变了，候选就作废）
      * - `relationship` 关系（联系人自己的关系压过全局）
-     * - `style` 当前生效的正文 —— 专家库换人就是换它
+     * - `style` **当前生效**的正文 —— 专家库换人、联系人专用人设都换它
+     *   （调用方必须传 `StyleSource.resolve` 的结果，不是裸 `Prefs.style`）
      * - `replyModel` 回复路由的模型（换 provider 必须重打）
      * - `count` 要几条候选
      * - `avoid` 已经展示过的候选（「换一组」）
-     * - `ctxKey` 提示词里的知识与历史
+     * - `ctxKey` 提示词里的知识与历史 + 风格样本 + 技能 L1 目录（回复侧独有）
      * - `ledgerKey` 台账（它进回复提示词，不进 Jev 的 state）
-     * - `judgmentKey` 这次判断的选项
+     * - `judgmentKey` 这次判断的选项（含置信度与「可不急回」——都改提示词）
      * - `intensity` 力度档
+     * - `params` 采样与开关：语言 / 长度 / 温度 / 两个惩罚 / 证据复查 + 复查模型
      */
     fun reply(
+        title: String,
         signature: String,
         relationship: String,
         style: String,
@@ -49,10 +53,11 @@ internal object ReplyCacheKey {
         ctxKey: String,
         ledgerKey: String,
         judgmentKey: String,
-        intensity: String
+        intensity: String,
+        params: String
     ): String = listOf(
-        signature, relationship, style, replyModel, count.toString(),
-        avoidKey(avoid), ctxKey, ledgerKey, judgmentKey, intensity
+        title, signature, relationship, style, replyModel, count.toString(),
+        avoidKey(avoid), ctxKey, ledgerKey, judgmentKey, intensity, params
     ).joinToString(FIELD)
 
     /**
@@ -66,15 +71,20 @@ internal object ReplyCacheKey {
         avoid.joinToString(ITEM) { "${it.length}:$it" }
 
     /**
-     * 判断缓存键：回复键减去只管回复的输入（`count` / `avoid` / `style`），
-     * 加上判断路由自己的模型与协议。
+     * 判断缓存键：回复键减去只管回复的输入（`count` / `avoid` / `style` /
+     * `params` / 台账），加上判断路由自己的模型与协议。
+     *
+     * `ctxKey` 传判断侧的（background + history + skills）；风格样本与 L1 目录
+     * 是写给写手的，判断侧刻意不看，所以不在这里 —— 不然换个技能目录就把
+     * 判断缓存全作废了。
      */
     fun judge(
+        title: String,
         signature: String,
         relationship: String,
         judgeModel: String,
         judgeProtocol: String,
         ctxKey: String
-    ): String = listOf(signature, relationship, judgeModel, judgeProtocol, ctxKey)
+    ): String = listOf(title, signature, relationship, judgeModel, judgeProtocol, ctxKey)
         .joinToString(FIELD)
 }
