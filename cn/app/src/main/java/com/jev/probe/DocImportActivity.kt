@@ -151,6 +151,7 @@ class DocImportActivity : AppCompatActivity() {
             }
             val previewText = text.toString()
             runOnUiThread {
+                if (isDestroyed) { runCatching { newPending.clear() }; return@runOnUiThread }
                 pending.addAll(newPending)
                 report.addAll(lines)
                 if (previewText.isNotEmpty() && preview.length < PREVIEW_LIMIT) {
@@ -190,6 +191,7 @@ class DocImportActivity : AppCompatActivity() {
             }
             val previewText = text.toString()
             runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
                 pending.addAll(newPending)
                 report.addAll(lines)
                 if (previewText.isNotEmpty() && preview.length < PREVIEW_LIMIT) {
@@ -306,6 +308,7 @@ class DocImportActivity : AppCompatActivity() {
                 0
             }
             runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
                 busy = false
                 busyUi(false)
                 if (saved == 0 && fresh.isNotEmpty()) {

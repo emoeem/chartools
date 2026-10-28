@@ -117,14 +117,16 @@ class ExpertAdapter(
                 oldItem.id == newItem.id
 
             // 卡面上出现的每一个字段都要参与比较：只比 id 的话，改完名字回到列表
-            // 仍然是旧名字，用户会以为保存没生效。
+            // 仍然是旧名字，用户会以为保存没生效。body 也在内——简介为空的专家
+            // 卡面直接显示正文第一行（ExpertCard.blurbOf），改正文不刷新是同病。
             override fun areContentsTheSame(oldItem: PersonaProfile, newItem: PersonaProfile) =
                 oldItem.name == newItem.name &&
                     oldItem.description == newItem.description &&
                     oldItem.avatar == newItem.avatar &&
                     oldItem.tags == newItem.tags &&
                     oldItem.category == newItem.category &&
-                    oldItem.usedCount == newItem.usedCount
+                    oldItem.usedCount == newItem.usedCount &&
+                    oldItem.body == newItem.body
         }
     }
 }

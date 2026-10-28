@@ -67,4 +67,18 @@ class OcrGroupingTest {
         assertEquals("", OcrGrouping.cleanBubbleText(""))
         assertEquals("", OcrGrouping.cleanBubbleText("   "))
     }
+
+    @Test
+    fun aMessageEndingInATimeAttachedToTextKeepsItsEnding() {
+        // 时间粘在正文上没有前导空白：真实消息的结尾不能被当成粘连的时间戳吃掉
+        //（「会议改到10:30」曾被截成「会议改到」）。
+        assertEquals("会议改到10:30", OcrGrouping.cleanBubbleText("会议改到10:30"))
+        assertEquals("截止到9:00", OcrGrouping.cleanBubbleText("截止到9:00"))
+    }
+
+    @Test
+    fun aTimeSeparatedByWhitespaceIsStillStripped() {
+        // 有空白分隔的尾部时间戳照剥——这是飞书粘连回执的形状。
+        assertEquals("在开会", OcrGrouping.cleanBubbleText("在开会 14:32"))
+    }
 }
