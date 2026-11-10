@@ -29,7 +29,8 @@ chartools-next/
 │   ├── lib/src/pipeline/     #   判断 → 起草 → 排序流水线 + 提示词模板
 │   ├── lib/src/persona_kb/   #   人设 / 专家 / 知识库
 │   ├── lib/src/safety/       #   安全策略
-│   └── lib/src/scenarios/    #   场景模板系统
+│   ├── lib/src/scenarios/    #   场景模板系统
+│   └── benchmark/            #   中文对话评测样本集 + runner（用法见其 README）
 ├── packages/capture_android/ # Flutter 插件（Android 采集层：无障碍/OCR/悬浮窗/回填）
 └── docs/                     # 架构决策、场景设计
 ```
@@ -43,7 +44,7 @@ workspace 注释追加成员。
 
 ```bash
 dart pub get                    # 根目录一次拉全部（pub workspace 共享锁文件）
-cd packages/core && dart test   # core 测试：纯 Dart（package:test），当前 240 例
+cd packages/core && dart test   # core 测试：纯 Dart（package:test）
 cd app && flutter test          # app 测试：widget/解析用例
 flutter analyze                 # 根目录可跑，覆盖整个工作区
 flutter run -d windows
@@ -69,8 +70,8 @@ export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
 
 | 场景 | 主要平台 | 状态 |
 |---|---|---|
-| 个人聊天副驾 | Android | **已实现**：Android 采集页 + 悬浮窗（无障碍/OCR 快照 → 判断 → 起草 → 回填/复制）；#4 增：首次运行引导（选场景/服务商/权限三步）与服务商预设下拉（含 Ollama 本机离线档） |
-| 桌面粘贴分析（Windows 入口） | Windows | **已实现**：粘贴聊天记录走同一条判断/起草流水线；#4 增：候选快速改写（更短/更礼貌/换个说法）与发送前隐私预览；热键、选中文本等原生采集未接 |
+| 个人聊天副驾 | Android | **已实现**：Android 采集页 + 悬浮窗（无障碍/OCR 快照 → 判断 → 起草 → 回填/复制）；#4 增：首次运行引导（选场景/服务商/权限三步）与服务商预设下拉（含 Ollama 本机离线档）；#5 增：低置信快照（如 OCR 兜底 + 发言人未知）不自动分析，挂起等「确认分析」 |
+| 桌面粘贴分析（Windows 入口） | Windows | **已实现**：粘贴聊天记录走同一条判断/起草流水线；#4 增：候选快速改写（更短/更礼貌/换个说法）与发送前隐私预览；#5 增：与采集页同一道置信度门控（粘贴快照当前恒为高置信，闸未触发，原生采集接入后生效）；热键、选中文本等原生采集未接 |
 | 客服/销售坐席辅助 | Windows | 模板已内置，待采集源（热键 + 选中文本） |
 | 外语学习陪练 | 双端 | 模板已内置，待采集源（剪贴板/选中文本；暂可走桌面粘贴分析） |
 | 直播/社群互动助手 | Windows | 模板已内置，待采集源（弹幕/评论流粘贴） |
@@ -86,6 +87,15 @@ export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
 `CaptureSession` 实现；服务商预设下拉与首次运行引导双端共用（引导第三步按平台
 分流）；中文 AI 腔 linter 在流水线终榜后生效，命中 ≥2 条特征的候选自动改写。
 落地明细见 `docs/architecture.md` 的「#4 落地记录」。
+
+#5（外部审查借鉴 G2–G6 + 润色路由）的落地集中在信任与自动整改，判断/起草引擎
+语义不变：来源不可靠的快照（置信度 ≤0.5，如 OCR 兜底叠一条发言人未知）不自动
+分析，先经用户「确认分析」再发模型，两端同闸；候选的自动改写（AI 腔整改、复查
+驳回重写）改走独立的润色路由，未配置时回退回复路由——候选卡上的手动精修仍走
+回复路由；提示词装配堵住注入回显缝隙，不可信内容进不了 system 段、safetyBans
+永远在上。适配器能力表（G2）数据与查询通道已就位、首页展示未接；中文对话
+Benchmark（G5）与适配器验收表（G4）的用法见 `packages/core/benchmark/README.md`
+与 `docs/architecture.md` 的「#5 落地记录」。
 
 ## 与旧仓库的关系
 

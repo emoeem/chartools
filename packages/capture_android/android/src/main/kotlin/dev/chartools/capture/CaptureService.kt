@@ -54,7 +54,7 @@ class CaptureService : AccessibilityService() {
         const val SNAPSHOT_CHANNEL = "capture_android/snapshots"
 
         /** MethodChannel：configure / isRunning / openAccessibilitySettings / refill /
-         *  manualOcr / showSuggestions / hideSuggestions / collapse。 */
+         *  manualOcr / showSuggestions / hideSuggestions / collapse / getCapabilities。 */
         const val CONTROL_CHANNEL = "capture_android/control"
 
         /** 同一包名事件防抖窗口。 */
@@ -114,6 +114,62 @@ class CaptureService : AccessibilityService() {
          * 分开放。
          */
         private val BLOCKED_PKG_PREFIXES = listOf("com.android.bank")
+
+        /**
+         * 黑名单判定的纯函数本体（p0-plan ⑦）：无 Android 依赖，离线单测直接钉它
+         * （android/src/test/kotlin/dev/chartools/capture/BlockedPackagesTest.kt）。
+         * [CaptureService] 是 AccessibilityService，测试环境实例化不了，实例方法
+         * [isBlocked] 只负责取当前 [blockedPackages] 后转发到这里。[blocked] 由
+         * 调用方传入而不是函数自己读全局，测试才能不碰可变状态验证任意清单。
+         */
+        internal fun isBlockedPackage(pkg: String?, blocked: Set<String>): Boolean {
+            if (pkg == null) return false
+            if (pkg in blocked) return true
+            return BLOCKED_PKG_PREFIXES.any { pkg.startsWith(it) }
+        }
+
+        /**
+         * 微信的能力表（G2）：微信没有适配器——无障碍树全空（见 [WECHAT_PKG] 上方
+         * 的注释），自动采集进不来；前台在微信时手动「截屏识别一次」仍可用
+         * （manualOcr 只拦 allowScreenshot=false 的适配器，微信没有适配器所以不拦），
+         * 整屏 OCR 的像素气泡分边（WeChatBubbles.find）是它唯一的归属来源。
+         * canIdentifySender=false：像素分边在本插件没有真机回归记录（取样记录在
+         * 旧仓库 8.0.78，且自动入口未随本插件移植），能力展示宁可少许诺——分边
+         * 不可靠的行会被 OcrGrouping 标成 unknown-speaker，由 G3 的置信度扣分。
+         * verifiedAppVersion=null：同上，未在本插件真机复验。
+         */
+        internal val weChatCapabilities = AdapterCapabilities(
+            canReadMessages = false,
+            canIdentifySender = false,
+            canReadHistory = false,
+            allowsOcrFallback = true,
+            verifiedAppVersion = null,
+        )
+
+        /**
+         * G2 能力查询（control 方法 `getCapabilities {pkg}`）：
+         * - 已适配包 → 该适配器 [ChatAppAdapter.capabilities] 的 Map 投影；
+         * - 微信（无适配器）→ [weChatCapabilities]；
+         * - 其余包名（含 null）→ null：「未适配/不支持」。
+         *
+         * 返回 Map 而非 JSON 串：StandardMethodCodec 原生编解码 Map 与 null，
+         * Dart 侧不必再解码一层。键与 [AdapterCapabilities] 字段同名。静态放在
+         * companion（能力表是不随实例变的数据，同 [isBlockedPackage] 的取舍：
+         * 服务实例在测试环境实例化不了，单测直接钳这个纯函数）。
+         */
+        internal fun capabilitiesFor(pkg: String?): Map<String, Any?>? {
+            if (pkg == null) return null
+            val caps = ChatApps.forPackage(pkg)?.capabilities
+                ?: weChatCapabilities.takeIf { pkg == WECHAT_PKG }
+                ?: return null
+            return mapOf(
+                "canReadMessages" to caps.canReadMessages,
+                "canIdentifySender" to caps.canIdentifySender,
+                "canReadHistory" to caps.canReadHistory,
+                "allowsOcrFallback" to caps.allowsOcrFallback,
+                "verifiedAppVersion" to caps.verifiedAppVersion,
+            )
+        }
 
         /** On an app whose adapter has been reading bubbles, an empty read must
          *  persist this long before the OCR fallback may take a screenshot: a
@@ -375,13 +431,11 @@ class CaptureService : AccessibilityService() {
      * 黑名单判定（p0-plan ⑦）：先查可配置黑名单（黑名单优先于白名单——用户
      * 拉黑的包即使加进采集范围也不采），再查银行类前缀底线。事件层
      * （[onAccessibilityEvent]）在白名单判断之前先走这里；targetFor / 手动 OCR
-     * 经它兜底同一份拒绝语义。
+     * 经它兜底同一份拒绝语义。判定本体在 companion 的纯函数
+     * [ServiceConfig.isBlockedPackage]（单测可达），这里只接当前配置。
      */
-    private fun isBlocked(pkg: String?): Boolean {
-        if (pkg == null) return false
-        if (pkg in ServiceConfig.blockedPackages) return true
-        return BLOCKED_PKG_PREFIXES.any { pkg.startsWith(it) }
-    }
+    private fun isBlocked(pkg: String?): Boolean =
+        isBlockedPackage(pkg, ServiceConfig.blockedPackages)
 
     /** A placeholder title an app shows only for a moment (e.g. X's "连接中…"
      *  right after opening a DM thread) — never a real conversation title.
@@ -705,15 +759,24 @@ class CaptureService : AccessibilityService() {
     }
 
     /**
-     * 快照 → JSON：`title/note/provenance/messages[{side,text}]`。message 只带
-     * side/text 两字段。bubbleRects 不再序列化：Dart 侧解析从不消费它（Dart 的
-     * ChatSnapshot 没有该字段），气泡矩形只在服务进程内供 OCR 签名/裁剪使用。
+     * 快照 → JSON：`title/note/provenance/confidence/uncertain?/messages[{side,text}]`。
+     * message 只带 side/text 两字段。bubbleRects 不再序列化：Dart 侧解析从不消费
+     * 它（Dart 的 ChatSnapshot 没有该字段），气泡矩形只在服务进程内供 OCR 签名/
+     * 裁剪使用。confidence/uncertain 是 G3 通道契约字段，算法见 [snapshotConfidence]；
+     * uncertain 只在有原因时发（Dart 侧把「无字段」解析成空表，不破旧 JSON）。
      */
     private fun snapshotJson(s: ChatSnapshot): String {
         val o = JSONObject()
         o.put("title", s.title ?: JSONObject.NULL)
         o.put("note", s.note ?: JSONObject.NULL)
         o.put("provenance", s.provenance)
+        val (confidence, uncertain) = snapshotConfidence(s)
+        o.put("confidence", confidence)
+        if (uncertain.isNotEmpty()) {
+            val labels = JSONArray()
+            for (label in uncertain) labels.put(label)
+            o.put("uncertain", labels)
+        }
         val msgs = JSONArray()
         for (m in s.messages) {
             val mo = JSONObject()
@@ -836,6 +899,10 @@ class CaptureService : AccessibilityService() {
                 runCatching { overlay.collapseSuggestions() }
                 result.success(true)
             }
+            // G2 能力查询：{pkg} → 能力表（Map）；未适配包回 null。control 通道
+            // 由服务注册——服务未连接时整条通道不存在，Dart 连上后取一次缓存即可
+            // （能力表是静态数据）。
+            "getCapabilities" -> result.success(capabilitiesFor(call.argument<String>("pkg")))
             else -> result.notImplemented()
         }
     }
@@ -944,4 +1011,57 @@ class CaptureService : AccessibilityService() {
         pixelWorker.shutdownNow()
         super.onDestroy()
     }
+}
+
+// ---- G3 采集置信度（K/D 通道契约，定义写死、两侧同源） ----------------------
+//
+// 通道契约：snapshotJson 的快照 JSON 增加 "confidence"（0.0..1.0，Dart 侧把
+// 缺省视为 1.0）与 "uncertain"（原因标签数组，可省略；Dart 侧把缺省解析成空表，
+// 旧 JSON 无字段解析不破）。本文件是 Kotlin 侧唯一实现，计算规则：
+// - provenance==ocr 基线 0.6，其余（a11y；inject 将来若有）基线 1.0；
+// - 每条 unknown-speaker 消息（side 既非 "me" 也非 "other"）-0.1；
+// - title 为空（null 或空白）-0.05；
+// - 下限 0.2。
+// unknown-speaker 的两个已知来源：整屏 OCR 没有像素气泡盖住该行（OcrGrouping
+// 的 SIDE_UNKNOWN "？"），微信群聊发言人归属不上（WeChatSpeakerAttribution 的
+// "unknown"）；无障碍适配器路径恒为 me/other，不受这条扣分影响。
+
+/** 置信度下限：再差也标 0.2，避免 UI 出现「越差越负」的摆烂值。 */
+private const val CONFIDENCE_FLOOR = 0.2
+
+/** OCR 快照基线：正文来自像素而非树，先天就低一档。 */
+private const val CONFIDENCE_OCR_BASELINE = 0.6
+
+/** 每条 unknown-speaker 消息的扣分。 */
+private const val CONFIDENCE_UNKNOWN_SPEAKER_STEP = 0.1
+
+/** 会话标题为空的扣分（会话身份 = app + window + title，少一要素）。 */
+private const val CONFIDENCE_MISSING_TITLE_STEP = 0.05
+
+/** 原因标签：有消息分不清是谁说的（G3：身份不明确宁可拒绝，不猜测）。
+ *  标签即展示文案：Dart 侧（capture_session.uncertainReasonsOf）原样透传上卡，
+ *  不做映射，所以发中文、不发 snake_case。 */
+internal const val UNCERTAIN_UNKNOWN_SPEAKER = "发言人未知"
+
+/** 原因标签：会话标题缺失（同上，直接上卡展示）。 */
+internal const val UNCERTAIN_MISSING_TITLE = "标题为空"
+
+/**
+ * 快照置信度与不确定原因（G3）。纯函数（无 Android 依赖），由
+ * SnapshotConfidenceContractTest 直接钳住契约算术；[snapshotJson] 只负责把结果
+ * 装进 JSON。扣分项叠加后不夹上限（基线已是 1.0，只减不增），只夹下限。
+ */
+internal fun snapshotConfidence(s: ChatSnapshot): Pair<Double, List<String>> {
+    var confidence = if (s.provenance == Provenance.OCR) CONFIDENCE_OCR_BASELINE else 1.0
+    val uncertain = ArrayList<String>(2)
+    val unknownSpeakers = s.messages.count { it.side != "me" && it.side != "other" }
+    if (unknownSpeakers > 0) {
+        confidence -= CONFIDENCE_UNKNOWN_SPEAKER_STEP * unknownSpeakers
+        uncertain += UNCERTAIN_UNKNOWN_SPEAKER
+    }
+    if (s.title.isNullOrBlank()) {
+        confidence -= CONFIDENCE_MISSING_TITLE_STEP
+        uncertain += UNCERTAIN_MISSING_TITLE
+    }
+    return maxOf(CONFIDENCE_FLOOR, confidence) to uncertain
 }

@@ -41,6 +41,12 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
 
   bool _busy = false;
 
+  /// G3 置信度门控：本屏快照来源不可靠，挂起等用户确认（与采集会话同一道
+  /// 闸，[CaptureSession.confirmThreshold]）。桌面快照当前恒为缺省置信 1.0
+  /// （契约只定义 a11y/ocr 基线，desktop 不参与扣分），这道闸实际不触发；
+  /// 接原生窗口采集后粘贴页走的就是同一条挂起/确认路径，先把它立在这。
+  bool _pendingConfirm = false;
+
   /// 正在快速改写的候选下标：busy 只作用于该卡。
   final Set<int> _refining = {};
 
@@ -98,6 +104,7 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       setState(() {
         _snapshot = null;
         _analysis = null;
+        _pendingConfirm = false;
         _error = '没有解析到任何消息：请按「对方：…」「我：…」每行一条粘贴。';
       });
       return;
@@ -107,6 +114,44 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       provenance: Provenance.desktop,
       note: _noteFor(parsed),
     );
+    // G3 置信度门控：不高于阈值（≤，含 OCR+单条发言人未知的精确 0.5）不自动
+    // 分析，挂起等确认（见 [_pendingConfirm]）。
+    if (CaptureSession.shouldConfirm(snapshot)) {
+      final ctx = CaptureSession.buildContext(
+        extra: _extra.text,
+        myMessages: CaptureSession.myMessagesOf(snapshot),
+        styleLearning: _styleLearning,
+      );
+      setState(() {
+        _snapshot = snapshot;
+        _analysis = null;
+        _error = null;
+        _busy = false;
+        _handled = false;
+        _pendingConfirm = true;
+        _expandedCandidates.clear();
+        // 挂起态先亮预览：确认之前就能看到「确认后会把什么发出去」。
+        _preview = CaptureSession.buildSendPreview(
+          snapshot: snapshot,
+          ctx: ctx,
+          relationship: _relationship.text,
+        );
+      });
+      return;
+    }
+    await _runAnalysis(snapshot);
+  }
+
+  /// G3：低置信快照的确认分析入口（与采集会话同一道闸）。非挂起态是空操作。
+  Future<void> _confirmAnalyze() async {
+    final snapshot = _snapshot;
+    if (snapshot == null || _busy || !_pendingConfirm) return;
+    await _runAnalysis(snapshot);
+  }
+
+  /// 一轮完整分析（judge → draftAndRank → 写结果区）：高置信自动路径与确认
+  /// 路径（[_confirmAnalyze]）共用。ctx/预览在这里现算，与实际发送同源。
+  Future<void> _runAnalysis(ChatSnapshot snapshot) async {
     // ③/A3：补充背景 + 粘贴文本里的「我：」行风格样本组装成 ctx，judge 与
     // draftAndRank 拿同一份；G1 预览由它算出，与实际发送同源。
     final relationshipText =
@@ -119,7 +164,7 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
     final preview = CaptureSession.buildSendPreview(
       snapshot: snapshot,
       ctx: ctx,
-      relationship: relationshipText,
+      relationship: _relationship.text,
     );
     setState(() {
       _snapshot = snapshot;
@@ -127,6 +172,7 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       _error = null;
       _busy = true;
       _handled = false;
+      _pendingConfirm = false;
       _expandedCandidates.clear();
       _preview = preview;
     });
@@ -213,7 +259,7 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
     }
   }
 
-  /// B7：把本轮标记为已处理（收起候选，不再展示）。
+  /// B7「不用回」：把本轮标记为已处理（收起候选，不再展示）。
   void _markHandled() {
     setState(() {
       _handled = true;
@@ -360,6 +406,22 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
         ),
       );
     }
+    // G3 置信度门控：来源不可靠的快照挂起等确认——点了才把内容发给模型。
+    if (_pendingConfirm && _snapshot != null) {
+      final reasons = CaptureSession.uncertainReasonsOf(_snapshot!);
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.privacy_tip_outlined),
+          title:
+              Text(reasons.isEmpty ? '来源不可靠，确认分析？' : '来源不可靠（$reasons），确认分析？'),
+          subtitle: Text(CaptureSession.sourceLineOf(_snapshot!)),
+          trailing: FilledButton.tonal(
+            onPressed: _confirmAnalyze,
+            child: const Text('确认分析'),
+          ),
+        ),
+      );
+    }
     final analysis = _analysis;
     if (analysis == null || _snapshot == null) return const SizedBox.shrink();
     // 判断路由的错误不抛异常，装在 Analysis.error 里回来（JudgeClient.judge）。
@@ -387,14 +449,17 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       );
     }
     final ranked = analysis.rankedReplies;
-    // B7：判断明确说「可以不回」时，先给这个出口。
+    // B7：判断明确说「这条可以不回」时，先给这个出口。
     final shouldReplyNow = analysis.shouldReplyNow;
     final canSkip = shouldReplyNow != null && shouldReplyNow < 0.5;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // G3：来源行带置信度与原因标签（与采集页共用
+        // CaptureSession.sourceLineOf 的同一份文案）。
         Text(
-          '来源层：${_snapshot!.provenance} · 消息 ${_snapshot!.messages.length} 条',
+          '${CaptureSession.sourceLineOf(_snapshot!)}'
+          ' · 消息 ${_snapshot!.messages.length} 条',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         // 未归属注记（快照 note，进提示词的那份文案）原样展示。

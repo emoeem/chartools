@@ -30,6 +30,17 @@ class WhatsAppAdapter : ChatAppAdapter {
     /** 永不截屏：无 OCR 兜底、无手动「截屏识别一次」。读不到文字就返回 null。 */
     override val allowScreenshot = false
 
+    // G2 能力：id 直读正文（仅 1:1，群聊整页返回 null，见类注释）；边距 + 回执
+    // 图标分边，互相矛盾的那行丢弃而非猜测（readRow）。永不截屏 → 无 OCR 兜底，
+    // 与 allowScreenshot=false 必须一致（契约测试钳住）。取样记录 2.26.38.73。
+    override val capabilities = AdapterCapabilities(
+        canReadMessages = true,
+        canIdentifySender = true,
+        canReadHistory = false,
+        allowsOcrFallback = false,
+        verifiedAppVersion = "2.26.38.73",
+    )
+
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? =
         WhatsAppRules.read(A11yNode(root))?.let { ChatSnapshot(it.title, it.messages) }
 

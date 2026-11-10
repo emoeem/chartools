@@ -456,7 +456,10 @@ class _CapturePageState extends State<CapturePage> {
               ],
             ),
             if (snap != null) ...[
-              Text('来源层：${snap.provenance} · 消息 ${snap.messages.length} 条'),
+              // G3：来源行带置信度与原因标签（与桌面流共用
+              // CaptureSession.sourceLineOf 的同一份文案）。
+              Text('${CaptureSession.sourceLineOf(snap)}'
+                  ' · 消息 ${snap.messages.length} 条'),
               const SizedBox(height: 4),
               for (final m in snap.messages.skip(
                   snap.messages.length > 6 ? snap.messages.length - 6 : 0))
@@ -539,6 +542,26 @@ class _CapturePageState extends State<CapturePage> {
         ),
       );
     }
+    // G3 置信度门控：来源不可靠的快照没有自动分析（session 挂在
+    // needsConfirm），给「确认分析」的出口——点了才把这一屏内容发给模型。
+    if (state.needsConfirm) {
+      final snap = state.snapshot;
+      if (snap != null) {
+        final reasons = CaptureSession.uncertainReasonsOf(snap);
+        return Card(
+          child: ListTile(
+            leading: const Icon(Icons.privacy_tip_outlined),
+            title:
+                Text(reasons.isEmpty ? '来源不可靠，确认分析？' : '来源不可靠（$reasons），确认分析？'),
+            subtitle: Text(CaptureSession.sourceLineOf(snap)),
+            trailing: FilledButton.tonal(
+              onPressed: _session.confirmAnalyze,
+              child: const Text('确认分析'),
+            ),
+          ),
+        );
+      }
+    }
     final ranked = state.analysis?.rankedReplies ?? const <RankedReply>[];
     if (state.handled) {
       // B7：本轮已标记为不用回——安静的确认态，保留「反悔」的入口。
@@ -560,7 +583,7 @@ class _CapturePageState extends State<CapturePage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // B7：判断明确说「可以不回」时，先给这个出口——点了把本轮标记为
+        // B7：判断明确说「这条可以不回」时，先给这个出口——点了把本轮标记为
         // 已处理（收起候选，同签名快照不再起草）。
         if (state.canSkipReply) ...[
           Card(

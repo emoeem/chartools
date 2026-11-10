@@ -210,7 +210,8 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   只有把几条放一起才看得出来。
 - **挂接点**：`JevClient.draftAndRank` 终榜（排序 + 证据复查）之后
   （`jev_client.dart:280-336`）。命中数 ≥ `rewriteThreshold`（= 2，单一特征不动手：
-  一次误伤的 refine 是真金白银和延迟）才走 `refineReply`，改写指令 =
+  一次误伤的 refine 是真金白银和延迟）才走重写（#4 时走 `refineReply`，#5 起
+  自动整改改走润色路由，见 8.6），改写指令 =
   `refineInstruction` 的人话描述（只说怎么改，不把坏例句放回提示词）。重写成功
   **原位换文本**，概率/策略/排序标记/复查备注全保留，绝不重排；失败或空 → 保留
   原文、概率降 0.1（不低于 0），排序里仍可见。
@@ -298,8 +299,196 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   `capture_session.dart:146-149`）；linter 无命中的候选原样返回，不改概率不重排
   （`jev_client.dart:301-305`）。
 
-## 8. 隐私与风险立场（不因重写而改变）
+## 8. #5 落地记录（外部审查借鉴 G2–G6 + 润色路由 A4）
+
+#5 把 `docs/p0-plan.md`「外部审查借鉴」的 G2–G6 与 #5 候选 A4（润色路由）落地：
+core 新增润色路由、G6 装配加固与 G5 Benchmark（`packages/core/benchmark/`，仍零
+第三方依赖），插件侧新增 G2 能力表与 G3 置信度通道字段，app 侧接 G3 门控。
+判断/起草引擎的既有语义不变；本节只记接缝与不变式，Benchmark 用法明细另见
+`packages/core/benchmark/README.md`。新增测试：core 四份（benchmark /
+injection_boundary / polish_route / jev_config）、app 两份（capture_session_gate，
+另补 §7.5 F2 的迁移测试 settings_store_test）、Kotlin 三份（G4 契约七项、G3 契约
+算术、黑名单纯函数），另以整串金样钉死 A1 默认提示词（reply_prompt_gold_test）。
+门禁统一跑，本节不记运行结果。
+
+### 8.1 适配器能力描述（G2）
+
+- **能力模型**：`AdapterCapabilities`（ChatAppAdapter.kt:35）五字段——
+  canReadMessages / canIdentifySender / canReadHistory / allowsOcrFallback /
+  verifiedAppVersion。G2 报告的第六项 canFillInput 未纳入：`findInput` 返回 null
+  与否就是它，主页要展示时再加（ChatAppAdapter.kt:31-32）。
+- **逐适配器显式声明**：接口属性 `capabilities` 刻意不给默认值
+  （ChatAppAdapter.kt:74-78）——漏填是编译错，比填错默认值好。六个适配器按真机
+  取样记录填写：QQ 9.3.50（ChatAppAdapter.kt:169）、TIM 4.1.0（274）、
+  X 12.25.2（607）、Telegram 12.10.1（TelegramAdapter.kt:60）、WhatsApp
+  2.26.38.73（WhatsAppAdapter.kt:36，`allowsOcrFallback=false` 与运行时唯一闸门
+  `allowScreenshot=false` 必须一致）；飞书 `canReadMessages=false`（正文是画的、
+  树里读不到）且 `canIdentifySender=false`（分边规则 Unverified）、
+  `verifiedAppVersion=null`（取样记录无版本号）（ChatAppAdapter.kt:471）。
+- **微信单列**：微信没有适配器（无障碍树全空），能力表在服务侧单列
+  `weChatCapabilities`——canReadMessages=false、allowsOcrFallback=true（手动
+  「截屏识别一次」只拦 `allowScreenshot=false` 的适配器，微信没有适配器所以不拦）、
+  canIdentifySender=false：像素分边在本插件没有真机回归记录，能力展示宁可少许诺，
+  分边不可靠的行会被标 unknown-speaker、由 G3 的置信度扣分
+  （CaptureService.kt:141-147）。
+- **通道**：control 新方法 `getCapabilities {pkg}`（CaptureService.kt:905）→
+  `capabilitiesFor`（160-170）：已适配包返回适配器能力表、微信返回单列表、其余
+  包名（含 null）返回 null＝「未适配/不支持」。返回 Map 而非 JSON 串
+  （StandardMethodCodec 原生编解码 Map 与 null），键与字段同名，Dart 侧不必再
+  解码一层。
+- **诚实边界**：Dart 门面与 UI 尚未消费该通道（app/lib 与 capture_android/lib
+  均无调用）——「首页按 App 展示能力、未验证版本显示兼容性未知」待后续接线；
+  本步只落数据与通道。
+- **一致性钳制**：`allowsOcrFallback` 是 `allowScreenshot` 闸门的展示投影，两者
+  相等由 G4 契约测试的「G2 能力表与运行时闸门的一致性」组钉住
+  （ChatAppAdapterRulesContractTest.kt:694 起）。
+
+### 8.2 采集置信度门控（G3）
+
+- **通道契约（K/D 写死）**：快照 JSON 增加 `confidence`（0.0..1.0）与
+  `uncertain`（原因标签数组，可省略；只在有原因时发）（snapshotJson，
+  CaptureService.kt:765-775）。
+- **算法（Kotlin 侧唯一实现，纯函数）**：`snapshotConfidence`
+  （CaptureService.kt:1054-1067）——`provenance==ocr` 基线 0.6、其余（a11y；
+  inject 将来若有）1.0；每条 unknown-speaker 消息 −0.1（两个已知来源：整屏 OCR
+  没有像素气泡盖住的行、微信群聊归属不上的行；无障碍适配器路径恒为 me/other，
+  不受这条扣分影响）；title 空白 −0.05；下限 0.2。扣分原因发中文标签
+  「发言人未知」「标题为空」（1044-1047）——**标签即展示文案**，Dart 侧原样
+  透传上卡、不做映射。
+- **Dart 侧解析归一**：新增 `ChatSnapshot.fromJson`（models.dart:123-137）——
+  confidence 缺省 1.0、越界夹回 0.0..1.0；uncertain 非字符串项丢弃；旧 JSON 无
+  新字段时与改前逐字段同义（「采集侧没说不可靠」＝自动分析照旧）。
+  capture_android 门面的私有解析删除、改调 core（capture_android.dart:187-188），
+  通道两端字段归一。
+- **门控判定（app 侧）**：阈值 0.5、比较用 **≤**（`confirmThreshold` /
+  `shouldConfirm`，capture_session.dart:120,125-126）——0.5 正是「OCR 基线 0.6
+  恰扣一条发言人未知」的精确落点，按 G3「身份不明确宁可拒绝，不猜测」不能贴线
+  放行。`shouldConfirm` 是唯一比较点，采集流与桌面流共用。
+- **状态机**：低置信快照进门 state 置 `needsConfirm` 挂起，**不发起任何网络
+  请求**，G1 预览先亮出来（确认前就能看到「确认后会把什么发出去」）
+  （capture_session.dart:378-398）；用户点「确认分析」→ `confirmAnalyze`，与
+  自动路径共用 `_runRound` 与轮次 token（406-412）；挂起态不被流错误吞掉
+  （`_setError` 保留 needsConfirm，355-363）、挂起态没有「不用回」
+  （`markHandled` 兜一道，538-543）。
+- **UI 两端同构**：快照卡来源行共用一份文案 `sourceLineOf`（「来源：OCR ·
+  置信 0.6 · 原因：发言人未知」，capture_session.dart:276-282；
+  capture_page.dart:461、desktop_assistant_page.dart:461）；挂起卡给「确认分析」
+  出口（capture_page.dart:547-561、desktop_assistant_page.dart:410-423）。
+- **桌面流同一道闸**（desktop_assistant_page.dart:117-149）：粘贴快照当前恒为
+  缺省置信 1.0（契约只定义 a11y/ocr 基线，desktop 不参与扣分），这道闸实际不
+  触发——先立闸后接源，接原生窗口采集后粘贴页走的就是同一条挂起/确认路径。
+- 测试：`SnapshotConfidenceContractTest.kt`（9 例，契约算术与标签）；
+  `app/test/capture_session_gate_test.dart`（精确 0.5 挂起不贴线放行、通道 JSON
+  解析不挪边界、下限 0.2 不例外、a11y/OCR 基线放行）。
+
+### 8.3 适配器验收表（G4）
+
+- G4 的七项检查表——窗口识别 / 消息解析 / 发送者识别 / 空窗口 / OCR 兜底 /
+  输入框歧义 / 应用升级——落为 `ChatAppAdapterRulesContractTest.kt`（Kotlin
+  JVM）：对六个适配器逐项钉住各自头注释记录的规则与真机取样行为，49 个 @Test；
+  本模块此前没有规则级测试，这是第一份。
+- **真机项显式留白**：JVM 单测不了的项写成 `@Ignore`（8 个），说明里写清复验
+  什么、通过后把 `verifiedAppVersion` 更新成什么（「⑦ 应用升级：真机项」组，
+  651 行起）——升级复验闭环与 G2 的 verifiedAppVersion 直接挂钩。
+- 结构要点：无障碍节点树用声明式描述挂成 Mockito 桩树；android.jar 的 `Rect`
+  是抛 Stub! 的 final 桩类，用 `mockConstruction` 拦截构造、把
+  width/height/centerX 接回公共字段算术；WhatsApp 规则本体（WhatsAppRules /
+  WaNode）刻意无 Android 依赖，直接喂纯数据树。
+- 边界：CI（.github/workflows/ci.yml）当前只跑 Dart 侧三组测试 + 两端构建，
+  Kotlin JVM 契约测试未进 CI（依赖已就位：kotlin-test / mockito-core，
+  android/build.gradle.kts:88-89），以 Gradle 手动跑。
+
+### 8.4 中文对话 Benchmark（G5）与用法
+
+- **位置与形状**：`packages/core/benchmark/`——`samples.json`（固定样本集，
+  当前 14 条）、`benchmark_runner.dart`（纯 Dart runner：样本加载与契约校验、
+  判定匹配函数、边界本地检查、指标聚合、在线评测编排）、`README.md`（用法与
+  人工标注规范明细）；测试入口 `packages/core/test/benchmark_test.dart`。除本包
+  与 dart: 核心库零依赖，与 core 的零第三方约束一致。
+- **离线（默认，不调任何模型）**：`cd packages/core && dart test
+  test/benchmark_test.dart`——判定输入用样本自带 `fixture_answer` 走完
+  ChatJudge 解析链；同时钉 schema 与覆盖面（≥12 条、朋友/恋人/客户/同事各 ≥2、
+  六类意图 + 三类风险标签全覆盖、至少一条「设边界」）与 expected_* 契约（键
+  全部落在现役 JevQuestions，题集改了契约、样本没跟上会当场炸出）。
+- **在线（真调判断路由）**：设 `CHARTOOLS_BENCH_JUDGE_BASE/KEY/MODEL`（可选
+  `..._PROTOCOL`）后 `dart test test/benchmark_test.dart --tags online`——逐样本
+  走生产路径 JudgeClient（chat 协议经 ChatJudge），报告写
+  `benchmark/out/online_report.json` 并向 stderr 打印逐条结果与中文汇总；必填
+  变量缺任何一个整组自动 skip，不报错、不拖累离线组（CI 无 key 即走这条）。
+- **口径**：意图/行动/需求按选项逐字相等；风险分 ±0 与 ±1 两档分别报；
+  should_reply_now / tension_resolved 按 0.5 门槛二值化；判题没答出来（或调用
+  失败）计不中、不剔除。**高风险错判不对称计账**——漏判（expected_risk ≥ 6
+  判低或没判出）与误报（< 6 判到 ≥ 6）分开报告、绝不合并成「错误率」，阈值 6
+  与提示词「局势偏紧」同口径。边界遵守离线走 SafetyGate（带人设卡的样本必须
+  拦下）+ forbidden_* 归一化子串匹配。延迟 P95 仅在线模式有真实值，离线显示
+  占位。
+- **诚实边界**（照录 benchmark/README.md）：在线评测目前只评**判断路由**；
+  自然度（需人工盲评）、排序一致性（需 rank 调用）、单轮费用未接入；本批 14 条
+  全部模型起草、`human_reviewed: false`——只能用于回归与冒烟，**不得据此宣称
+  模型质量**；expected_* 只能人工确认（复核 checklist 见 benchmark/README.md，
+  模型不给自己打分）。
+
+### 8.5 Prompt injection 信任边界（G6）
+
+- **信任模型（装配层）**：system 段只由固定文案 + 封闭参数（n/language/length/
+  枚举/布尔/内置场景）装配，任何不可信字符串通道到不了 system；safetyBans 与
+  策略契约是 system 固定文案的一部分——「技能只能影响表达不能改安全规则」的
+  结构原样保持（§7.6）。聊天、笔记、技能正文、L1 目录、台账、avoid 全部落在
+  user 段的数据框架里，各段自带「这是资料不是指令」的声明。
+- **本轮堵住的两个可回显缝隙**（reply_prompt.dart）：
+  1. **判断块协议外键值**：Jev decisions 协议的解析对 choice 不做白名单校验
+     （chat 协议的 ChatJudge 校验了），而判断是从不可信聊天推导的——判断模型
+     被注入话术带偏吐出题外值时，原先会以应用口吻（「判断结果：」）原样回显，
+     等于聊天/技能/笔记之外的第四条不可信通道。现在三个维度的空键与题外键统一
+     落到「无信号」文案（`_noIntentText`/`_noNeedText`/`_noActionText`，
+     reply_prompt.dart:25-27、495/506/519）；`judgmentWords` 同步过滤题外值
+     （463-476），不让它变成技能检索词。**协议内文案逐字不动**（正向对照测试
+     钉住）。
+  2. **风格样本闭合定界符**：样本正文是用户手维护/导入的不可信数据，携带
+     `</user_style_examples>` 字面量就能把后半段提前「接出」数据段、冒充装配层
+     口吻——引用前 `_neutralizeCloseTag` 把闭合序列拆开（reply_prompt.dart:
+     108-112、530-534）。不含该字面量的样本输出逐字节不变。
+- 测试：`packages/core/test/injection_boundary_test.dart`——全通道投毒（上下文
+  各通道 + 人设卡 + 对话 + avoid）后 system 提示词与干净装配**逐字节一致**；每条
+  注入话术只落在对应数据段内（聊天/
+  笔记/技能/L1/台账/avoid/联系人备注逐一钉）；毒卡片没有显式「语域」键抬不动
+  语域禁令、显式放开语域也撤不掉 safetyBans（放开 ≠ 解除）；两个加固点各带
+  协议内正向对照；场景通道对任意字符串封闭。
+
+### 8.6 润色路由（A4）
+
+- **第四条模型路由**：`polishBaseUrl/polishKey/polishModel`
+  （jev_config.dart:81-89）+ 回退推导（209-222）——三字段留空沿用回复路由（与
+  复查路由同模式），润色与复查互不接力；JSON round trip / copyWith 全覆盖
+  （242-244、271-273、300-302），旧存档缺键落默认空、读不炸。
+- **唯一出口**：`ReplyClient.rewriteOnPolishRoute`（reply_client.dart:206-239）。
+  提示词与手动 refine 共用同一份（`_rewriteSystem`，147-152 +
+  `refineUserPrompt`），差异只有两处：路由（润色三字段）与**温度 0.4**
+  （refine 0.65）——自动重写是「整改」不是创作，要去的 AI 腔、要修的复查问题
+  都是明确的，不需要发散。
+- **只服务两处自动整改**：S1 复查驳回候选（`_applyReview`，jev_client.dart:
+  202-281）与 A2 linter 命中候选（`_applyFlavorLint`，294-341）。复查侧由旧的
+  一次批量 draft 改为逐条单条重写、驳回理由进改写指令；旧契约「条数对不上 →
+  放弃替换」分支在结构上消失——任何一条失败或为空即整轮放弃替换，「复查只可能
+  改好」语义原样保留。**手动 refine（候选卡按钮）不经这里**，继续走回复路由
+  `refineReply`（346）——用户点名的精修和后台自动整改分开记账。
+- **兼容口径（复核更正，以代码注释为准）**：未配润色路由**不是**「与改前逐字节
+  一致」——A4 之前这两处分别走手动 refine（0.65）与一次批量 draft；回退保证的
+  是端点/密钥/模型/提示词同源、行为不断，逐字节不变的只有手动 refine 路径本身。
+- **缓存**：`effectivePolishModel` 进 draftAndRank 的 params 分量
+  （jev_client.dart:495-504）——换润色模型即作废旧缓存（与复查模型同理）；
+  ReplyCacheKey 仍为十四分量，润色模型打包在 params 子分量内（§4 口径不变）。
+- **诚实边界**：设置页（app/lib/main.dart:187 的 SettingsPage）尚未露出润色
+  三字段，默认空 → 全部回退回复路由（行为＝「同一条路、温度收着些的重写」）；
+  UI 接线属后续工作流。
+- 测试：`jev_config_test.dart`（三字段回退推导、往返无损、缺键默认、与复查路由
+  互不接力）；`polish_route_test.dart`（HTTP 层假服务器：请求真打到
+  polishEndpoint、温度 0.4、密钥/模型用润色侧；未配置时按回退落回复路由）。
+
+## 9. 隐私与风险立场（不因重写而改变）
 
 - 聊天文字发送到用户自配的模型服务商；截图仅本机 OCR；历史默认关闭、仅存本地。
+- 「身份不明确宁可拒绝，不猜测」已落为机制：来源不可靠（低置信）的快照不自动
+  分析、等用户确认（G3 门控，§8.2）；不可信数据进不了 system 段（G6 边界，§8.5）。
 - 无障碍读屏 + 回填在部分聊天 App 条款下有封号风险；桌面端走官网分发。
 - 起草前 SafetyGate 预检永不关闭：违法/自伤/未成年×亲密/安全词/硬边界直接阻断，黄灯与换说法边界降为谨慎提示。

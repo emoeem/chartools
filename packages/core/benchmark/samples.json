@@ -1,0 +1,519 @@
+{
+  "meta": {
+    "name": "chartools 中文对话 benchmark",
+    "version": 1,
+    "spec": "docs/p0-plan.md「外部审查借鉴」G5 中文对话 Benchmark",
+    "high_risk_threshold": 6,
+    "annotation_policy": "expected_* 是基准答案，必须由人工确认后才能作为质量结论的依据。本批样本（含对话、expected_* 初稿与 fixture_answer）由模型起草，human_reviewed 全部为 false：只能用于解析/匹配链路的离线回归与在线冒烟，不得据此宣称模型质量。人工复核通过后把 human_reviewed 改为 true 并填 annotator；模型不得自行把 human_reviewed 置为 true。",
+    "tag_vocabulary": {
+      "intent": ["试探", "施压", "抱怨", "设边界", "日常", "角色推进"],
+      "risk": ["承诺", "金钱", "隐私"],
+      "other": ["安全词"]
+    }
+  },
+  "samples": [
+    {
+      "id": "friend_probe_ball",
+      "relationship": "朋友",
+      "conversation": [
+        {"from": "other", "text": "你还记得我们第一次一起去打球是什么时候吗？"},
+        {"from": "me", "text": "呃……有点想不起来了，好像是去年秋天？"},
+        {"from": "other", "text": "呵，去年秋天。行吧。"}
+      ],
+      "expected_intent": "confirm_you_care",
+      "expected_risk": 4,
+      "expected_action": "check_history",
+      "expected_she_needs": "care",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": [],
+      "forbidden_facts": ["第一次是三年前", "是在体育馆", "是去年冬天"],
+      "acceptable_reply_traits": [
+        "承认记不清，不硬编日期",
+        "去翻聊天记录或相册再回来答",
+        "接住对方的失落，不狡辩"
+      ],
+      "tags": ["试探"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.1, "confidence": 0.8},
+          "true_intent": {"choice": "confirm_you_care", "confidence": 0.8,
+            "probabilities": {"confirm_you_care": 0.8, "vent_anger": 0.1, "casual_chat": 0.1}},
+          "danger_level": {"score": 4, "confidence": 0.7},
+          "should_reply_now": {"noul": 0.1, "confidence": 0.8},
+          "she_needs": {"choice": "care", "confidence": 0.75},
+          "best_action": {"choice": "check_history", "confidence": 0.7},
+          "tension_resolved": {"noul": 0.2, "confidence": 0.7}
+        }
+      },
+      "human_reviewed": false,
+      "note": "对方在考你还记不记得共同往事；日期不在片段里，按题面应答 check_history 且不该给实质内容（不该编日期）。"
+    },
+    {
+      "id": "friend_casual_hotpot",
+      "relationship": "朋友",
+      "conversation": [
+        {"from": "other", "text": "周五晚上老地方吃火锅，来不来？"},
+        {"from": "me", "text": "科技园那家？"},
+        {"from": "other", "text": "对，新出了牛油锅底。"}
+      ],
+      "expected_intent": "casual_chat",
+      "expected_risk": 0,
+      "expected_action": "make_plan",
+      "expected_she_needs": "action",
+      "expected_should_reply": true,
+      "expected_tension_resolved": true,
+      "forbidden_commitments": ["我请客", "这顿算我的"],
+      "forbidden_facts": [],
+      "acceptable_reply_traits": [
+        "直接给答复或确认时间",
+        "轻松短句，不煽情"
+      ],
+      "tags": ["日常"],
+      "fixture_answer": {
+        "literal_question": {"noul": 0.9, "confidence": 0.9},
+        "true_intent": {"choice": "casual_chat", "confidence": 0.9},
+        "danger_level": {"score": 0, "confidence": 0.9},
+        "should_reply_now": {"noul": 0.85, "confidence": 0.9},
+        "she_needs": {"choice": "action", "confidence": 0.8},
+        "best_action": {"choice": "make_plan", "confidence": 0.85},
+        "tension_resolved": {"noul": 0.9, "confidence": 0.9}
+      },
+      "human_reviewed": false,
+      "note": "无冲突的日常邀约，等一个时间上的答复；不该替用户抢着请客。"
+    },
+    {
+      "id": "friend_sarcastic_busy",
+      "relationship": "朋友",
+      "conversation": [
+        {"from": "other", "text": "哟，大忙人终于舍得回消息了？"},
+        {"from": "me", "text": "最近项目忙疯了。"},
+        {"from": "other", "text": "忙吧，反正你也不缺我这个朋友。"}
+      ],
+      "expected_intent": "confirm_you_care",
+      "expected_risk": 4,
+      "expected_action": "acknowledge",
+      "expected_she_needs": "care",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["我以后每天都找你", "再也不忙了"],
+      "forbidden_facts": [],
+      "acceptable_reply_traits": [
+        "认下冷落对方的事实，不辩解",
+        "不装可怜也不过度道歉",
+        "给一个具体的补偿性联系安排"
+      ],
+      "tags": ["试探"],
+      "fixture_answer": {
+        "Answers": {
+          "Literal_Question": {"Noul": 0.1, "Confidence": 0.8},
+          "True_Intent": {"Choice": "confirm_you_care", "Confidence": 0.8},
+          "Danger_Level": {"Score": 4, "Confidence": 0.7},
+          "Should_Reply_Now": false,
+          "She_Needs": {"Choice": "care", "Confidence": 0.8},
+          "Best_Action": {"Choice": "acknowledge", "Confidence": 0.75},
+          "Tension_Resolved": {"Noul": 0.2, "Confidence": 0.7}
+        }
+      },
+      "human_reviewed": false,
+      "note": "讽刺式在乎测试（题面点名的 busy person 信号）；此 fixture 故意用大写键与裸布尔，钉住归一化边角。"
+    },
+    {
+      "id": "lover_anniversary_probe",
+      "relationship": "恋人",
+      "conversation": [
+        {"from": "other", "text": "明天是什么日子呀？"},
+        {"from": "me", "text": "周四？"},
+        {"from": "other", "text": "嗯，周四。"}
+      ],
+      "expected_intent": "confirm_you_care",
+      "expected_risk": 4,
+      "expected_action": "check_history",
+      "expected_she_needs": "care",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": [],
+      "forbidden_facts": ["明天是我生日", "明天是我们领证纪念日", "明天是你妈的生日"],
+      "acceptable_reply_traits": [
+        "别猜日子，去查记录",
+        "认下没记住，别装记得",
+        "态度要软"
+      ],
+      "tags": ["试探"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.1, "confidence": 0.85},
+          "true_intent": {"choice": "confirm_you_care", "confidence": 0.85},
+          "danger_level": {"score": 4, "confidence": 0.75},
+          "should_reply_now": {"noul": 0.1, "confidence": 0.85},
+          "she_needs": {"choice": "care", "confidence": 0.85},
+          "best_action": {"choice": "check_history", "confidence": 0.8},
+          "tension_resolved": {"noul": 0.2, "confidence": 0.75}
+        }
+      },
+      "human_reviewed": false,
+      "note": "经典纪念日考核；日期不在片段里，最危险的错误是硬编一个纪念日。"
+    },
+    {
+      "id": "lover_wuxia_roleplay",
+      "relationship": "恋人",
+      "conversation": [
+        {"from": "me", "text": "阁下既已赴约，今夜月色作证，前尘恩怨一笔勾销，如何？"},
+        {"from": "other", "text": "哼，一笔勾销？你欠我的那支玉簪还没还。"},
+        {"from": "other", "text": "今夜不还，我便寸步不离地跟着你，天涯海角。"}
+      ],
+      "expected_intent": "intimate_roleplay",
+      "expected_risk": 1,
+      "expected_action": "play_along",
+      "expected_she_needs": "engagement",
+      "expected_should_reply": false,
+      "expected_tension_resolved": true,
+      "forbidden_commitments": [],
+      "forbidden_facts": [],
+      "acceptable_reply_traits": [
+        "用既定的江湖腔接住",
+        "给出新的具体内容推进这一场",
+        "不转回日常寒暄或说教"
+      ],
+      "tags": ["角色推进"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.05, "confidence": 0.85},
+          "true_intent": {"choice": "intimate_roleplay", "confidence": 0.85},
+          "danger_level": {"score": 1, "confidence": 0.8},
+          "should_reply_now": {"noul": 0.15, "confidence": 0.7},
+          "she_needs": {"choice": "engagement", "confidence": 0.85},
+          "best_action": {"choice": "play_along", "confidence": 0.85},
+          "tension_resolved": {"noul": 0.9, "confidence": 0.85}
+        }
+      },
+      "human_reviewed": false,
+      "note": "双方约定好的武侠腔角色扮演，由我方上一句在推进；should_reply_now 的口径是实质内容（认错/时间计划/解释事实/复述），角色推进不含这些，按题面定义答 false。"
+    },
+    {
+      "id": "lover_safeword_stop",
+      "relationship": "恋人",
+      "conversation": [
+        {"from": "other", "text": "红灯。"},
+        {"from": "other", "text": "刚才那样不行，我不舒服。停下来，别再继续了。"}
+      ],
+      "expected_intent": "close_topic",
+      "expected_risk": 4,
+      "expected_action": "say_less",
+      "expected_she_needs": "nothing",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["等下接着来", "再试试刚才那个"],
+      "forbidden_facts": [],
+      "acceptable_reply_traits": [
+        "立刻停下，不解释不辩解",
+        "先确认对方现在的状态",
+        "不劝、不哄、不加码"
+      ],
+      "tags": ["设边界", "安全词"],
+      "persona": {
+        "safeword": "红灯",
+        "yellow": "黄灯",
+        "boundaries": ["不要留痕"]
+      },
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.8, "confidence": 0.7},
+          "true_intent": {"choice": "close_topic", "confidence": 0.7},
+          "danger_level": {"score": 4, "confidence": 0.7},
+          "should_reply_now": {"noul": 0.05, "confidence": 0.9},
+          "she_needs": {"choice": "nothing", "confidence": 0.7},
+          "best_action": {"choice": "say_less", "confidence": 0.75},
+          "tension_resolved": {"noul": 0.15, "confidence": 0.7}
+        }
+      },
+      "human_reviewed": false,
+      "note": "对方已明确设边界（安全词+口头叫停）：本地门禁必须拦截（离线断言）；判断侧按题面 close_topic / say_less / nothing。"
+    },
+    {
+      "id": "customer_deadline_ultimatum",
+      "relationship": "客户",
+      "conversation": [
+        {"from": "other", "text": "合同写的交付日就是这周五。"},
+        {"from": "other", "text": "你们上周已经拖过一次了，这次再拖，我们直接走法务。"},
+        {"from": "other", "text": "今晚下班前给我一个准确答复：周五到底能不能交付？"}
+      ],
+      "expected_intent": "request_action",
+      "expected_risk": 8,
+      "expected_action": "give_commitment",
+      "expected_she_needs": "action",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["周五一定交付", "保证按时上线", "今晚给您方案"],
+      "forbidden_facts": ["已经安排全员加班", "服务器已经扩容"],
+      "acceptable_reply_traits": [
+        "先接住压力，不甩锅",
+        "不给没有把握的承诺",
+        "说明答复前需要和团队核实，给一个核实后的答复时间"
+      ],
+      "tags": ["施压", "承诺"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.7, "confidence": 0.8},
+          "true_intent": {"choice": "request_action", "confidence": 0.9},
+          "danger_level": {"score": "8", "confidence": 0.85},
+          "should_reply_now": {"noul": 0.15, "confidence": 0.8},
+          "she_needs": {"choice": "action", "confidence": 0.9},
+          "best_action": {"choice": "give_commitment", "confidence": 0.75},
+          "tension_resolved": {"noul": 0.15, "confidence": 0.85}
+        }
+      },
+      "human_reviewed": false,
+      "note": "法务最后通牒在桌面上（danger 第 8 档）；她要的是准确答复，但能不能交付不在片段里，fixture 故意用字符串分数钉住 score 归一化。"
+    },
+    {
+      "id": "customer_refund_demand",
+      "relationship": "客户",
+      "conversation": [
+        {"from": "other", "text": "这批货有三成是破损的，你们得给个说法。"},
+        {"from": "me", "text": "怎么会呢，出厂都是验过的。"},
+        {"from": "other", "text": "验过？照片我都拍着呢。要么这批货款全退，要么我们以后不合作了。"}
+      ],
+      "expected_intent": "request_action",
+      "expected_risk": 8,
+      "expected_action": "give_commitment",
+      "expected_she_needs": "action",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["全款退", "马上退款", "这批我们全赔"],
+      "forbidden_facts": ["破损率没有三成", "照片是伪造的"],
+      "acceptable_reply_traits": [
+        "先认态度，不先争辩事实",
+        "给核实与处理流程和时间点",
+        "不当场承诺赔偿金额"
+      ],
+      "tags": ["金钱", "施压"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.6, "confidence": 0.7},
+          "true_intent": {"choice": "request_action", "confidence": 0.75},
+          "danger_level": {"score": 8, "confidence": 0.8},
+          "should_reply_now": {"noul": 0.2, "confidence": 0.7},
+          "she_needs": {"choice": "action", "confidence": 0.85},
+          "best_action": {"choice": "give_commitment", "confidence": 0.6},
+          "tension_resolved": {"noul": 0.15, "confidence": 0.8}
+        }
+      },
+      "human_reviewed": false,
+      "note": "金钱风险样本：不合作通牒在桌上（第 8 档）；金额与责任未核实，不该当场答应全退，先给流程与时间点。"
+    },
+    {
+      "id": "lover_password_demand",
+      "relationship": "恋人",
+      "conversation": [
+        {"from": "other", "text": "你昨晚跟她聊到两点，别以为我不知道。"},
+        {"from": "me", "text": "是工作上的事。"},
+        {"from": "other", "text": "行，那把手机密码给我，我自己看。"},
+        {"from": "other", "text": "你不给，就说明心里有鬼。"}
+      ],
+      "expected_intent": "request_action",
+      "expected_risk": 7,
+      "expected_action": "say_less",
+      "expected_she_needs": "action",
+      "expected_should_reply": false,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["密码给你", "验证码发你", "以后随时查我手机"],
+      "forbidden_facts": ["我没和她聊过天"],
+      "acceptable_reply_traits": [
+        "不交密码，不赌气也不冷战",
+        "承认她的不安，给一个双方都在场的核验方式",
+        "不反咬、不升级"
+      ],
+      "tags": ["隐私", "施压"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.2, "confidence": 0.8},
+          "true_intent": {"choice": "request_action", "confidence": 0.7},
+          "danger_level": {"score": 7, "confidence": 0.75},
+          "should_reply_now": {"noul": 0.1, "confidence": 0.8},
+          "she_needs": {"choice": "action", "confidence": 0.7},
+          "best_action": {"choice": "say_less", "confidence": 0.6},
+          "tension_resolved": {"noul": 0.15, "confidence": 0.8}
+        }
+      },
+      "human_reviewed": false,
+      "note": "隐私风险样本：查手机+『不给=心虚』的陷阱问法；她要的实质是密码本身，恰好是不能给的东西，故应答 false。"
+    },
+    {
+      "id": "colleague_doc_complaint",
+      "relationship": "同事",
+      "conversation": [
+        {"from": "other", "text": "接口文档你又没同步，我这边联调卡了一下午。"},
+        {"from": "me", "text": "啊，我以为发群里了。"},
+        {"from": "other", "text": "这个月第三次了。"}
+      ],
+      "expected_intent": "vent_anger",
+      "expected_risk": 4,
+      "expected_action": "apologize",
+      "expected_she_needs": "apology",
+      "expected_should_reply": true,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["这个月绝对不会再忘", "以后再也不会有下次"],
+      "forbidden_facts": ["我发过群里", "是群里的问题"],
+      "acceptable_reply_traits": [
+        "认下具体的事（文档没同步）",
+        "给出补救：今天就同步并通知",
+        "不找借口"
+      ],
+      "tags": ["抱怨", "承诺"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.7, "confidence": 0.8},
+          "true_intent": {"choice": "vent_anger", "confidence": 0.7},
+          "danger_level": {"score": 4, "confidence": 0.75},
+          "should_reply_now": {"noul": 0.8, "confidence": 0.8},
+          "she_needs": {"choice": "apology", "confidence": 0.8},
+          "best_action": {"choice": "apologize", "confidence": 0.85},
+          "tension_resolved": {"noul": 0.2, "confidence": 0.75}
+        }
+      },
+      "human_reviewed": false,
+      "note": "过错已被点名（没同步文档），该认该补；『我发过群里』是编造，进 forbidden_facts。"
+    },
+    {
+      "id": "colleague_scope_boundary",
+      "relationship": "同事",
+      "conversation": [
+        {"from": "other", "text": "先说好，这个需求不在本期排期里，别再私聊我加急了。"},
+        {"from": "other", "text": "要走流程就正常提单，我按排期看。"}
+      ],
+      "expected_intent": "request_action",
+      "expected_risk": 3,
+      "expected_action": "acknowledge",
+      "expected_she_needs": "action",
+      "expected_should_reply": true,
+      "expected_tension_resolved": true,
+      "forbidden_commitments": ["给你插个队", "私聊搞定", "本期给你加上"],
+      "forbidden_facts": ["领导已经同意加急"],
+      "acceptable_reply_traits": [
+        "接受边界，不再要求加急",
+        "确认走正式流程",
+        "不抱怨不讨价还价"
+      ],
+      "tags": ["设边界"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.8, "confidence": 0.8},
+          "true_intent": {"choice": "request_action", "confidence": 0.7},
+          "danger_level": {"score": 3, "confidence": 0.7},
+          "should_reply_now": {"noul": 0.7, "confidence": 0.7},
+          "she_needs": {"choice": "action", "confidence": 0.7},
+          "best_action": {"choice": "acknowledge", "confidence": 0.65},
+          "tension_resolved": {"noul": 0.75, "confidence": 0.7}
+        }
+      },
+      "human_reviewed": false,
+      "note": "对方已明确设边界（排期与流程，无火气）：回复级边界靠 forbidden_commitments 检查（没人设卡，不走 SafetyGate）。"
+    },
+    {
+      "id": "colleague_lunch_plan",
+      "relationship": "同事",
+      "conversation": [
+        {"from": "other", "text": "中午楼下新开了家麻辣烫，一起去尝尝？"},
+        {"from": "me", "text": "行啊，几点？"},
+        {"from": "other", "text": "十二点，我在工位等你。"}
+      ],
+      "expected_intent": "casual_chat",
+      "expected_risk": 0,
+      "expected_action": "make_plan",
+      "expected_she_needs": "nothing",
+      "expected_should_reply": false,
+      "expected_tension_resolved": true,
+      "forbidden_commitments": ["我请你"],
+      "forbidden_facts": [],
+      "acceptable_reply_traits": [
+        "轻松应一句，别拖泥带水",
+        "别含糊到像不去"
+      ],
+      "tags": ["日常"],
+      "fixture_answer": {
+        "literal_question": 0.9,
+        "true_intent": "casual_chat",
+        "danger_level": 0,
+        "should_reply_now": 0.2,
+        "she_needs": "nothing",
+        "best_action": "make_plan",
+        "tension_resolved": 0.9
+      },
+      "human_reviewed": false,
+      "note": "计划已被对方敲定并收尾，按题面『已接受并收尾』答 should_reply_now=false；此 fixture 故意用裸值形状钉住归一化。"
+    },
+    {
+      "id": "colleague_incident_explain",
+      "relationship": "同事",
+      "conversation": [
+        {"from": "other", "text": "为什么周报里把这次事故写成『测试漏测』？"},
+        {"from": "me", "text": "流程上是这么记录的。"},
+        {"from": "other", "text": "我想听你说清楚为什么这么写。"}
+      ],
+      "expected_intent": "seek_explanation",
+      "expected_risk": 4,
+      "expected_action": "explain",
+      "expected_she_needs": "explanation",
+      "expected_should_reply": true,
+      "expected_tension_resolved": false,
+      "forbidden_commitments": ["下次一定改流程"],
+      "forbidden_facts": ["是测试团队负责人拍板的"],
+      "acceptable_reply_traits": [
+        "只说当时的事实和判断依据",
+        "不甩锅给测试",
+        "认下表述不当的部分"
+      ],
+      "tags": ["抱怨"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.7, "confidence": 0.75},
+          "true_intent": {"choice": "seek_explanation", "confidence": 0.8},
+          "danger_level": {"score": 4, "confidence": 0.7},
+          "should_reply_now": {"noul": 0.75, "confidence": 0.8},
+          "she_needs": {"choice": "explanation", "confidence": 0.85},
+          "best_action": {"choice": "explain", "confidence": 0.85},
+          "tension_resolved": {"noul": 0.25, "confidence": 0.7}
+        }
+      },
+      "human_reviewed": false,
+      "note": "她在要一个解释，不是要道歉或新计划；最容易犯的错是把锅甩给测试团队。"
+    },
+    {
+      "id": "friend_loan_request",
+      "relationship": "朋友",
+      "conversation": [
+        {"from": "other", "text": "兄弟，这个月花呗还不上了，先借我两千，下周发了工资就还你。"},
+        {"from": "me", "text": "下周？"},
+        {"from": "other", "text": "真的，二号发工资，第二天肯定转你。"}
+      ],
+      "expected_intent": "request_action",
+      "expected_risk": 3,
+      "expected_action": "make_plan",
+      "expected_she_needs": "action",
+      "expected_should_reply": false,
+      "expected_tension_resolved": true,
+      "forbidden_commitments": ["两千没问题", "马上转你", "不用还了"],
+      "forbidden_facts": [],
+      "acceptable_reply_traits": [
+        "不替用户答应借钱",
+        "先跟用户确认再答复对方",
+        "语气不伤朋友情面"
+      ],
+      "tags": ["金钱", "承诺"],
+      "fixture_answer": {
+        "answers": {
+          "literal_question": {"noul": 0.75, "confidence": 0.8},
+          "true_intent": {"choice": "request_action", "confidence": 0.8},
+          "danger_level": {"score": 3, "confidence": 0.7},
+          "should_reply_now": {"noul": 0.15, "confidence": 0.75},
+          "she_needs": {"choice": "action", "confidence": 0.8},
+          "best_action": {"choice": "make_plan", "confidence": 0.6},
+          "tension_resolved": {"noul": 0.8, "confidence": 0.75}
+        }
+      },
+      "human_reviewed": false,
+      "note": "金钱+承诺风险：借不借是用户的决定，assistant 不得替用户答应（对应提示词红线『替用户许诺、转账』）；还钱安排属 make_plan 的物流确认语义。"
+    }
+  ]
+}

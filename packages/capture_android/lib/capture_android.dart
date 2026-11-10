@@ -29,20 +29,23 @@ class OverlayAction {
 /// 「回填」经 MethodChannel 交给 InputFiller —— 只填输入框，从不发送。服务与
 /// Flutter 引擎是两个组件，通道由谁后到谁挂接（见 CaptureService.attachEngineChannels）。
 class CaptureAndroid {
-  static const MethodChannel _control = MethodChannel('capture_android/control');
+  static const MethodChannel _control =
+      MethodChannel('capture_android/control');
 
   /// 插件自身通道：悬浮窗权限的查/跳（canDrawOverlays / openOverlaySettings）。
   /// 不走 _control——那条通道由 CaptureService 注册，服务未启用时整条不存在。
   static const MethodChannel _plugin = MethodChannel('capture_android');
 
-  static const EventChannel _snapshots = EventChannel('capture_android/snapshots');
+  static const EventChannel _snapshots =
+      EventChannel('capture_android/snapshots');
 
   /// 快照与悬浮窗动作共用一条原始事件流。原生侧 eventSink 是单字段（见
   /// CaptureService.streamHandler）：两次 receiveBroadcastStream() 会互相顶掉
   /// sink，所以这里只订阅一次、按事件里的 `type` 分流。最后一个监听者取消时
   /// 解绑原始订阅（onListen/onCancel），服务端 eventSink 跟着归零。
   late final StreamController<Object?> _events =
-      StreamController<Object?>.broadcast(onListen: _attachRaw, onCancel: _detachRaw);
+      StreamController<Object?>.broadcast(
+          onListen: _attachRaw, onCancel: _detachRaw);
 
   StreamSubscription<Object?>? _rawSub;
 
@@ -159,8 +162,7 @@ class CaptureAndroid {
   /// 候选卡折回胶囊（control 通道 collapse）：只收卡不撤窗，胶囊留在屏上。
   /// 与 [hideSuggestions] 相对；「填入」成功后调这个，让出输入框和键盘给用户
   /// 检查/发送，同时悬浮球仍可随时再点开。
-  Future<void> collapseSuggestions() =>
-      _control.invokeMethod<void>('collapse');
+  Future<void> collapseSuggestions() => _control.invokeMethod<void>('collapse');
 
   /// 把建议文本填进当前会话的输入框（只填不发）。返回 false 表示没找到
   /// 可写的输入框，调用方应退回剪贴板复制。
@@ -179,18 +181,11 @@ class CaptureAndroid {
     return _snapshotFromMap(jsonDecode(raw) as Map<String, dynamic>);
   }
 
-  static ChatSnapshot _snapshotFromMap(Map<String, dynamic> map) {
-    final messages = (map['messages'] as List<dynamic>? ?? const [])
-        .whereType<Map<String, dynamic>>()
-        .map(Msg.fromJson)
-        .toList();
-    return ChatSnapshot(
-      title: map['title'] as String?,
-      note: map['note'] as String?,
-      provenance: map['provenance'] as String? ?? Provenance.a11y,
-      messages: messages,
-    );
-  }
+  /// 快照 JSON → [ChatSnapshot] 的解析收敛到 core 的 [ChatSnapshot.fromJson]
+  /// （G3 通道契约的 Dart 侧：confidence/uncertain 与旧字段在同一处解析，
+  /// 旧 JSON 无新字段时缺省 1.0/空表，行为不变）。
+  static ChatSnapshot _snapshotFromMap(Map<String, dynamic> map) =>
+      ChatSnapshot.fromJson(map);
 
   /// 仅供测试：直接走一次解析。生产代码不要调用。
   static ChatSnapshot? snapshotForTest(Object? event) =>

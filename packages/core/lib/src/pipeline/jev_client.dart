@@ -93,8 +93,8 @@ class JevClient {
   /// register (see [ReplyPrompt.judgmentBlock]) and is not itself the ranking.
   ///
   /// [aiFlavorLintEnabled] 是 A2 的中文 AI 腔 linter 开关（默认开）：终榜之后
-  /// 逐条检测，命中特征 ≥ [AiFlavorLinter.rewriteThreshold] 的候选自动走
-  /// [refineReply] 重写（见 [_applyFlavorLint]）。经参数传入而不是读配置——
+  /// 逐条检测，命中特征 ≥ [AiFlavorLinter.rewriteThreshold] 的候选自动走润色
+  /// 路由重写（见 [_applyFlavorLint]）。经参数传入而不是读配置——
   /// 配置字段归 app 层与 JevConfig 的所有方接线，core 不反依赖 app。
   Future<List<RankedReply>> draftAndRank(
     ChatSnapshot snapshot,
@@ -192,12 +192,12 @@ class JevClient {
       );
 
   /// S1 证据复查。默认关（[JevConfig.reviewEnabled]）：开着时让模型逐条核验排序
-  /// 结果，把站不住的那几条重写一次（见 [ReplyReview]）。
+  /// 结果，把站不住的那几条走润色路由重写一次（见 [ReplyReview]）。
   ///
   /// 三道保险，任何一道不满足就原样返回 [ranked]：
   ///  1. 复查失败或不可解析 → [ReplyClient.review] 返回 null；
   ///  2. 复查判定全部保留 → 不动，不为「还能更好」白花一次调用；
-  ///  3. 重写调用失败或条数对不上 → 放弃替换。
+  ///  3. 重写调用失败或重写结果为空 → 放弃替换。
   /// 也就是说复查只可能改好，不可能改坏，更不可能让候选变少。
   Future<List<RankedReply>> _applyReview(
     ChatSnapshot snapshot,
@@ -228,32 +228,33 @@ class JevClient {
 
     final rejected = review.rejected;
     if (rejected.isEmpty) return ranked;
-    // 把「被判定为」的理由一并塞进 avoid：重写要避开的不只是那几条原文，
-    // 还有它们错在哪。这是复查相对排序的全部增量。
-    List<RankedReply>? replacements;
-    try {
-      replacements = await _replyClient.draft(
-        snapshot,
-        relationship,
-        ctx: ctx,
-        count: rejected.length,
-        avoid: [
-          ...texts,
-          for (final v in rejected) '上一条被判定为：${v.reason}',
-        ],
-        judgment: judgment,
-        style: _config.style,
-        scope: scope,
-      );
-    } on RequestCancelledException {
-      rethrow;
-    } catch (_) {
-      return ranked;
-    }
-    // draft 返回的是 Future<List<...>>（非空），走到这里 replacements 必非空，
-    // 只需再对条数——重写不齐整就放弃整轮重写，保持排序结果。
-    if (replacements.length != rejected.length) {
-      return ranked;
+    // 重写走润色路由（A4）：复查已经给了理由，逐条把驳回的那条改写到位。
+    // 旧版是一次批量 draft（avoid 里塞全部候选与驳回理由）；换成单条重写后，
+    // 旧契约里「条数对不上 → 放弃替换」的分支在结构上消失——任何一条失败
+    // 或为空就整轮放弃替换，「复查只可能改好」的语义原样保留。
+    // 「被判定为」的理由进改写指令：重写要修的不只是那条原文，还有它错在哪。
+    final replacements = <RankedReply>[];
+    for (final v in rejected) {
+      RankedReply? rewritten;
+      try {
+        rewritten = await _replyClient.rewriteOnPolishRoute(
+          snapshot,
+          relationship,
+          texts[v.index - 1],
+          '复查判定这条回复站不住：${v.reason}。'
+              '按这个问题把它改写到位，保持原意、称呼与事实，'
+              '不要复读最近对话里已经说过的内容。',
+          ctx: ctx,
+          style: _config.style,
+          scope: scope,
+        );
+      } on RequestCancelledException {
+        rethrow;
+      } catch (_) {
+        return ranked;
+      }
+      if (rewritten == null || rewritten.text.trim().isEmpty) return ranked;
+      replacements.add(rewritten);
     }
 
     final atIndex = <int, RankedReply>{};
@@ -278,8 +279,10 @@ class JevClient {
   }
 
   /// A2 中文 AI 腔本地 linter 的挂接点：终榜（排序 + 证据复查）之后逐条检测，
-  /// 命中特征 ≥ [AiFlavorLinter.rewriteThreshold] 的候选走 [refineReply] 重写，
-  /// 指令 = 命中规则的人话描述（[AiFlavorLinter.refineInstruction]）。
+  /// 命中特征 ≥ [AiFlavorLinter.rewriteThreshold] 的候选走润色路由重写
+  /// （[ReplyClient.rewriteOnPolishRoute]，A4），指令 = 命中规则的人话描述
+  /// （[AiFlavorLinter.refineInstruction]）。手动 refine（候选卡按钮）不经
+  /// 这里，继续走回复路由的 [refineReply]。
   ///
   /// 三条与 [_applyReview] 同款的保险：
   ///  1. 单一特征不动手——一次误伤的 refine 是真金白银和延迟，两个独立特征
@@ -306,12 +309,13 @@ class JevClient {
       }
       RankedReply? rewritten;
       try {
-        rewritten = await refineReply(
+        rewritten = await _replyClient.rewriteOnPolishRoute(
           snapshot,
           relationship,
-          ctx,
           ranked[i].text,
           AiFlavorLinter.refineInstruction(hit),
+          ctx: ctx,
+          style: _config.style,
           scope: scope,
         );
       } on RequestCancelledException {
@@ -335,6 +339,10 @@ class JevClient {
     return out;
   }
 
+  /// 候选卡上的手动改写（p0-plan ④ 的 refine UI）：走回复路由的
+  /// [ReplyClient.refine]。与自动重写（linter 命中、复查驳回）走润色路由的
+  /// [ReplyClient.rewriteOnPolishRoute] 是两条路——用户点名的精修和后台的
+  /// 自动整改分开。
   Future<RankedReply?> refineReply(
     ChatSnapshot snapshot,
     String relationship,
@@ -481,7 +489,9 @@ class JevClient {
     return [for (final p in parts) p ?? 'null'].join('|');
   }
 
-  /// 采样与开关打包成一个分量：语言 / 长度 / 温度 / 两个惩罚 / 证据复查 + 模型。
+  /// 采样与开关打包成一个分量：语言 / 长度 / 温度 / 两个惩罚 / 证据复查 + 模型
+  /// / 润色模型。润色模型进键与复查同理——终榜后的自动重写（linter 命中、
+  /// 复查驳回）走润色路由，换了润色模型，缓存里的改写结果就得作废。
   String _replyParams() => [
         _config.replyLanguage,
         _config.replyLength,
@@ -490,6 +500,7 @@ class JevClient {
         _config.replyPresencePenalty.toString(),
         _config.reviewEnabled.toString(),
         _config.effectiveReviewModel(),
+        _config.effectivePolishModel(),
       ].join('|');
 
   /// 判断侧读的上下文：background + history + skills。风格样本与 L1 技能目录是

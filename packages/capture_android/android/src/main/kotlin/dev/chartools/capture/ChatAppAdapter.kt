@@ -8,6 +8,39 @@ import dev.chartools.capture.ChatSnapshot
 import dev.chartools.capture.Msg
 
 /**
+ * 适配器能力描述（p0-plan G2）：主页按 App 展示「能做什么」，而不是笼统的
+ * 「已适配」；[verifiedAppVersion] 为 null 时展示「兼容性未知」。
+ *
+ * 字段语义（CaptureService.getCapabilities 按同名键透传给 Dart）：
+ * - [canReadMessages]：无障碍节点树能直接读到消息正文（provenance=a11y 的主
+ *   路径）。false 的两种成因：App 自己画字（飞书），或根本不给树（微信——它
+ *   没有适配器，能力表在 CaptureService 侧单列）。
+ * - [canIdentifySender]：能给每条消息标出可信归属（side 级「我方/对方」即算；
+ *   具名发言人目前任何适配器都做不到）。只在分边规则有真机取样记录时填 true
+ *   ——未验证的规则宁可 false：G3 的原则是身份不明确宁可拒绝，不猜测。
+ * - [canReadHistory]：能读到当前屏之外更早的消息。无障碍路径一律 false
+ *   （Model.ChatSnapshot.history 只有注入层/桌面历史源给得出）。
+ * - [allowsOcrFallback]：读不到正文时允许截屏 + OCR 兜底。必须与
+ *   [ChatAppAdapter.allowScreenshot] 一致——后者是运行时唯一闸门（服务直接
+ *   读它），能力表只是它的展示投影；一致性由 ChatAppAdapterRulesContractTest
+ *   钳住。
+ * - [verifiedAppVersion]：适配器头注释里记录的、真机取样过的 App 版本号。
+ *   没有记录、或 App 升级后未复验，一律 null（「未验证的新版本显示兼容性
+ *   未知」）。本仓库的取样记录随适配器注释自旧项目移植而来；各适配器升级后
+ *   要在真机上复验什么，见 ChatAppAdapterRulesContractTest 的应用升级 @Ignore 项。
+ *
+ * p0-plan G2 报告字段里的 canFillInput 未纳入：[ChatAppAdapter.findInput] 返回
+ * null 与否就是它，#5 若要在主页展示再加。
+ */
+data class AdapterCapabilities(
+    val canReadMessages: Boolean,
+    val canIdentifySender: Boolean,
+    val canReadHistory: Boolean,
+    val allowsOcrFallback: Boolean,
+    val verifiedAppVersion: String? = null,
+)
+
+/**
  * Per-app capture rules. An adapter turns one messaging app's open chat window
  * into a neutral [ChatSnapshot]; everything downstream (Jev judgment, overlay,
  * fill) is app-agnostic.
@@ -37,6 +70,12 @@ interface ChatAppAdapter {
 
     /** 截屏 / OCR 兜底是否允许。WhatsApp 永不截屏（含手动「截屏识别一次」）。 */
     val allowScreenshot: Boolean get() = true
+
+    /**
+     * 能力描述（G2，字段语义见 [AdapterCapabilities]）。刻意不给默认值：每个
+     * 适配器必须显式按真机取样记录填写，漏填是编译错，比填错默认值好。
+     */
+    val capabilities: AdapterCapabilities
 
     fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot?
 }
@@ -124,6 +163,16 @@ internal fun findTitleInActionBar(
 class QQAdapter : ChatAppAdapter {
     override val pkg = "com.tencent.mobileqq"
     override val displayName = "QQ"
+
+    // G2 能力：id/mjn 直读正文；头像列几何分边（side 级，昵称 id/mjq 被规则刻意
+    // 排除）。真机取样记录见类注释（QQ 9.3.50 / Xiaomi 14）。
+    override val capabilities = AdapterCapabilities(
+        canReadMessages = true,
+        canIdentifySender = true,
+        canReadHistory = false,
+        allowsOcrFallback = true,
+        verifiedAppVersion = "9.3.50",
+    )
 
     override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
         root.findAccessibilityNodeInfosByViewId("com.tencent.mobileqq:id/input").firstOrNull()
@@ -219,6 +268,16 @@ class QQAdapter : ChatAppAdapter {
 class TimAdapter : ChatAppAdapter {
     override val pkg = "com.tencent.tim"
     override val displayName = "TIM"
+
+    // G2 能力：id/9u 直读正文；昵称行钉边 + 固定边几何分边。AndResGuard 的
+    // 混淆 id 随构建变（见 companion 注释），App 升级最易破——取样记录 4.1.0。
+    override val capabilities = AdapterCapabilities(
+        canReadMessages = true,
+        canIdentifySender = true,
+        canReadHistory = false,
+        allowsOcrFallback = true,
+        verifiedAppVersion = "4.1.0",
+    )
 
     override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
         root.findAccessibilityNodeInfosByViewId("com.tencent.tim:id/input").firstOrNull()
@@ -405,6 +464,18 @@ class FeishuAdapter : ChatAppAdapter {
     override val pkg = "com.ss.android.lark"
     override val displayName = "飞书"
 
+    // G2 能力：正文是画的、树里几乎读不到（见类注释）→ canReadMessages=false，
+    // 快照只带气泡矩形让服务按矩形 OCR（同微信的「OCR 能力」形状）。分边规则
+    //（回执条）类注释明说「Unverified on a real device」→ canIdentifySender=false；
+    // 取样记录（2026-09-21）没有版本号 → verifiedAppVersion=null。
+    override val capabilities = AdapterCapabilities(
+        canReadMessages = false,
+        canIdentifySender = false,
+        canReadHistory = false,
+        allowsOcrFallback = true,
+        verifiedAppVersion = null,
+    )
+
     override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
         root.findAccessibilityNodeInfosByViewId("com.ss.android.lark:id/kb_rich_text_content").firstOrNull()
 
@@ -529,6 +600,17 @@ private fun parseXDesc(desc: String): Pair<String, String>? {
 class XAdapter : ChatAppAdapter {
     override val pkg = "com.twitter.android"
     override val displayName = "X"
+
+    // G2 能力：contentDescription 直读整行（消息全在 desc 里，见类注释）；分边
+    // 只认发送者标签「你/You」，非中英文界面会把「我」的行读成对方（标签本地
+    // 化缺口，同 Telegram）。取样记录 12.25.2（中文系统语言）。
+    override val capabilities = AdapterCapabilities(
+        canReadMessages = true,
+        canIdentifySender = true,
+        canReadHistory = false,
+        allowsOcrFallback = true,
+        verifiedAppVersion = "12.25.2",
+    )
 
     // X 的 composer 是普通可编辑节点（无稳定 id），通用查找是唯一抓手。
     override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? = findEditableNode(root)

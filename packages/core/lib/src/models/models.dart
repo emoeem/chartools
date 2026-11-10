@@ -20,6 +20,16 @@ abstract final class Provenance {
 
   /// 桌面端（Windows）的采集来源，标记在快照上以便对拍与排错。
   static const desktop = 'desktop';
+
+  /// G3：来源层的中文展示名（采集页/桌面流的快照卡共用一份文案）。
+  /// 未知层号原样返回——将来新增层号时不至于在 UI 上显示空白。
+  static String labelOf(String provenance) => switch (provenance) {
+        a11y => '无障碍',
+        ocr => 'OCR',
+        inject => '注入',
+        desktop => '桌面',
+        _ => provenance,
+      };
 }
 
 /// One captured chat bubble. side is "me" (right) or "other" (left);
@@ -46,20 +56,20 @@ class Msg {
   bool get sideKnown => side == 'me' || side == 'other';
 
   Map<String, dynamic> toJson() => {
-    'side': side,
-    'text': text,
-    if (id != null) 'id': id,
-    if (at != 0) 'at': at,
-    if (sender != null) 'sender': sender,
-  };
+        'side': side,
+        'text': text,
+        if (id != null) 'id': id,
+        if (at != 0) 'at': at,
+        if (sender != null) 'sender': sender,
+      };
 
   factory Msg.fromJson(Map<String, dynamic> j) => Msg(
-    side: j['side'] as String? ?? '',
-    text: j['text'] as String? ?? '',
-    id: j['id'] as String?,
-    at: (j['at'] as num?)?.toInt() ?? 0,
-    sender: j['sender'] as String?,
-  );
+        side: j['side'] as String? ?? '',
+        text: j['text'] as String? ?? '',
+        id: j['id'] as String?,
+        at: (j['at'] as num?)?.toInt() ?? 0,
+        sender: j['sender'] as String?,
+      );
 }
 
 /// A snapshot of the currently-open conversation in whichever app is
@@ -78,6 +88,8 @@ class ChatSnapshot {
     this.note,
     this.provenance = Provenance.a11y,
     this.history = const [],
+    this.confidence = 1.0,
+    this.uncertain = const [],
   });
 
   final String? title;
@@ -88,6 +100,43 @@ class ChatSnapshot {
   /// 这一屏之外能看到的更早消息（注入层/桌面历史源给得出，无障碍给不出）。
   final List<Msg> history;
 
+  /// 通道契约（K/D 双方写死）：采集侧对这一屏「读得多可信」的自评，0.0..1.0。
+  /// 口径：provenance==a11y 基线 1.0、ocr 基线 0.6；每条 unknown-speaker 消息
+  /// -0.1；title 为空 -0.05；下限 0.2。旧 JSON 没有该字段时按缺省 1.0 处理
+  /// （「采集侧没说不可靠」= 自动分析照旧）。app 侧 G3 门控：不高于阈值 0.5
+  /// （≤，含 OCR 基线 0.6 恰扣一条 unknown-speaker 的精确 0.5）的快照不自动
+  /// 分析，等用户确认后才起轮。
+  final double confidence;
+
+  /// 通道契约：置信度扣分的原因标签（如「发言人未知」「标题为空」），可省略。
+  /// 展示在快照卡与门控提示上；旧 JSON 无字段时为空表。
+  final List<String> uncertain;
+
+  /// 通道契约的 Dart 侧解析：采集服务（CaptureService.snapshotJson）与
+  /// manualOcr 事件发来的快照 JSON → [ChatSnapshot]。
+  ///
+  /// 对旧字段与 capture_android 门面的既有解析逐字段同义（title/note/
+  /// provenance/messages），另加 G3 两个字段：`confidence`（数值，缺省 1.0，
+  /// 越界值夹回 0.0..1.0）与 `uncertain`（字符串数组，可省略，非字符串项
+  /// 丢弃）。旧 JSON 无新字段时解析结果与改前完全一致，不会破。通道没有
+  /// history 字段（桌面快照在 Dart 侧直接构造），这里也不读它。
+  factory ChatSnapshot.fromJson(Map<String, dynamic> j) => ChatSnapshot(
+        title: j['title'] as String?,
+        note: j['note'] as String?,
+        provenance: j['provenance'] as String? ?? Provenance.a11y,
+        messages: (j['messages'] as List<dynamic>? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(Msg.fromJson)
+            .toList(),
+        confidence: ((j['confidence'] as num?)?.toDouble() ?? 1.0)
+            .clamp(0.0, 1.0)
+            .toDouble(),
+        uncertain: [
+          for (final u in j['uncertain'] as List<dynamic>? ?? const <dynamic>[])
+            if (u is String) u,
+        ],
+      );
+
   String? get latestFrom => messages.isEmpty ? null : messages.last.side;
 
   /// A stable signature of the last few messages, to detect real changes.
@@ -96,10 +145,7 @@ class ChatSnapshot {
   /// 里，core 零依赖，用 skip 等价实现。
   String signature() {
     final from = messages.length > 6 ? messages.length - 6 : 0;
-    return messages
-        .skip(from)
-        .map((m) => '${m.side}:${m.text}')
-        .join('|');
+    return messages.skip(from).map((m) => '${m.side}:${m.text}').join('|');
   }
 }
 

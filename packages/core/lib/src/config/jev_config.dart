@@ -1,5 +1,6 @@
-/// 三条模型路由（判断 / 回复 / 复查）的全部可配置项，以及由它们推导出的
-/// 端点与密钥回退规则 —— 对应旧仓库 `core/Prefs.kt` 的路由字段与 helper。
+/// 四条模型路由（判断 / 回复 / 复查 / 润色）的全部可配置项，以及由它们推导出的
+/// 端点与密钥回退规则 —— 对应旧仓库 `core/Prefs.kt` 的路由字段与 helper；
+/// 润色路由是本仓库新增（p0-plan #5 候选 A4），旧仓库没有对应字段。
 ///
 /// 旧仓库把这些字段放进 Android SharedPreferences，getter/setter 顺带做
 /// trim、默认值与范围钳制；本包不碰存储，只保留「字段 + 推导规则」，持久化
@@ -67,6 +68,23 @@ class JevConfig {
   String reviewKey = '';
 
   String reviewModel = '';
+
+  // -------------------------------------------------------------- 润色路由
+
+  /// A4 润色路由（p0-plan #5 候选）：自动改写专用的第四条路由。走它的只有两
+  /// 处自动整改——A2 linter 命中候选的重写与 S1 复查驳回候选的重写（见
+  /// ReplyClient.rewriteOnPolishRoute）；手动 refine（候选卡按钮）继续走回复
+  /// 路由，便宜的自动化改写与用户点名的精修分开记账。
+  ///
+  /// 与复查路由同模式：三个字段都留空表示沿用回复路由 —— 没配润色路由时
+  /// 行为只是「同一条路、温度收着些的重写」，不会因为少一份配置而断。
+  String polishBaseUrl = '';
+
+  /// 润色路由密钥，留空回退回复路由的实际生效密钥（[effectivePolishKey]）。
+  String polishKey = '';
+
+  /// 自动重写用的模型，留空沿用回复模型（[effectivePolishModel]）。
+  String polishModel = '';
 
   // ---------------------------------------------------------------- 文风
 
@@ -186,6 +204,23 @@ class JevConfig {
   String effectiveReviewModel() =>
       reviewModel.trim().isNotEmpty ? reviewModel : replyModel;
 
+  /// 润色路由的完整 POST 地址；base 留空沿用回复路由（与 [reviewEndpoint]
+  /// 同模式）。自动重写也是一次普通的 chat/completions 调用，拼法一致。
+  String polishEndpoint() {
+    var base = polishBaseUrl.trim();
+    if (base.isEmpty) base = replyBaseUrl.trim();
+    return '${_stripTrailingSlashes(base)}/chat/completions';
+  }
+
+  /// 润色密钥回退回复路由的实际生效密钥（与 [effectiveReviewKey] 同模式，
+  /// 但不经过复查密钥——润色与复查是两条互不接力的独立路由）。
+  String effectivePolishKey() =>
+      polishKey.trim().isNotEmpty ? polishKey : effectiveReplyKey();
+
+  /// 润色用的模型：留空沿用回复模型（与 [effectiveReviewModel] 同模式）。
+  String effectivePolishModel() =>
+      polishModel.trim().isNotEmpty ? polishModel : replyModel;
+
   // ---------------------------------------------------------------- JSON
 
   /// JSON round trip（app 侧保存设置用）。键就是字段名，全部写出：
@@ -204,6 +239,9 @@ class JevConfig {
         'reviewBaseUrl': reviewBaseUrl,
         'reviewKey': reviewKey,
         'reviewModel': reviewModel,
+        'polishBaseUrl': polishBaseUrl,
+        'polishKey': polishKey,
+        'polishModel': polishModel,
         'style': style,
         'replyLanguage': replyLanguage,
         'replyLength': replyLength,
@@ -230,6 +268,9 @@ class JevConfig {
         ..reviewBaseUrl = j['reviewBaseUrl'] as String? ?? ''
         ..reviewKey = j['reviewKey'] as String? ?? ''
         ..reviewModel = j['reviewModel'] as String? ?? ''
+        ..polishBaseUrl = j['polishBaseUrl'] as String? ?? ''
+        ..polishKey = j['polishKey'] as String? ?? ''
+        ..polishModel = j['polishModel'] as String? ?? ''
         ..style = j['style'] as String? ?? ''
         ..replyLanguage = j['replyLanguage'] as String? ?? 'follow'
         ..replyLength = j['replyLength'] as String? ?? 'standard'
@@ -256,6 +297,9 @@ class JevConfig {
     String? reviewBaseUrl,
     String? reviewKey,
     String? reviewModel,
+    String? polishBaseUrl,
+    String? polishKey,
+    String? polishModel,
     String? style,
     String? replyLanguage,
     String? replyLength,
@@ -278,6 +322,9 @@ class JevConfig {
         ..reviewBaseUrl = reviewBaseUrl ?? this.reviewBaseUrl
         ..reviewKey = reviewKey ?? this.reviewKey
         ..reviewModel = reviewModel ?? this.reviewModel
+        ..polishBaseUrl = polishBaseUrl ?? this.polishBaseUrl
+        ..polishKey = polishKey ?? this.polishKey
+        ..polishModel = polishModel ?? this.polishModel
         ..style = style ?? this.style
         ..replyLanguage = replyLanguage ?? this.replyLanguage
         ..replyLength = replyLength ?? this.replyLength

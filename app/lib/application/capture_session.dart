@@ -27,6 +27,7 @@ class CaptureState {
     this.error,
     this.preview,
     this.handled = false,
+    this.needsConfirm = false,
   });
 
   final ChatSnapshot? snapshot;
@@ -38,13 +39,24 @@ class CaptureState {
   /// 轮次开始时随快照一起算好，与实际随轮发出的 ctx 同源，不是两套清单。
   final SendPreview? preview;
 
-  /// B7「这条可以不回」按下后的本轮标记：候选已收起，不再起草。同签名快照
+  /// B7 注释口径（全仓库统一）：判断路的结论写作「这条可以不回」
+  /// （[canSkipReply]）；用户按下按钮之后的标记写作「不用回」
+  /// （[handled] / markHandled）。
+  ///
+  /// B7「不用回」按下后的本轮标记：候选已收起，不再起草。同签名快照
   /// 不会重开一轮（_onSnapshot 的去重看到 analysis 仍在）；内容变化的快照
   /// signature 不同，自然开新轮并落回默认 false。
   final bool handled;
 
-  /// B7：判断结果明确说「可以不回」（shouldReplyNow < 0.5）。只有判断成功
-  /// 时该字段才非 null——判断失败（error）不会误报。
+  /// G3 置信度门控：本快照来源不可靠（confidence ≤ 0.5，见
+  /// [CaptureSession.confirmThreshold]），没有自动分析，等用户在页面上点
+  /// 「确认分析」（[CaptureSession.confirmAnalyze]）才起轮。确认后该标记随
+  /// busy 态落回 false；内容更新的快照（signature 不同）进门时按其自身
+  /// 置信度重新判定。忙碌/已有结果/挂起三种态互斥，UI 按这个顺序渲染。
+  final bool needsConfirm;
+
+  /// B7：判断结果明确说「这条可以不回」（shouldReplyNow < 0.5）。只有判断
+  /// 成功时该字段才非 null——判断失败（error）不会误报。
   bool get canSkipReply {
     final v = analysis?.shouldReplyNow;
     return v != null && v < 0.5;
@@ -98,6 +110,20 @@ class CaptureSession {
   /// A3「学习我的说话方式」开关：打开后每轮从快照里我方消息挑几条风格样本
   /// 注入写作路（见 [buildContext]）。采集页的开关写入，轮次开始时现读。
   bool styleLearning = false;
+
+  /// G3 置信度门控阈值：快照 confidence 不高于它（≤）不自动分析，挂起
+  /// （needsConfirm）等用户确认。按通道契约的扣分口径，掉到 0.5 及以下意味
+  /// 着身份已经存疑——最尖锐的是 OCR 基线 0.6 恰好叠一条 unknown-speaker
+  /// （整数上的精确 0.5）：说话人不可归属的快照按 p0-plan G3「身份不明确
+  /// 宁可拒绝，不猜测」必须停下，不能贴线放行，所以比较用 ≤ 不用 <。
+  /// 采集页与桌面流共用这一个值与同一份判定（[shouldConfirm]）。
+  static const double confirmThreshold = 0.5;
+
+  /// G3 门控判定（唯一比较点，采集流与桌面流共用）：confidence 不高于
+  /// [confirmThreshold] 就挂起等用户确认。阈值本身算「不可信」——见上，
+  /// 0.5 正是「OCR + 一条发言人未知」的落点。
+  static bool shouldConfirm(ChatSnapshot snapshot) =>
+      snapshot.confidence <= confirmThreshold;
 
   /// ④ 快速改写指令 → 提示词的映射（规格④原文）。采集页与桌面页共用同一
   /// 份常量，UI 上就是每张候选卡的「更短 / 更礼貌 / 换个说法」三个按钮。
@@ -180,8 +206,9 @@ class CaptureSession {
       ];
 
   /// G1：算出本轮隐私预览。[ctx] 必须是真正会随本轮发出的那份（先
-  /// [buildContext] 再传进来），预览与实际发送同源；[relationship] 是
-  /// trim 后、真正进 state/提示词的那段关系描述。
+  /// [buildContext] 再传进来），预览与实际发送同源；[relationship] 是用户
+  /// 输入的原始关系描述（不必先 trim）——流水线在留空时以「朋友」下发，
+  /// 预览按同一条缺省规则注明「默认按朋友」，两边说同一件事。
   ///
   /// 窗口数与 core 一致：判断路取最近 10 条（JevQuestions.buildState），写作
   /// 路取最近 20 条（replyWindow）。联系人备注当前版本恒为「无」（联系人库
@@ -216,23 +243,56 @@ class CaptureSession {
     final note = (snapshot.note ?? '').trim();
 
     List<String> common(String window) => [
-          if (rel.isNotEmpty) '关系描述：「$rel」',
+          // #4 遗留：关系留空时流水线仍会以缺省「朋友」下发，预览要如实
+          // 列出，不能因为没填就整行隐去（写出去了什么就列什么）。
+          if (rel.isNotEmpty) '关系描述：「$rel」' else '关系描述：未填写，默认按「朋友」',
           '聊天消息：$window',
           if (extra.isNotEmpty) '背景补充：「$extra」（你输入的一句话）',
           if (hasContact) '联系人备注：有' else '联系人备注：无',
           '知识库笔记：$kbNotes 条',
-          if (note.isNotEmpty) '采集说明：「$note」',
           '更早历史：$historyCount 条',
         ];
 
     return SendPreview(
-      judge: common('最近 $judgeCount 条（共 $total 条，判断只取最近 10 条）'),
+      judge: [
+        ...common('最近 $judgeCount 条（共 $total 条，判断只取最近 10 条）'),
+        // #4 遗留：采集说明（快照 note）只进判断路——JevQuestions.buildState
+        // 把它放进 state.chat.note、由判断模型渲染为 NOTE from the capture
+        // step；写作路（ReplyPrompt.draftUserPrompt/refineUserPrompt）只拿
+        // 消息正文，从不读 note，故从这里挪到仅判断路。排序轮复用判断模型
+        // 与 buildState 也会带上它；G1 预览按「模型通道」分组，归判断路一列。
+        if (note.isNotEmpty) '采集说明：「$note」',
+      ],
       writer: [
         ...common('最近 $writerCount 条（共 $total 条，写作最多看 $replyWindow 条）'),
         '说话方式样本：$styleSamples 条'
             '（开了「学习我的说话方式」才有；只进写作路，判断路不看）',
       ],
     );
+  }
+
+  /// G3：快照卡上的来源行，采集页与桌面流共用同一份文案：
+  /// 「来源：OCR · 置信 0.6 · 原因：发言人未知」。没有原因标签时省略原因段。
+  static String sourceLineOf(ChatSnapshot snapshot) {
+    final line = StringBuffer('来源：${Provenance.labelOf(snapshot.provenance)}'
+        ' · 置信 ${formatConfidence(snapshot.confidence)}');
+    final reasons = uncertainReasonsOf(snapshot);
+    if (reasons.isNotEmpty) line.write(' · 原因：$reasons');
+    return line.toString();
+  }
+
+  /// G3：原因标签串（如「发言人未知、标题为空」）；没有标签返回空串。
+  static String uncertainReasonsOf(ChatSnapshot snapshot) => [
+        for (final r in snapshot.uncertain)
+          if (r.trim().isNotEmpty) r.trim(),
+      ].join('、');
+
+  /// G3：置信度展示格式——两位小数再去掉末尾多余的 0（1.00→1.0、0.60→0.6、
+  /// 0.55→0.55），契约口径的 0.05 步进扣分也能如实显示。
+  static String formatConfidence(double v) {
+    var s = v.toStringAsFixed(2);
+    if (s.endsWith('0')) s = s.substring(0, s.length - 1);
+    return s;
   }
 
   /// F1：判断给出的 best_action 对应的策略候选提前到第一位（StrategyOrder 的
@@ -293,22 +353,70 @@ class CaptureSession {
   }
 
   void _setError(String message) {
+    // G3：挂起确认态不能被一条流错误顺手吞掉（快照还在等用户放行）。
     state.value = CaptureState(
       snapshot: state.value.snapshot,
       error: message,
+      needsConfirm: state.value.needsConfirm,
     );
   }
 
   Future<void> _onSnapshot(ChatSnapshot snapshot) async {
     // 服务端已按签名去重；这里再防一道（服务重连后补发最近一条的场景）。
     // 忙碌中的同签名重放也拦：那一轮已经在跑，再来一轮只会重复请求；不忙但
-    // 没有分析结果（上一轮失败）时放行，让下一个快照能触发重试。
+    // 没有分析结果（上一轮失败）时放行，让下一个快照能触发重试。挂起
+    // （needsConfirm）态不拦：重放只是重画同一张待确认卡，不起任何网络请求。
     final current = state.value;
     if (snapshot.signature() == current.signature &&
         (current.busy || current.analysis != null)) {
       return;
     }
+    // 轮次 token 在门口先 +1：无论本快照走自动分析还是 G3 挂起，在途旧轮
+    // 都作废——挂起态要抢在旧轮结果之前写回，否则旧结果会盖掉待确认卡。
     final round = ++_round;
+    // G3 置信度门控：来源不可靠（如 OCR 兜底、发言人不可归属）的快照不自动
+    // 分析，state 置 needsConfirm 挂起；采集页显示「确认分析？」按钮，点了
+    // 才起轮（[confirmAnalyze]）。阈值之上照旧自动开轮。
+    if (shouldConfirm(snapshot)) {
+      final ctx = buildContext(
+        extra: extraContext,
+        myMessages: myMessagesOf(snapshot),
+        styleLearning: styleLearning,
+      );
+      state.value = CaptureState(
+        snapshot: snapshot,
+        needsConfirm: true,
+        // 挂起态就把预览亮出来：确认之前用户就能看到「确认后会把什么发出
+        // 去」，与 G1 的信任目标一致；真正起轮时 [_runRound] 会按当时的
+        // 输入（关系/补充背景可能已改）重算一份写回。
+        preview: buildSendPreview(
+          snapshot: snapshot,
+          ctx: ctx,
+          relationship: relationship.value,
+        ),
+      );
+      return;
+    }
+    await _runRound(snapshot, round);
+  }
+
+  /// G3 置信度门控的手动放行：needsConfirm 挂起态下用户点了「确认分析」，
+  /// 用当前快照起一轮——与自动路径共用 [_runRound]，轮次 token 同一道防护。
+  /// 非挂起态（没快照/已在分析/已有结果）是空操作。
+  Future<void> confirmAnalyze() async {
+    if (_disposed) return;
+    final s = state.value;
+    final snapshot = s.snapshot;
+    if (snapshot == null || !s.needsConfirm) return;
+    final round = ++_round;
+    await _runRound(snapshot, round);
+  }
+
+  /// 一轮完整分析：组装 ctx/预览 → judge → draftAndRank → 写 state、推悬浮窗。
+  /// 自动路径（高置信快照）与手动确认路径（[confirmAnalyze]）共用这一份；
+  /// [round] 是进门时领到的轮次 token，await 期间被更新的快照/确认抢先就
+  /// 整轮作废（见 [_round] 的乱序/并发防护），旧结果不许写回。
+  Future<void> _runRound(ChatSnapshot snapshot, int round) async {
     // ③/A3：本轮上下文在进 try 前组好——judge 与 draftAndRank 必须拿同一份，
     // G1 预览也由它算出（预览与实际发送同源，不是两套各说各话的清单）。
     final ctx = buildContext(
@@ -422,7 +530,7 @@ class CaptureSession {
     }
   }
 
-  /// B7「这条可以不回」：把本轮标记为已处理——收起候选与悬浮窗，不再起草。
+  /// B7「不用回」按钮：把本轮标记为已处理——收起候选与悬浮窗，不再起草。
   /// 保留快照与判断对象：签名去重靠 analysis 非 null 拦住同签名重放；
   /// [CaptureState.handled] 让 UI 换成「已标记不用回」的安静态。忙碌中不收
   /// （那一轮的结果还没回来，收了也会被写回覆盖）。悬浮窗侧的同款按钮需要
@@ -430,7 +538,9 @@ class CaptureSession {
   Future<void> markHandled() async {
     if (_disposed) return;
     final s = state.value;
-    if (s.snapshot == null || s.busy || s.handled) return;
+    // G3：挂起（needsConfirm）态没有「不用回」可言——还没分析过，标记动作
+    // 只属于已开过轮的快照（UI 在挂起态也不提供这个入口，这里兜一道）。
+    if (s.snapshot == null || s.busy || s.handled || s.needsConfirm) return;
     state.value = CaptureState(
       snapshot: s.snapshot,
       analysis: s.analysis?.copyWith(rankedReplies: const []),

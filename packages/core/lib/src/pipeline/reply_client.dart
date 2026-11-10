@@ -144,6 +144,13 @@ class ReplyClient {
     ];
   }
 
+  /// 改写轮的 system 提示词：手动 refine 与自动重写（[rewriteOnPolishRoute]）
+  /// 共用同一份，两条路由不会各说各话。
+  static const String _rewriteSystem =
+      '你是即时通讯回复改写助手。只输出一个 JSON 数组，且只能有一个对象：'
+      '{"strategy":"safe","text":"..."}。'
+      '保持原意和事实，不补造记忆，不解释，不加引号。';
+
   /// Refine exactly one visible candidate; never regenerates the whole set.
   Future<RankedReply?> refine(
     ChatSnapshot snapshot,
@@ -155,9 +162,6 @@ class ReplyClient {
     HttpScope? scope,
   }) async {
     final convo = convoLines(snapshot.messages);
-    final system = '你是即时通讯回复改写助手。只输出一个 JSON 数组，且只能有一个对象：'
-        '{"strategy":"safe","text":"..."}。'
-        '保持原意和事实，不补造记忆，不解释，不加引号。';
     final user = refineUserPrompt(
       relationship,
       ctx,
@@ -168,12 +172,66 @@ class ReplyClient {
       convo,
     );
     final out = await _chat(
-      system,
+      _rewriteSystem,
       user,
       0.65,
       scope: scope,
       frequencyPenalty: _config.replyFrequencyPenalty,
       presencePenalty: _config.replyPresencePenalty,
+    );
+    final parsed = _parseN(out, 1);
+    if (parsed.isEmpty) return null;
+    return parsed.first.copyWith(ranked: false, prob: 0.0);
+  }
+
+  /// 润色路由上的单条重写（A4，p0-plan #5 候选）：只有两处自动整改走这里——
+  /// A2 linter 命中候选的重写（JevClient._applyFlavorLint）与 S1 复查驳回
+  /// 候选的重写（JevClient._applyReview）。与手动 [refine] 的差别只有两处：
+  ///
+  ///  - 路由：[JevConfig.polishEndpoint] / [JevConfig.effectivePolishKey] /
+  ///    [JevConfig.effectivePolishModel]，三个字段留空就是回复路由本身
+  ///    （JevConfig 的回退规则，jev_config_test 钳住）。兼容口径（复核更正，
+  ///    以此为准）：未配润色路由时**不是**「与改前逐字节一致」——自动整改的
+  ///    温度是 0.4，而 A4 之前这两处分别走手动 refine（0.65）与一次批量
+  ///    draft（见 JevClient._applyReview 的注释）；回退保证的是端点/密钥/
+  ///    模型/提示词同源、行为不断，这是有意设计。逐字节不变的只有手动
+  ///    refine 路径本身（候选卡按钮，不经这里）；
+  ///  - 温度 0.4（refine 是 0.65）：自动重写是「整改」不是创作——要去的
+  ///    AI 腔、要修的复查问题都是明确的，不需要发散。
+  ///
+  /// 提示词与 [refine] 共用同一份（[_rewriteSystem] + [refineUserPrompt]）：
+  /// 同样的输入在两条路由上应该得到同一种任务陈述，差异只落在模型与采样上。
+  /// HTTP 层由 polish_route_test 钳住：配置后请求确实打到 polishEndpoint 且
+  /// 温度 0.4；未配置时按回退规则落回复路由、温度同。
+  Future<RankedReply?> rewriteOnPolishRoute(
+    ChatSnapshot snapshot,
+    String relationship,
+    String original,
+    String instruction, {
+    ChatContext? ctx,
+    String style = '',
+    HttpScope? scope,
+  }) async {
+    final convo = convoLines(snapshot.messages);
+    final user = refineUserPrompt(
+      relationship,
+      ctx,
+      _config.contextHistoryCount,
+      style,
+      instruction,
+      original,
+      convo,
+    );
+    final out = await _chatOn(
+      _config.polishEndpoint(),
+      _config.effectivePolishKey(),
+      _config.effectivePolishModel(),
+      _rewriteSystem,
+      user,
+      0.4,
+      scope,
+      _config.replyFrequencyPenalty,
+      _config.replyPresencePenalty,
     );
     final parsed = _parseN(out, 1);
     if (parsed.isEmpty) return null;
@@ -281,8 +339,9 @@ class ReplyClient {
         user, temperature, scope, frequencyPenalty, presencePenalty);
   }
 
-  /// Same round trip on an explicit route. The S1 review step needs a second
-  /// route; everything else in this file keeps going through [_chat].
+  /// Same round trip on an explicit route. The S1 review step and the polish
+  /// route both need their own endpoint/key/model; everything else in this file
+  /// keeps going through [_chat].
   Future<String> _chatOn(
     String url,
     String key,

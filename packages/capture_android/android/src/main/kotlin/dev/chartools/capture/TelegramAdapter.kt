@@ -54,6 +54,17 @@ class TelegramAdapter : ChatAppAdapter {
     override val pkg = "org.telegram.messenger"
     override val displayName = "Telegram"
 
+    // G2 能力：行文本直读（Telegram 不发 resource-id，靠类/文本形状，见类注释）；
+    // 分边只认状态行动词，zh/en 之外的语言整行读作「对方」（类注释的已知缺口）。
+    // 取样记录 12.10.1 / OnePlus PJE110。
+    override val capabilities = AdapterCapabilities(
+        canReadMessages = true,
+        canIdentifySender = true,
+        canReadHistory = false,
+        allowsOcrFallback = true,
+        verifiedAppVersion = "12.10.1",
+    )
+
     // Telegram 的 composer 也是普通可编辑节点（无稳定 id）。
     override fun findInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? = findEditableNode(root)
 

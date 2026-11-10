@@ -18,6 +18,14 @@ const double lowConfidence = 0.5;
 /// 无场景参数时逐字节一致（附加段为空串的默认场景等于没开场景）。
 const String _chatCopilotId = 'chat_copilot';
 
+/// 判断块三个维度的「无信号」文案。三道选择题的协议键都是封闭集
+/// （jev_questions.dart 各 criteria 的 keys）：键缺失**或题外**都落到同一句，
+/// 绝不把题外值原样回显——见 [_intentText] 的 G6 注释。[judgmentWords] 也用
+/// 它们过滤无效判断，免得协议外键值变成检索噪声。
+const String _noIntentText = '看不出，按字面承接就好';
+const String _noNeedText = '看不出，别猜';
+const String _noActionText = '顺着对方的话自然回';
+
 /// 把知识与判断结果装配进回复提示词的全部文案块 —— 旧仓库
 /// `jev/ReplyPrompt.kt` 的逐字移植：面向模型的句子一字不改。
 ///
@@ -99,7 +107,9 @@ abstract final class ReplyPrompt {
       if (samples >= 3) break;
       samples++;
       sb.write('\n<user_style_examples>\n');
-      sb.write(_take(sample.content.trim(), 5000));
+      // 先拆定界符再截断：样本正文是用户手维护/导入的数据（G6：一律不可信），
+      // 不许携带能提前「接出」数据段的钥匙。
+      sb.write(_take(_neutralizeCloseTag(sample.content.trim()), 5000));
       sb.write('\n以上仅是风格参考，不是当前对话内容。\n</user_style_examples>\n');
     }
     for (final hit in ctx.skills) {
@@ -453,15 +463,22 @@ abstract final class ReplyPrompt {
     final action = a.bestAction?.choice ?? '';
     final score = a.dangerLevel?.score;
     final words = <String>[
-      if (intent.trim().isNotEmpty) _intentText(intent),
-      if (need.trim().isNotEmpty) _needText(need),
-      if (action.trim().isNotEmpty) _actionText(action),
+      // 协议外的判断不产生检索词：题外键值如今统一落到「无信号」文案，
+      // 不能把它当关键词喂给技能匹配（G6，同 [_intentText]）。
+      if (intent.trim().isNotEmpty && _intentText(intent) != _noIntentText)
+        _intentText(intent),
+      if (need.trim().isNotEmpty && _needText(need) != _noNeedText)
+        _needText(need),
+      if (action.trim().isNotEmpty && _actionText(action) != _noActionText)
+        _actionText(action),
       if (score != null && score >= 4) '局势紧张 冲突',
     ];
     return words.where((w) => w.trim().isNotEmpty).join(' ');
   }
 
   static String _intentText(String key) => switch (key) {
+        // 协议键的展示文案逐字对照旧仓库 ReplyPrompt.kt:397，G6 加固只动
+        // 题外键的落点，不动协议内文案（正向对照组测试钉住）。
         'confirm_you_care' => '想确认我在不在乎她',
         'vent_anger' => '在发泄情绪',
         'request_action' => '在要我做出具体行动',
@@ -469,7 +486,13 @@ abstract final class ReplyPrompt {
         'casual_chat' => '只是日常闲聊或打趣',
         'close_topic' => '想把话题收掉',
         'intimate_roleplay' => '在按我们约好的关系/称呼往下推进这一场',
-        _ => key.trim().isEmpty ? '看不出，按字面承接就好' : key,
+        // G6 信任边界：判断是从不可信聊天内容推导出来的，判断模型本身可能被
+        // 聊天里的注入话术带偏，而 Jev 协议的解析（JudgeAnswers.choice）对
+        // choice 不做白名单校验（chat 协议的 ChatJudge._normalizeChoice 校验了）。
+        // 协议键是封闭集，题外的键值一律按空处理，绝不回显原样字符串——
+        // 回显等于给注入内容一个以应用口吻（「判断结果：」）说话的位置，
+        // 这是聊天/技能/笔记之外的第四条不可信通道。空键与题外键同待遇。
+        _ => _noIntentText,
       };
 
   static String _needText(String key) => switch (key) {
@@ -479,7 +502,8 @@ abstract final class ReplyPrompt {
         'care' => '被在乎、被安慰',
         'nothing' => '什么都不需要，别过度反应',
         'engagement' => '被接住、顺着这个情境继续（不是道歉、不是解释、不是行动）',
-        _ => key.trim().isEmpty ? '看不出，别猜' : key,
+        // 同 [_intentText]：协议外键值不回显。
+        _ => _noNeedText,
       };
 
   static String _actionText(String key) => switch (key) {
@@ -491,9 +515,17 @@ abstract final class ReplyPrompt {
         'say_less' => '少说两句，别扩大',
         'make_plan' => '约个具体的事',
         'play_along' => '接着对方的设定往下写，别把气氛拉回日常',
-        _ => key.trim().isEmpty ? '顺着对方的话自然回' : key,
+        // 同 [_intentText]：协议外键值不回显。
+        _ => _noActionText,
       };
 }
 
 /// 按 Kotlin `String.take(n)` 的语义截断：超长取前 [n] 个码元。
 String _take(String s, int n) => s.length <= n ? s : s.substring(0, n);
+
+/// 风格样本段（`<user_style_examples>`）的闭合定界符只归装配层所有：样本
+/// 正文若带着同样的字面量，就能把后半段提前「接出」数据段、冒充装配层的
+/// 口吻（G6 信任边界——知识库笔记是不可信数据）。引用前把闭合序列拆开：
+/// 内容照常引用，只是没了越界的钥匙。不含该字面量的样本输出逐字节不变。
+String _neutralizeCloseTag(String s) =>
+    s.replaceAll('</user_style_examples>', '</ user_style_examples>');
