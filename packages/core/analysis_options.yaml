@@ -1,0 +1,19 @@
+# core 是纯 Dart 包：无 flutter 依赖，测试用 dart test 跑（在 flutter 工作区内也能被 flutter test 调起）。
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: false
+
+linter:
+  rules:
+    - always_declare_return_types
+    - avoid_empty_else
+    - avoid_print
+    - avoid_relative_lib_imports
+    - avoid_slow_async_io
+    - cancel_subscriptions
+    - collection_methods_unrelated_type
+    - prefer_final_locals
+    - prefer_single_quotes
+    - unnecessary_lambdas

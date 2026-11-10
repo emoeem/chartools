@@ -1,0 +1,36 @@
+name: chartools_app
+description: 通用沟通助手的 Flutter 应用壳 —— UI 与平台集成都在这里；领域逻辑在 packages/core。
+publish_to: 'none'
+version: 2.0.0-alpha.1+1
+resolution: workspace
+
+# 工作区成员的 SDK 下界必须一致（pub workspace 规则），统一为 ^3.6.0。
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 领域层：模型客户端、判断/起草流水线、人设/知识库、安全策略、场景模板。
+  chartools_core:
+    path: ../packages/core
+  # Android 采集层：无障碍读屏 + OCR 产快照，回填只填输入框。
+  capture_android:
+    path: ../packages/capture_android
+  # 设置持久化：JevConfig（key 字段除外）+ relationship + 悬浮窗开关等整包
+  # 存成一个 JSON 字符串（见 lib/application/settings_store.dart）。
+  # core 保持零第三方依赖，只有 app 用它。
+  shared_preferences: ^2.5.0
+  # API Key 安全区（p0-plan F2）：replyKey/judgeKey 迁出 shared_preferences
+  # 明文，Android 走 Keystore、Windows 走 DPAPI。选 10.x：SDK 下界 >=3.3，
+  # 与工作区统一声明的 ^3.6.0 兼容（11.x 要求 >=3.8.0）；app minSdk 30，
+  # 高于插件要求的 23。
+  flutter_secure_storage: ^10.3.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

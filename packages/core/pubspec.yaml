@@ -1,0 +1,15 @@
+name: chartools_core
+description: 通用沟通助手的核心领域包 —— 模型客户端、判断/起草流水线、人设/知识库、安全策略、场景模板。纯 Dart，Android 与 Windows 共享。
+version: 0.1.0
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.6.0
+
+dev_dependencies:
+  # 测试只允许 package:test（工作区约定）；core 运行时保持零第三方依赖。
+  test: ^1.25.0
+
+# 刻意零依赖：HTTP 用 dart:io，JSON 用 dart:convert。
+# 领域层不引第三方库，Flutter 侧的 app 才决定 UI / 平台集成用什么。

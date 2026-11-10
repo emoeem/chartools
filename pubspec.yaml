@@ -1,0 +1,27 @@
+name: chartools_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+# Pub workspace：根目录聚合全部包，共享一个锁文件（见 README「仓库结构」）。
+# capture_windows 属阶段 3，落地后再追加进来。
+workspace:
+  - app
+  - packages/core
+  - packages/capture_android
+
+# 环境钉版（非业务决定）：shared_preferences_android 2.5.0 起依赖 jni 插件，
+# 其 android 模块要用 CMake 3.22.1 做原生构建。本机 dl.google.com 直连不通、
+# github.com 不通、各镜像（aliyun/tencent/bfsu/tuna/npmmirror）均无 cmake 包，
+# CMake 无法安装 → :jni 编译必挂。钉回最后一个无 jni 依赖的 2.4.28（同样走
+# plugin_platform_interface 通道，约束 shared_preferences ^2.3.4 满足）。若日后
+# 本机装上 CMake 或网络通到 dl.google.com，删掉这条钉版即可。
+dependency_overrides:
+  shared_preferences_android: 2.4.28
+  # 同上另一例：path_provider_android 2.3.0 起依赖 jni（jni_flutter）插件，其
+  # android 模块同样要走 CMake 原生构建 → 本机必挂。jni 由 flutter_secure_storage
+  # → flutter_secure_storage_windows → path_provider 传递引入（F2 安全区依赖），
+  # 钉回最后一个无 jni 依赖的 2.2.23（约束 path_provider ^2.1.5 →
+  # path_provider_android ^2.2.5 满足）。若日后本机装上 CMake，删掉这条钉版即可。
+  path_provider_android: 2.2.23

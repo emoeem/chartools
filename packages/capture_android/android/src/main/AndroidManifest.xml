@@ -1,0 +1,36 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 采集/悬浮相关权限（旧仓库 cn/app 的合并子集；插件是 library，
+         由宿主 App 的清单合并生效）。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- 无障碍采集服务。library 清单里必须写全限定类名：
+             相对名（.capture.CaptureService）会在合并时按宿主包名解析而落空。 -->
+        <service
+            android:name="dev.chartools.capture.CaptureService"
+            android:exported="true"
+            android:label="@string/a11y_service_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- 保活前台服务：压住 MIUI/HyperOS 对无障碍进程的冻结。 -->
+        <service
+            android:name="dev.chartools.capture.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep the accessibility reader alive on aggressive OEM power management" />
+        </service>
+    </application>
+</manifest>

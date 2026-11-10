@@ -1,0 +1,235 @@
+import 'package:chartools_core/src/pipeline/reply_cache_key.dart';
+import 'package:test/test.dart';
+
+/// 对拍旧仓库 `ReplyCacheKeyTest.kt` 的思路。
+///
+/// 键里漏一个分量不会报错，只会「改了输入、回复没变」——用户以为功能坏了，
+/// 我们连日志都没有。所以这里对**每一个**分量单独做一次变异：改它，键必须变。
+///
+/// 最要紧的是「style 变了键就变」：专家库全靠换 `style` 生效，它一旦从键里
+/// 掉出去，换专家就等于换了个寂寞，而且测不出来。
+void main() {
+  const base = _In();
+
+  test('同样的输入得到逐字相同的键', () {
+    expect(const _In().key(), base.key());
+  });
+
+  test('style 变了键就变', () {
+    final a = const _In(style: '主题：职场').key();
+    final b = const _In(style: '主题：恋爱').key();
+    expect(a, isNot(b));
+  });
+
+  test('十四个分量逐个变异，键都要变', () {
+    // params 捆绑包按子字段拆三份变异（与 Kotlin 参考逐字一致）。
+    final pLang = 'en|standard|0.8|0.0|0.0|false|review-model';
+    final pTemp = 'follow|standard|0.9|0.0|0.0|false|review-model';
+    final pReview = 'follow|standard|0.8|0.0|0.0|true|review-model';
+    final mutated = <String, _In>{
+      'title': base.copyWith(title: 'T2'),
+      'signature': base.copyWith(sig: 'S2'),
+      'relationship': base.copyWith(rel: 'R2'),
+      'style': base.copyWith(style: 'ST2'),
+      'replyModel': base.copyWith(model: 'M2'),
+      'count': base.copyWith(count: 4),
+      'avoid': base.copyWith(avoid: const ['x', 'y']),
+      'ctxKey': base.copyWith(ctx: 'C2'),
+      'ledgerKey': base.copyWith(ledger: 'L2'),
+      'judgmentKey': base.copyWith(judgment: 'J2'),
+      'intensity': base.copyWith(intensity: 'SOFT'),
+      'params-语言': base.copyWith(params: pLang),
+      'params-温度': base.copyWith(params: pTemp),
+      'params-复查': base.copyWith(params: pReview),
+    };
+    // 分量数写死：以后往 reply 里加了新参数却忘了进键，这条会红。
+    expect(mutated.length, 14);
+    mutated.forEach((name, input) {
+      expect(base.key(), isNot(input.key()), reason: '分量 [$name] 没进键');
+    });
+  });
+
+  test('字段边界不会串味', () {
+    // "ab" + "c" 必须区别于 "a" + "bc"：靠分隔符，不靠拼接巧合。
+    expect(
+      const _In(sig: 'ab', rel: 'c').key(),
+      isNot(const _In(sig: 'a', rel: 'bc').key()),
+    );
+    expect(
+      const _In(style: 'ab').key(),
+      isNot(const _In(style: 'a', rel: 'bR').key()),
+    );
+    // title 也一样：标题 "ab" 消息 "c" 不能命中标题 "a" 消息 "bc" 的缓存。
+    expect(
+      const _In(title: 'ab', sig: 'c').key(),
+      isNot(const _In(title: 'a', sig: 'bc').key()),
+    );
+  });
+
+  test('avoid 多条与单条不同，空列表与含空串不同', () {
+    expect(
+      const _In(avoid: ['x']).key(),
+      isNot(const _In(avoid: ['x', '']).key()),
+    );
+    expect(
+      const _In(avoid: <String>[]).key(),
+      isNot(const _In(avoid: ['']).key()),
+    );
+  });
+
+  test('avoid 长度前缀防住分隔符拼接撞车', () {
+    // 只按分隔符拼，["a\x1fb"] 与 ["a", "b"] 会拼出同一串（reply_cache_key.dart
+    // 注释里的原始反例）；长度前缀让两者必然分开：'3:a\x1fb' vs '1:a\x1f1:b'。
+    expect(
+      const _In(avoid: ['a\u001fb']).key(),
+      isNot(const _In(avoid: ['a', 'b']).key()),
+    );
+  });
+
+  test('判断键跟着判断路由走', () {
+    final a = ReplyCacheKey.judge(
+      title: 'T',
+      signature: 'S',
+      relationship: 'R',
+      judgeModel: 'judge-1',
+      judgeProtocol: 'openai',
+      ctxKey: 'C',
+    );
+    final b = ReplyCacheKey.judge(
+      title: 'T',
+      signature: 'S',
+      relationship: 'R',
+      judgeModel: 'judge-2',
+      judgeProtocol: 'openai',
+      ctxKey: 'C',
+    );
+    final c = ReplyCacheKey.judge(
+      title: 'T',
+      signature: 'S',
+      relationship: 'R',
+      judgeModel: 'judge-1',
+      judgeProtocol: 'anthropic',
+      ctxKey: 'C',
+    );
+    final d = ReplyCacheKey.judge(
+      title: 'T2',
+      signature: 'S',
+      relationship: 'R',
+      judgeModel: 'judge-1',
+      judgeProtocol: 'openai',
+      ctxKey: 'C',
+    );
+    expect(a, isNot(b));
+    expect(a, isNot(c));
+    expect(a, isNot(d));
+    expect(
+      a,
+      ReplyCacheKey.judge(
+        title: 'T',
+        signature: 'S',
+        relationship: 'R',
+        judgeModel: 'judge-1',
+        judgeProtocol: 'openai',
+        ctxKey: 'C',
+      ),
+    );
+  });
+
+  test('回复键与判断键不会互相命中', () {
+    // 两个 LRU 分开存，但键本身也不该长得一样：串了就是把判断当候选回复用。
+    final replySide = const _In(
+      title: 'T',
+      sig: 'S',
+      rel: 'R',
+      model: 'M',
+      ctx: 'C',
+      style: 'P',
+    ).key();
+    expect(
+      ReplyCacheKey.judge(
+        title: 'T',
+        signature: 'S',
+        relationship: 'R',
+        judgeModel: 'M',
+        judgeProtocol: 'P',
+        ctxKey: 'C',
+      ),
+      isNot(replySide),
+    );
+  });
+}
+
+/// 基线输入与逐字段变异（对应 Kotlin 侧的 `In` data class，默认值逐字段一致）。
+class _In {
+  const _In({
+    this.title = 'T',
+    this.sig = 'S',
+    this.rel = 'R',
+    this.style = 'ST',
+    this.model = 'M',
+    this.count = 3,
+    this.avoid = const ['x'],
+    this.ctx = 'C',
+    this.ledger = 'L',
+    this.judgment = 'J',
+    this.intensity = 'AUTO',
+    this.params = 'follow|standard|0.8|0.0|0.0|false|review-model',
+  });
+
+  final String title;
+  final String sig;
+  final String rel;
+  final String style;
+  final String model;
+  final int count;
+  final List<String> avoid;
+  final String ctx;
+  final String ledger;
+  final String judgment;
+  final String intensity;
+  final String params;
+
+  String key() => ReplyCacheKey.reply(
+        title: title,
+        signature: sig,
+        relationship: rel,
+        style: style,
+        replyModel: model,
+        count: count,
+        avoid: avoid,
+        ctxKey: ctx,
+        ledgerKey: ledger,
+        judgmentKey: judgment,
+        intensity: intensity,
+        params: params,
+      );
+
+  _In copyWith({
+    String? title,
+    String? sig,
+    String? rel,
+    String? style,
+    String? model,
+    int? count,
+    List<String>? avoid,
+    String? ctx,
+    String? ledger,
+    String? judgment,
+    String? intensity,
+    String? params,
+  }) =>
+      _In(
+        title: title ?? this.title,
+        sig: sig ?? this.sig,
+        rel: rel ?? this.rel,
+        style: style ?? this.style,
+        model: model ?? this.model,
+        count: count ?? this.count,
+        avoid: avoid ?? this.avoid,
+        ctx: ctx ?? this.ctx,
+        ledger: ledger ?? this.ledger,
+        judgment: judgment ?? this.judgment,
+        intensity: intensity ?? this.intensity,
+        params: params ?? this.params,
+      );
+}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="a11y_service_name">通用沟通助手 · 采集服务</string>
+    <string name="a11y_desc">读取当前聊天窗口的内容，为本机生成的回复建议提供素材；不自动发送任何消息。</string>
+</resources>

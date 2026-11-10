@@ -1,0 +1,93 @@
+name: Release
+
+# 打 tag（v*）即出安装包：Android APK + Windows zip，自动挂到 GitHub Release。
+# 注：未配置上传签名密钥时，release APK 使用 debug 签名（可直接安装，供 alpha 体验）；
+# 正式版发布前在仓库 Secrets 配置 keystore 并接入 signingConfig。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: dart pub get
+
+      - name: Build APK
+        working-directory: app
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: dart pub get
+
+      - name: Build Windows
+        working-directory: app
+        run: flutter build windows --release
+
+      - name: Zip
+        working-directory: app
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath chartools-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chartools-windows-x64
+          path: app/chartools-windows-x64.zip
+
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename artifacts
+        run: |
+          mv artifacts/app-release-apk/app-release.apk chartools-${{ github.ref_name }}-android.apk
+          mv artifacts/chartools-windows-x64/chartools-windows-x64.zip "chartools-${{ github.ref_name }}-windows-x64.zip"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: chartools ${{ github.ref_name }}
+          body: |
+            通用沟通助手（chartools-next）首个发布版。
+
+            - Android：`chartools-*-android.apk`（debug 签名，可直接侧载安装；minSdk 30，仅 arm64）
+            - Windows：`chartools-*-windows-x64.zip`（解压运行 chartools_app.exe）
+
+            免责声明：读屏采集与回填不自动发送任何消息；聊天文字会发送到你自行配置的模型服务商。
+          files: |
+            chartools-*-android.apk
+            chartools-*-windows-x64.zip
