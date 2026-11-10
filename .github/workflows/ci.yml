@@ -1,8 +1,10 @@
 name: CI
 
-# ubuntu：静态检查 + core 纯 Dart 测试 + app widget 测试 + Android 能真正编译；
+# ubuntu：静态检查 + core 纯 Dart 测试 + 插件/app 测试 + Android 能真正编译；
 # windows：桌面端能真正编译。
-# 镜像变量放在 job 级：flutter-action 拉取和 dart pub get 都走国内镜像。
+# 注意：CI 跑在 GitHub 托管机上，网络直连官方源即可——不要配国内镜像变量
+# （镜像给美国节点发的 zip 会截断损坏，windows job 已踩过坑）；
+# flutter build 必须在 app/ 目录跑（workspace 根没有 android/ 与 lib/main.dart）。
 on:
   push:
     branches: [main]
@@ -11,15 +13,13 @@ on:
 jobs:
   ubuntu:
     runs-on: ubuntu-latest
-    env:
-      FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
-      PUB_HOSTED_URL: https://pub.flutter-io.cn
     steps:
       - uses: actions/checkout@v4
 
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Workspace pub get
         run: dart pub get
@@ -40,22 +40,22 @@ jobs:
         run: flutter test
 
       - name: Build Android APK (debug)
+        working-directory: app
         run: flutter build apk --debug
 
   windows:
     runs-on: windows-latest
-    env:
-      FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
-      PUB_HOSTED_URL: https://pub.flutter-io.cn
     steps:
       - uses: actions/checkout@v4
 
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Workspace pub get
         run: dart pub get
 
       - name: Build Windows (debug)
+        working-directory: app
         run: flutter build windows --debug
