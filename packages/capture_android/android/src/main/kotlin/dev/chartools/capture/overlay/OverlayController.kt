@@ -125,6 +125,18 @@ class OverlayController(
     /** B8 主推模式下被点开展开的备选下标（候选列表整体替换时清空）。 */
     private val expandedCandidates = mutableSetOf<Int>()
 
+    /**
+     * fix(kimi-review #11)：悬浮窗防截屏（FLAG_SECURE）开关，默认关。Dart 经
+     * control 通道 `setSecure(bool)` 推来（通道契约与 capture_android.dart
+     * 写死一致：方法名 'setSecure'，参数就是 bool 本身
+     * `call.arguments as? Boolean`，由 CaptureService.handleControl 的
+     * 'setSecure' 分支转进来）。true = 给悬浮窗窗口加 WindowManager 的
+     * FLAG_SECURE：系统截图与屏幕录制都拍不到窗口内容——候选是第三方对话
+     * 明文，录屏可整段带走。状态存内存：服务重启回默认关；窗口不在屏上时
+     * 只记状态，下次 [ensureWindow] 建窗时带上（开关先于弹窗打开也生效）。
+     */
+    private var secure = false
+
     // TODO(port)：旧仓库把锚点坐标存 Prefs（bubbleX/bubbleY，-1 = 默认），跨
     // 进程重启记忆位置；插件无 Prefs 宿主，先存内存（服务重启回到默认位置）。
     private var bubbleX = -1
@@ -173,7 +185,12 @@ class OverlayController(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            // fix(kimi-review #11)：防截屏开关开着时，新建窗口直接带上
+            // FLAG_SECURE（悬浮窗还没弹出期间开关被打开，等建窗在这里补上）。
+            if (secure) flags = flags or WindowManager.LayoutParams.FLAG_SECURE
+        }
         lp = params
         val r = FrameLayout(ctx)
         root = r
@@ -455,6 +472,30 @@ class OverlayController(
      *  下次 showSuggestions 再弹。只收卡不撤窗的语义走 [collapseSuggestions]。 */
     fun hideSuggestions() {
         hide()
+    }
+
+    /**
+     * fix(kimi-review #11)：设置悬浮窗防截屏（FLAG_SECURE）。窗口在屏上时即时
+     * 生效（updateViewLayout 重设 flags）；不在屏上时只记状态，下次建窗
+     * （[ensureWindow]）直接带上——开关与弹窗的先后顺序无关。[hide] 只撤
+     * 视图不重置本开关（与 [secure] 的内存态语义一致：服务活着就一直有效）。
+     */
+    fun setSecure(value: Boolean) {
+        if (secure == value) return
+        secure = value
+        val r = root ?: return
+        val params = lp ?: return
+        params.flags = if (value) {
+            params.flags or WindowManager.LayoutParams.FLAG_SECURE
+        } else {
+            params.flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
+        }
+        try {
+            wm.updateViewLayout(r, params)
+        } catch (e: Exception) {
+            android.util.Log.w(
+                "JEVASSIST", "overlay setSecure updateViewLayout failed: ${e.message}")
+        }
     }
 
     /**

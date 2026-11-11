@@ -62,6 +62,10 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            // fix(kimi-review 循环)：ConfigureReplayTest 等测试触到 android.util.Log /
+            // SystemClock 等 framework 桩——单测环境没有真实实现，缺这个开关就是
+            // "Method ... not mocked" RuntimeException。
+            isReturnDefaultValues = true
             all {
                 it.useJUnitPlatform()
 

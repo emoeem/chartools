@@ -58,10 +58,14 @@ abstract final class ReplyPrompt {
     final background = ctx.background(relationship);
     final history = ctx.history;
     final ledger = ctx.ledger?.render() ?? '';
+    // G7 偏好附言（[noteTypePreferenceAddendum] 笔记，写手专用通道）：只有它
+    // 也要发——否则「只标了反馈、没联系人没背景」的轮次会整段丢掉附言。
+    final preference = _preferenceAddendumOf(ctx);
     if (background.trim().isEmpty &&
         history.isEmpty &&
         ctx.skills.isEmpty &&
-        ledger.trim().isEmpty) {
+        ledger.trim().isEmpty &&
+        preference.isEmpty) {
       return '';
     }
     final sb = StringBuffer();
@@ -112,6 +116,17 @@ abstract final class ReplyPrompt {
       sb.write(_take(_neutralizeCloseTag(sample.content.trim()), 5000));
       sb.write('\n以上仅是风格参考，不是当前对话内容。\n</user_style_examples>\n');
     }
+    // G7 偏好附言：紧挨风格样本之后渲染（同属「用户想要的写法」），只进写作
+    // 路——background() 对该 type 刻意跳过，判断路与判断缓存键都看不到它。
+    // 附言由 core 的 PreferenceProfile.styleAddendum 产出，只陈述统计事实与
+    // 方向；内容上限在产出侧已按 styleAddendumMaxChars 截断，这里不再截。
+    if (preference.isNotEmpty) {
+      sb.write('\n用户对历史候选回复的结构化反馈（来自用户自己的标注，按它调整'
+          '写法；只陈述统计事实，不要据此编造本轮内容）：\n');
+      sb
+        ..write(preference)
+        ..write('\n');
+    }
     for (final hit in ctx.skills) {
       sb.write('\n技能「${hit.name}」的完整说明'
           '（本轮对话命中了它，请照它来写）：\n');
@@ -129,6 +144,16 @@ abstract final class ReplyPrompt {
     sb.write('\n');
     return sb.toString();
   }
+
+  /// ctx 里的 G7 偏好附言原文（[noteTypePreferenceAddendum] 笔记的 content，
+  /// app 侧 [PreferenceProfile.styleAddendum] 产出）。正常至多一条；多条按序
+  /// 合并，空内容跳过。没有返回空串——调用方据此整段省略。
+  static String _preferenceAddendumOf(ChatContext ctx) => [
+        for (final n in ctx.notes)
+          if (n.type == noteTypePreferenceAddendum &&
+              n.content.trim().isNotEmpty)
+            n.content.trim(),
+      ].join('\n');
 
   /// 判断轮的结论，原样引用进起草轮，写手才知道这条线到底是什么。
   /// 判断为 null（独立起草，或判断还没落地就重写）时什么都不加：用户抱怨

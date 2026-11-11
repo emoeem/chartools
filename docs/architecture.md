@@ -32,7 +32,8 @@ chartools-next/
 │   ├── src/scenarios/        场景模板（一套引擎 × 多场景）
 │   └── src/config/           JevConfig（旧 Prefs 的无 Android 依赖子集）
 ├── packages/capture_android/ 阶段 2：封装旧 Kotlin 采集服务（已落地，见 §6）
-├── packages/capture_windows/ 阶段 3：热键 + 剪贴板 + 选中文本（+ OCR）（未创建，见 §6.3）
+├── packages/capture_windows/ 阶段 3：剪贴板 + 选中文本（+ OCR）（未创建，见 §6.3；
+│                             全局热键 #6 已用 win32/ffi 直落 app，见 9.6）
 └── docs/
 ```
 
@@ -111,29 +112,30 @@ Pub workspace（根 `pubspec.yaml`）聚合全部成员，共享锁文件；core
   移植说明、`CaptureService.kt:716` 载荷解析）。
 - 「填入/复制」按钮经 onOverlayAction 交回 Dart；`CaptureSession` 用
   `_overlayCandidates`（最近一次推入的候选列表）解释事件里的下标：refill 成功
-  → 收起悬浮窗（填入即收起），失败 → 退回剪贴板；copy → 写剪贴板
-  （capture_session.dart:213-234）。
+  → 折回胶囊（填入即收卡），失败 → 退回剪贴板；copy → 写剪贴板
+  （capture_session.dart:982-1003）。
 - 开关单一事实来源：`SettingsStore.overlayEnabled` 一份 ValueNotifier，设置页
   与采集页写、CaptureSession 读；关掉立即收起，打开等下一批建议落地再弹
-  （capture_session.dart:88-91）。
+  （capture_session.dart:618-627）。
 - 权限：SYSTEM_ALERT_WINDOW 无运行时对话框——开关打开前先 canDrawOverlays
   查询，未授权引导去系统设置页（ACTION_MANAGE_OVERLAY_PERMISSION 按本应用
-  包名直达），授权回来后用户再开一次（app/lib/ui/capture_page.dart:117-120）。
+  包名直达），授权回来后用户再开一次（app/lib/ui/capture_page.dart:383-396）。
 
 ### 6.3 桌面粘贴流（Windows，阶段 3 首步）
 
 - **入口互斥**：Android 显「采集助手」、Windows 显「粘贴分析」，同一时刻只出
-  现一个（app/lib/main.dart:54-77 的 if / else if）。
+  现一个（app/lib/main.dart:179-230 的 if / else if）。
 - **流程**：粘贴文本 → `TranscriptParser` 按行解析（`我：/我:` → me、
   `对方：/对方:` → other，全半角冒号都认；无前缀行**不归属**，side 用
   SIDE_UNKNOWN `'?'`——与旧仓库 OcrGrouping 同值同理由：未知必须保持未知，
   否则满屏自己的消息会被读成来话）→ ChatSnapshot 打 `Provenance.desktop`
   来源标记 → 与 Android 采集同一条 judge → draftAndRank 流水线
-  （desktop_assistant_page.dart:51-103、transcript_parser.dart:40-56）。
+  （desktop_assistant_page.dart:186-280、transcript_parser.dart:40-56）。
 - 未归属行数写进快照 note 并原样展示，文案样式对齐旧仓库 OCR 的部分未知注记
-  （desktop_assistant_page.dart:47-49）。
-- 桌面候选以列表展示，「复制」写剪贴板；**没有热键与原生窗口采集**——后续接入
-  原生采集时只换快照来路，页面与流水线不动（desktop_assistant_page.dart:11-12）。
+  （desktop_assistant_page.dart:156-161）。
+- 桌面候选以列表展示，「复制」写剪贴板；**原生窗口采集仍未接**——后续接入时
+  只换快照来路，页面与流水线不动。全局热键（Ctrl+Alt+C 唤起本页）#6 已接，
+  见 9.6（desktop_assistant_page.dart:15-22）。
   `capture_windows` 插件未创建（根 pubspec.yaml workspace 注释：属阶段 3，
   落地后追加）。
 - 相对旧仓库的新增：`Provenance.desktop` 来源标记（旧仓库只有 a11y/ocr/inject）。
@@ -142,10 +144,12 @@ Pub workspace（根 `pubspec.yaml`）聚合全部成员，共享锁文件；core
 
 - `SettingsStore` 整包 JSON：`config`（JevConfig 全字段）+ `relationship`
   （默认「朋友」）+ `overlayEnabled`（默认开）序列化成一个字符串，存
-  shared_preferences 键 `settings`（settings_store.dart:27,72-83）。对应旧仓库
+  shared_preferences 键 `settings`（settings_store.dart:38、293-308）。对应旧仓库
   Prefs.kt 的三组偏好；旧仓库每项一个 key，这里整包对称存取，也给
-  `JevConfig.toJson` 一个位置。
-- 启动即读（app/lib/main.dart:13-15）：存档缺失、整包 JSON 损坏、平台通道
+  `JevConfig.toJson` 一个位置。整包形状此后随批次增长：#4 加 blockedPackages /
+  displayMode / onboarded / scenarioId，#6 加 `usage`（C9 累计口径）与
+  `sessionCheckpoint`（C10，见 9.4/9.5）；键名清单以 `toJson` 为准。
+- 启动即读（app/lib/main.dart:47-51）：存档缺失、整包 JSON 损坏、平台通道
   不可用一律按默认值起——坏存档不挡启动；写盘失败提示「已生效但写盘失败」，
   内存里的新值照常生效。
 - 旧遗留「API Key 随 JevConfig 明文落盘」已由 #4 收掉：key 单独存安全区
@@ -209,14 +213,14 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
 - 两层入口：`lint` 查单条、`lintGroup` 查整组——整组特征（长度均匀、清一色问号）
   只有把几条放一起才看得出来。
 - **挂接点**：`JevClient.draftAndRank` 终榜（排序 + 证据复查）之后
-  （`jev_client.dart:280-336`）。命中数 ≥ `rewriteThreshold`（= 2，单一特征不动手：
-  一次误伤的 refine 是真金白银和延迟）才走重写（#4 时走 `refineReply`，#5 起
-  自动整改改走润色路由，见 8.6），改写指令 =
+  （挂接在 `jev_client.dart:200-203`，实现在 `_applyFlavorLint` 355-406）。命中数
+  ≥ `rewriteThreshold`（= 2，单一特征不动手：一次误伤的 refine 是真金白银和延迟）
+  才走重写（#4 时走 `refineReply`，#5 起自动整改改走润色路由，见 8.6），改写指令 =
   `refineInstruction` 的人话描述（只说怎么改，不把坏例句放回提示词）。重写成功
   **原位换文本**，概率/策略/排序标记/复查备注全保留，绝不重排；失败或空 → 保留
   原文、概率降 0.1（不低于 0），排序里仍可见。
 - 开关经参数 `aiFlavorLintEnabled`（默认开）传入而非读配置——core 不反依赖 app；
-  开关进 `draftAndRank` 缓存键（`jev_client.dart:110-112`），切换不会命中旧缓存。
+  开关进 `draftAndRank` 缓存键的 params 分量（`jev_client.dart:548`），切换不会命中旧缓存。
 - 测试：`ai_flavor_linter_test.dart` 每条规则正例/反例 + 整组挂载 + 指令文案 +
   draftAndRank 挂接（stub server）。
 
@@ -234,14 +238,14 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   1/次、口头禅词组 2/次、emoji/波浪号 1、同字符连打 ≥3 记 2，密度封顶 1）；并列按
   原始出现顺序排，同一份输入永远选出同一批。
 - **条数**：硬上限 `styleSamplesHardMax = 5`，默认 3 与 `ReplyPrompt.knowledgeBlock`
-  的 `<user_style_examples>` 通道一轮最多引用 3 条对齐（`reply_prompt.dart:101-103`）；
+  的 `<user_style_examples>` 通道一轮最多引用 3 条对齐（`reply_prompt.dart:108-111`）；
   选中的原文不截断（每条 5000 字引用上限是 knowledgeBlock 既有规则，两边不重复干活）。
 - **只进写作路**：`ChatContext.background()` 渲染笔记时跳过
-  `noteTypeStyleSample`（`kb_models.dart:163-165`），判断路的 state 拿不到样例，
+  `noteTypeStyleSample`（`kb_models.dart:178-181`），判断路的 state 拿不到样例，
   写作路的 `<user_style_examples>` 正常引用。app 侧开关「学习我的说话方式」：
-  采集页从快照我方消息挑（`capture_page.dart:302-310`），桌面页从粘贴文本的
-  「我：」行挑（`desktop_assistant_page.dart:273-278`），都经
-  `CaptureSession.buildContext` 组装（`capture_session.dart:150-187`）。
+  采集页从快照我方消息挑（`capture_page.dart:480-487`），桌面页从粘贴文本的
+  「我：」行挑（`desktop_assistant_page.dart:419-425`），都经
+  `CaptureSession.buildContext` 组装（`capture_session.dart:368-412`）。
 
 ### 7.4 采集应用黑名单（⑦）
 
@@ -249,7 +253,7 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   随整包 JSON 持久化），默认 `{com.eg.android.AlipayGmobile 支付宝, com.unionpay
   云闪付, cn.soulapp.android Soul}`——Soul 是旧 `BLOCKED_PKGS` 原有成员（防截屏
   应用），随黑名单可配置化并入默认值，避免首次 configure 把它冲掉
-  （`settings_store.dart:88-106`）。
+  （`settings_store.dart:88-107`）。
 - **前缀底线不可被 UI 清空**：`com.android.bank` 前缀不持久化、不进可编辑集合，
   硬编码在 Kotlin `isBlocked()` 里（`CaptureService.kt:113-116`）。
 - **通道与优先级**：`configure` 新增 `blocked` 参数（`capture_android.dart:104-109`
@@ -258,8 +262,8 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   （`CaptureService.kt:380-383`）——用户明确拉黑的包即使加了白名单也不采。
   Kotlin 默认集合只在 configure 到来之前兜底。
 - **UI**：采集页「采集范围」卡黑名单区（FilterChip 点按移除 + 「添加包名」输入框），
-  增删走唯一写入口并立即重推 configure，改完即生效（`capture_page.dart:77-90,
-  383-389`）；`main.dart` 注入与设置页共享同一份 notifier（`main.dart:89-90`）。
+  增删走唯一写入口并立即重推 configure，改完即生效（`capture_page.dart:104-136,
+  578-607`）；`main.dart` 注入与设置页共享同一份 notifier（`main.dart:197`）。
 
 ### 7.5 API Key 安全区存储与迁移（F2）
 
@@ -268,16 +272,17 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   层，core 仍是零第三方依赖。
 - **存储形状**：`replyKey/judgeKey` 单独存安全区键 `config.replyKey/config.judgeKey`；
   `SettingsStore.toJson` 写盘前把这两个字段从 config JSON 移除——shared_preferences
-  里不再出现 key 明文（`settings_store.dart:44-51, 248-253`）。
+  里不再出现 key 明文（`settings_store.dart:293-297`）。
 - **写序**：`save()` 先安全区后 prefs——第二步失败时安全区已持有新 key，下次启动
   读到的是新值；反过来则可能旧 key 留在安全区、静默复活盖掉用户刚改的 key
-  （`settings_store.dart:234-243`）。空串 key 写安全区改为删除（不留空串密钥）；
+  （`settings_store.dart:282-288`）。空串 key 写安全区改为删除（不留空串密钥，
+  `settings_store.dart:67-72`）；
   安全区读失败按「没存过」处理，不挡其余字段加载。
 - **迁移（幂等）**：`load()` 里 `_migratePlainKeys`——旧存档 config 读到非空明文
   key → 写安全区 → 从存档删键并立即重写整包；删键后重写**不走 `save()`**（此刻
   内存还没灌入存档值，走 save 会把默认值覆盖上盘）；安全区写失败则原样保留明文
   （宁可维持旧明文行为也不弄丢 key），下次启动再迁；迁移过的存档无这两个键，
-  直接跳过（`settings_store.dart:197-232`）。
+  直接跳过（`settings_store.dart:242-275`）。
 
 ### 7.6 兼容锁策略（A1 + #4 新增默认路径的不变式）
 
@@ -296,8 +301,9 @@ app 两个分析入口也不选场景——当前实际请求都是默认 chat_c
   后续工作流——当前实际请求全部跑默认 chat_copilot。
 - **新增默认路径的逐字节不变式**：补充背景与风格学习都关时 `buildContext`
   返回 null，请求与旧版「不带 ctx」一致（载荷、缓存键都不动，
-  `capture_session.dart:146-149`）；linter 无命中的候选原样返回，不改概率不重排
-  （`jev_client.dart:301-305`）。
+  `capture_session.dart:405-410`；#6 扩参后该回落语义原样保持，见 9.1）；linter
+  无命中的候选原样返回，不改概率不重排
+  （`jev_client.dart:367-370`）。
 
 ## 8. #5 落地记录（外部审查借鉴 G2–G6 + 润色路由 A4）
 
@@ -361,20 +367,20 @@ injection_boundary / polish_route / jev_config）、app 两份（capture_session
   capture_android 门面的私有解析删除、改调 core（capture_android.dart:187-188），
   通道两端字段归一。
 - **门控判定（app 侧）**：阈值 0.5、比较用 **≤**（`confirmThreshold` /
-  `shouldConfirm`，capture_session.dart:120,125-126）——0.5 正是「OCR 基线 0.6
+  `shouldConfirm`，capture_session.dart:265,270-271）——0.5 正是「OCR 基线 0.6
   恰扣一条发言人未知」的精确落点，按 G3「身份不明确宁可拒绝，不猜测」不能贴线
   放行。`shouldConfirm` 是唯一比较点，采集流与桌面流共用。
 - **状态机**：低置信快照进门 state 置 `needsConfirm` 挂起，**不发起任何网络
   请求**，G1 预览先亮出来（确认前就能看到「确认后会把什么发出去」）
-  （capture_session.dart:378-398）；用户点「确认分析」→ `confirmAnalyze`，与
-  自动路径共用 `_runRound` 与轮次 token（406-412）；挂起态不被流错误吞掉
-  （`_setError` 保留 needsConfirm，355-363）、挂起态没有「不用回」
-  （`markHandled` 兜一道，538-543）。
+  （capture_session.dart:663-689）；用户点「确认分析」→ `confirmAnalyze`，与
+  自动路径共用 `_runRound` 与轮次 token（692-700）；挂起态不被流错误吞掉
+  （`_setError` 保留 needsConfirm，637-643）、挂起态没有「不用回」
+  （`markHandled` 兜一道，841-848）。
 - **UI 两端同构**：快照卡来源行共用一份文案 `sourceLineOf`（「来源：OCR ·
-  置信 0.6 · 原因：发言人未知」，capture_session.dart:276-282；
-  capture_page.dart:461、desktop_assistant_page.dart:461）；挂起卡给「确认分析」
-  出口（capture_page.dart:547-561、desktop_assistant_page.dart:410-423）。
-- **桌面流同一道闸**（desktop_assistant_page.dart:117-149）：粘贴快照当前恒为
+  置信 0.6 · 原因：发言人未知」，capture_session.dart:558-564；
+  capture_page.dart:639-640、desktop_assistant_page.dart:609-610）；挂起卡给「确认分析」
+  出口（capture_page.dart:724-745、desktop_assistant_page.dart:557-571）。
+- **桌面流同一道闸**（desktop_assistant_page.dart:204-216）：粘贴快照当前恒为
   缺省置信 1.0（契约只定义 a11y/ocr 基线，desktop 不参与扣分），这道闸实际不
   触发——先立闸后接源，接原生窗口采集后粘贴页走的就是同一条挂起/确认路径。
 - 测试：`SnapshotConfidenceContractTest.kt`（9 例，契约算术与标签）；
@@ -441,13 +447,13 @@ injection_boundary / polish_route / jev_config）、app 两份（capture_session
      被注入话术带偏吐出题外值时，原先会以应用口吻（「判断结果：」）原样回显，
      等于聊天/技能/笔记之外的第四条不可信通道。现在三个维度的空键与题外键统一
      落到「无信号」文案（`_noIntentText`/`_noNeedText`/`_noActionText`，
-     reply_prompt.dart:25-27、495/506/519）；`judgmentWords` 同步过滤题外值
-     （463-476），不让它变成技能检索词。**协议内文案逐字不动**（正向对照测试
+     reply_prompt.dart:25-27、520/531/544）；`judgmentWords` 同步过滤题外值
+     （484-499），不让它变成技能检索词。**协议内文案逐字不动**（正向对照测试
      钉住）。
   2. **风格样本闭合定界符**：样本正文是用户手维护/导入的不可信数据，携带
      `</user_style_examples>` 字面量就能把后半段提前「接出」数据段、冒充装配层
      口吻——引用前 `_neutralizeCloseTag` 把闭合序列拆开（reply_prompt.dart:
-     108-112、530-534）。不含该字面量的样本输出逐字节不变。
+     113-116、551-556）。不含该字面量的样本输出逐字节不变。
 - 测试：`packages/core/test/injection_boundary_test.dart`——全通道投毒（上下文
   各通道 + 人设卡 + 对话 + avoid）后 system 提示词与干净装配**逐字节一致**；每条
   注入话术只落在对应数据段内（聊天/
@@ -467,28 +473,237 @@ injection_boundary / polish_route / jev_config）、app 两份（capture_session
   （refine 0.65）——自动重写是「整改」不是创作，要去的 AI 腔、要修的复查问题
   都是明确的，不需要发散。
 - **只服务两处自动整改**：S1 复查驳回候选（`_applyReview`，jev_client.dart:
-  202-281）与 A2 linter 命中候选（`_applyFlavorLint`，294-341）。复查侧由旧的
+  248-341）与 A2 linter 命中候选（`_applyFlavorLint`，355-406）。复查侧由旧的
   一次批量 draft 改为逐条单条重写、驳回理由进改写指令；旧契约「条数对不上 →
   放弃替换」分支在结构上消失——任何一条失败或为空即整轮放弃替换，「复查只可能
   改好」语义原样保留。**手动 refine（候选卡按钮）不经这里**，继续走回复路由
-  `refineReply`（346）——用户点名的精修和后台自动整改分开记账。
+  `refineReply`（412）——用户点名的精修和后台自动整改分开记账。
 - **兼容口径（复核更正，以代码注释为准）**：未配润色路由**不是**「与改前逐字节
   一致」——A4 之前这两处分别走手动 refine（0.65）与一次批量 draft；回退保证的
   是端点/密钥/模型/提示词同源、行为不断，逐字节不变的只有手动 refine 路径本身。
 - **缓存**：`effectivePolishModel` 进 draftAndRank 的 params 分量
-  （jev_client.dart:495-504）——换润色模型即作废旧缓存（与复查模型同理）；
-  ReplyCacheKey 仍为十四分量，润色模型打包在 params 子分量内（§4 口径不变）。
-- **诚实边界**：设置页（app/lib/main.dart:187 的 SettingsPage）尚未露出润色
+  （`_replyParams`，jev_client.dart:570-579）——换润色模型即作废旧缓存（与复查
+  模型同理）；ReplyCacheKey 仍为十四分量，润色模型打包在 params 子分量内
+  （§4 口径不变；#6 的 G7 附言走 ctx 分量，见 9.2）。
+- **诚实边界**：设置页（app/lib/main.dart:314 的 SettingsPage）尚未露出润色
   三字段，默认空 → 全部回退回复路由（行为＝「同一条路、温度收着些的重写」）；
   UI 接线属后续工作流。
 - 测试：`jev_config_test.dart`（三字段回退推导、往返无损、缺键默认、与复查路由
   互不接力）；`polish_route_test.dart`（HTTP 层假服务器：请求真打到
   polishEndpoint、温度 0.4、密钥/模型用润色侧；未配置时按回退落回复路由）。
 
-## 9. 隐私与风险立场（不因重写而改变）
+## 9. #6 落地记录（记忆与个性化包）
+
+#6 落地 `docs/p0-plan.md`「外部审查借鉴」的 G7/G8 与「#5 候选」里的联系人档案
+简版、C9 用量统计、C10 会话 checkpoint、Windows 全局热键。p0-plan 的四条核心
+原则在本节各有一个落点：① 反馈是结构化的（9.2 的计数表）；② 用户可查看/修改/
+删除自己的偏好（9.2 的面板）；③ 模型猜测不当事实保存——联系人写入必须用户
+确认（9.3）；④ 浏览信息与进提示词的正文分离（9.1）。core 仍是零第三方依赖
+（新增 preference_profile.dart / usage_stats.dart），Windows 热键经 win32/ffi
+直调系统 API，不进插件。新增测试：core 两份（preference_profile_test 19 例、
+usage_stats_test 11 例）+ reply_prompt_test 增「G7 偏好附言」通道组；app、插件
+无新增测试文件。门禁统一跑，本节不记运行结果。
+
+### 9.1 联系人档案（浏览/正文分离，原则④）
+
+- **双层模型，notes 同名不同义**：app 层 `ContactProfile`
+  （app/lib/application/contact_store.dart:30）字段 displayName / aliases /
+  relationship / persona / avoidWords / notes / updatedAt。进提示词的只有三个
+  正文字段；notes 是「头像地址、标签、简介」一类给人看的浏览信息，**没有任何
+  进提示词的通路**。core 的 `Contact.notes`（kb_models.dart:86）语义相反——经
+  `ChatContext.background()` 渲染进提示词（kb_models.dart:163），两层映射时
+  绝不能照抄。
+- **映射刻意丢弃浏览信息**：`_coreContactOf`（capture_session.dart:418-436）把
+  档案映射成 core `Contact` 时 `notes: ''`、`autoSummary: ''`——关系/人设全空
+  返回 null，空壳档案不冒充「有联系人数据」。avoidWords 走一条固定 id 的知识
+  笔记 `_contactAvoidNoteId`（capture_session.dart:318、439-451），不冒充 core
+  的 contact notes 通道。
+- **G8 隔离是结构性的**：`CaptureSession` 只经 `applyContact` 读一份档案引用
+  （capture_session.dart:214-217），不持有 `ContactStore`、没有写回
+  ContactProfile 的通路；写路径只有 UI 的 create/update（编辑表单）与
+  confirmStagedFact（暂存区确认，9.3）。
+- **正文字段的通路**：relationship/persona 挂 `ChatContext.contact`（kb_models.dart:132），
+  关系压全局走 core `effectiveRelationship`（kb_models.dart:193）、人设经
+  `StyleSource.resolve`（style_source.dart:29）压全局 style——两条优先级都是
+  core 既定语义。三个采集/改写路径的关系取值统一改走 `effectiveRelationship`
+  （capture_session.dart:727-733、805-808、885-889）：联系人自己写了关系就压过
+  全局，无激活联系人时即改前的原样计算。
+- **buildContext 扩参**：新增 contact / preferences 两个可选参数
+  （capture_session.dart:368-412）。没有任何来源有货时仍返回 null——请求与基线
+  逐字节一致（载荷、缓存键都不动）；只写了关系/人设、没有笔记的联系人也不会被
+  「笔记空」吞掉（405-410）。
+- **存储**：shared_preferences 键 `contacts`，与 `settings` 键互不相干、形状各自
+  演进（contact_store.dart:180-226）；坏存档保持空清单，不挡启动。
+  `activeContact` **刻意不持久化**（contact_store.dart:187-194）——会话级恢复归
+  C10 的「待确认恢复」（9.5），静默存取激活选择等于绕过确认悄悄恢复会话。
+- **UI 两区分开标注**：联系人卡把「进提示词的正文（模型会读到）」与「仅浏览
+  信息（模型永远看不到）」画成两个描边分区（capture_page.dart:1223 起的
+  ContactSection，桌面页复用）；编辑/新建对话框同构分区（1642 起的
+  _ContactFormDialog）。可纠错性：人设正文逐行展示、逐行移除
+  （capture_page.dart:1311-1346、1437-1452），确认错的事实不必手改存档 JSON；
+  长按删除过确认框（1497）；update 对不存在的 id 抛 StateError 而非静默
+  （contact_store.dart:269-287）。
+
+### 9.2 G7 反馈学习（结构化偏好，原则①②）
+
+- **core 引擎**（`packages/core/lib/src/persona_kb/preference_profile.dart`）：
+  六类标注 `PreferenceTag`（too_formal / too_enthusiastic / not_direct_enough /
+  expression_mismatch / unwanted_commitment / ask_first，43-81，wire 名即持久化
+  契约）；`record` 记「计数 + 环形样例」（每类最多
+  `preferenceExamplesPerTag`=5 条，30、98-106）；`clear` / `clearAll` 即删
+  （133-142）。方向短语是用户标注的直译、写死在枚举字段里——模型不参与措辞，
+  没有编造规则的通道。
+- **候选原文只存本地给用户看，永不进提示词**（原则④）：候选文本来自模型输出、
+  间接来自聊天内容，按 G6 属不可信数据；`styleAddendum` 只写「次数 + 方向」，
+  不引用任何样例原文（211-228）。
+- **附言是事实性陈述**：单类别形如「用户对历史候选的反馈统计：回复偏正式
+  （3 次）——应更口语」，多类别按次数降序「；」连接（排序显式写进比较器：
+  次数降序、平次按枚举声明序，119-127）；上限 `styleAddendumMaxChars`=300 字
+  （runes 计，35、211-228），装不下的整行丢弃、不写截断记号，连第一行都放不下
+  返回空串；无记录返回空串，调用方整段省略。
+- **进提示词的通道（新笔记类型，只进写作路）**：core 新增
+  `noteTypePreferenceAddendum`（kb_models.dart:25）——`ChatContext.background()`
+  对该 type 与 style_sample 一并跳过（kb_models.dart:178-181），判断路的 state
+  与判断缓存键都看不到它；`ReplyPrompt.knowledgeBlock` 在风格样本之后渲染
+  （reply_prompt.dart:119-130），且「只带附言、没联系人没背景」的 ctx 不再整段
+  丢弃（reply_prompt.dart:63-68）。app 侧每轮现算：`styleAddendum` 原文包成一条
+  固定 id 的偏好笔记随 ctx 出门（capture_session.dart:328-343），无记录不产空
+  笔记——偏好面板里删掉，下一轮起草立即不带。
+- **缓存键**：附言段挂在回复 ctx 键尾且无附言时整段缺席
+  （jev_client.dart:596-612）——没有偏好记录的请求，键与接入前逐字节一致；
+  记录/删除后立即换键。
+- **UI 可查可改可删**：候选卡下六个标签按钮（太正式 / 太热情 / 不够直接 /
+  事实对但表达不合适 / 不该承诺 / 这类先问我，capture_page.dart:1137 起的
+  FeedbackTagRow，两页共用）；已记录的显示 ✓ 并禁用——勾选态取自偏好档案
+  「这条原文已在该类样例里」这一可查事实，不是页面私有状态，删除后自动恢复
+  可点。「查看我的偏好」面板（capture_page.dart:1815 起的 showPreferencesSheet）
+  列六类计数与最近样例、逐类删除、一键清空（过确认框），并展示将附进提示词的
+  附言原文。落盘在 app 层：shared_preferences 键 `preference_profile`
+  （main.dart:19、23-45），record/clear 之后由页面的 persistPreferences 回调
+  触发写盘。
+
+### 9.3 G8 确认后入库（原则③）
+
+- **暂存区只在内存**：`StagedCandidateFact`（contact_store.dart:141-168）不落盘
+  ——模型猜测的事实落盘前必须过用户确认，确认前连磁盘都不碰，重启即清空是
+  有意的（contact_store.dart:196-199）。
+- **入口只有 UI**：`stageCandidateFact` 的调用方只有采集页/桌面页的「记住这条」
+  按钮（capture_page.dart:962-999 的 RememberFactButton，两页共用；调用点
+  capture_page.dart:982、desktop_assistant_page.dart:749）——判断/起草链路没有
+  任何写 ContactProfile 的通路。
+- **确认即追加进人设正文**：`confirmStagedFact`（contact_store.dart:351-365）把
+  候选原文追加进目标联系人的 persona（`\n` 分行，UI 据此逐行展示/移除，9.1）；
+  目标按 确认参数 → 候选自带 contactId → 当前激活 解析，三者都落空返回 null、
+  候选**留在暂存区**（UI 提示先选人，不静默吞掉）。`discardStagedFact` /
+  `clearStagedFacts` 就地撤销，任何档案都不动。
+- **UI**：确认条 StagedFactBar（capture_page.dart:1003-1121）列全部暂存事实，
+  「确认保存到联系人」/「丢弃」，两页共用；确认成功提示写进了谁的资料。
+- **台账侧留白**：G8 原文是「联系人资料/台账」——台账（Ledger）当前在 app 侧
+  没有任何写入入口（core 只读渲染），本期确认入库落在联系人资料上；台账将来
+  接入写入时同走「暂存 → 确认」。
+
+### 9.4 C9 用量统计
+
+- **core**（`packages/core/lib/src/pipeline/usage_stats.dart`）：`UsageStats` 四条
+  路由（judge / reply / review / polish）× 两个口径（累计，随设置持久化；本次
+  会话，启动清零、不落盘）的调用 / 失败 / 缓存命中计数（28-48、89-101）。
+  不变式：失败 ⊆ 调用（`recordFailure` 只补失败那一笔；存档灌入时把失败数夹回
+  [0, calls]，75-81）；缓存命中不进调用数（命中不走网络）；review / polish 无
+  缓存，命中恒 0（17-20）。
+- **打点不改变任何请求字节**：`JevClient._tracked`（jev_client.dart:79-93）在
+  门面层包装——发起前记调用，异常（用户取消除外）补失败后原样上抛，调用方
+  既有的兜底分支不变；stats 缺省 null 时零开销直通，现有调用方与测试零改动。
+  三处「调用成功但没产出」的失败补记：judge 的 Analysis.error（118）、review
+  解析 null（276-280）、复查侧润色重写空结果（312-315）；linter 侧重写失败
+  **不补记**——catch 之后无法区分「异常」与「空解析」，再记会把同一笔双计
+  （jev_client.dart:386-389）。
+- **接线契约**：一份实例三处共用——构造 `JevClient(config, stats: …)`（采集流
+  capture_session.dart:726、811、891；桌面流 desktop_assistant_page.dart:262、305），
+  设置页统计卡读同一对象；load 经 `UsageStats.restore` 就地恢复
+  （usage_stats.dart:177-182），引用从构造起稳定，不存在「恢复前构造的
+  JevClient 打到旧实例上」的窗口。累计口径进设置整包 JSON 的 `usage` 键
+  （settings_store.dart:137、224、305）。
+- **UI**：设置页统计卡四行（每行累计大字 + 会话小字）+ 重置按钮（main.dart:
+  442-478、565）；数字在打开本页 / 点重置时读一次——无通知机制，后台链路的
+  增量要重进本页才刷新（usage_stats.dart:86-88）；重置清两个口径并尽力写盘，
+  失败不弹打扰性提示（main.dart:480-487）。
+
+### 9.5 C10 会话 checkpoint
+
+- **形状**：`SessionCheckpoint {signature, relationship, activeContactId}`
+  （capture_session.dart:71-132）——快照正文不落盘，签名只是「上次进行到哪一屏」
+  的标识；存档键 `sessionCheckpoint` 并入设置整包 JSON（settings_store.dart:
+  159-163、306），形状真相在 SessionCheckpoint，store 当不透明 Map 存取。
+- **写入点与尽力而为**：快照进门（capture_session.dart:658-662，自动分析与
+  G3 挂起两条路共用这一刻）与切换/取消联系人（214-217）各记一笔；写失败静默
+  ——检查点丢了顶多少一次恢复提示，不能让采集主流程为它失败（236-248）。
+- **恢复必须过用户确认（不静默恢复）**：进采集页首帧后弹「待确认恢复上次会话」
+  对话框（capture_page.dart:223-262），列出关系描述 / 联系人 / 快照标识并写明
+  「聊天内容本身不落盘、无法恢复」；确认后 `restoreCheckpoint` 回填
+  （capture_session.dart:227-231）——这是 CaptureSession 唯一写全局 relationship
+  notifier 的地方；激活联系人按存档 id 经 `byId` 解析，档案已删按「无联系人」
+  恢复，不猜测；确认后写 null 清档。取消/关闭保留存档，下次进页再问。
+- **写入闸门**：恢复提示未决期间拦下检查点写入（capture_page.dart:199-217）
+  ——不加闸的话，进页 initState 的 applyContact（此刻还没有快照，签名是空串）
+  会立刻用「空会话」覆盖存档里的上次会话，恢复提示永远没东西可恢复。
+
+### 9.6 Windows 全局热键（Ctrl+Alt+C）
+
+- **依赖选型**：`win32 ^6.4.0` + `ffi ^2.2.0` 由传递依赖升直依，零新增包；
+  hotkey_manager 0.3.0 被否——其 Windows 实现经 nativeapi → cnativeapi 走
+  native assets 构建链（构建期编 C++），等价给工作区第三次引入「本机工具链
+  缺失即构建挂」的坑，取舍记录在 app/pubspec.yaml 的依赖注释里。
+- **纯 Dart FFI 直调 user32**：`HotkeyController`
+  （app/lib/application/hotkey_controller.dart）。线程模型按 RegisterHotKey 的
+  硬约束设计——WM_HOTKEY 只投递给**调用 RegisterHotKey 的那条线程**，故用
+  `Isolate.spawn` 起专用泵线程（175-182），从注册到消息循环退出之间没有任何
+  await，注册与泵固定在同一条 OS 线程；关停走 PostThreadMessage(WM_QUIT)
+  （194-203），泵线程 finally 里「有注册必注销、有端口必收尾」（377-383）；
+  代际计数（212-216）对账迟到事件，快节奏开关不会「关了又活过来」。
+- **触发语义（主动权在用户）**：切前台 → 页面顶到栈顶 → 聚焦输入框，三步都
+  不读剪贴板、不触发分析（245-258）。切前台用类名 + 标题双条件 FindWindow 定位
+  本应用窗口（264-288），最小化先还原，前台被拒时 AttachThreadInput 兜底；
+  导航 popUntil 以路由名 `desktop-assistant` 识别「页面已在栈顶」（73、252），
+  手动入口推的路由带同一个名字（main.dart:216-219）；页面经 initState 补票消费
+  聚焦请求（desktop_assistant_page.dart:118-133，覆盖「本次触发恰好把页面新推
+  入栈」的路径）。
+- **失败可见**：注册失败写 `error` notifier，页内 errorContainer 卡片原样展示
+  （desktop_assistant_page.dart:427-464）；1409（ERROR_HOTKEY_ALREADY_REGISTERED）
+  给出「被占用 / 刚关闭未注销完」两个可能原因的文案（hotkey_controller.dart:
+  228-239）。开关状态存 shared_preferences 键 `desktopAssistant.hotkeyEnabled`
+  （69），独立于设置整包 JSON；读不到按默认开，与 UI 默认一致（120-131）。
+- **平台门控**：非 Windows（含 Web）入口整段不渲染、控制器方法空操作
+  （hotkey_controller.dart:49-50、desktop_assistant_page.dart:427），其它平台
+  不 import 不调用——热键代码不影响非 Windows 编译。
+
+### 9.7 兼容口径与诚实边界
+
+- **无联系人 / 无偏好 / 不打点 = 基线**：buildContext 的回落 null 路径保留
+  （capture_session.dart:405-410）；回复缓存键的附言段空缺时整段缺席
+  （jev_client.dart:596-612）；JevClient 不传 stats 零打点；ContactStore / 偏好
+  未注入（直接 pump 组件的测试场景）时两页相关 UI 不渲染。
+- **G1 预览同步扩展（写出去了什么就列什么）**：联系人关系行显示联系人那份并
+  注明压过全局、避免用词单独一行、专用人设也算「联系人备注：有」（519-529）
+  ——只查 notes/relationship 会把 persona-only 的档案漏报成「无」；G7 偏好附言
+  与实际发送同源列进写作路一列（549-552）。预览按同一条 ctx 算出，不是两套
+  各说各话的清单。
+- **存储键位**：`settings`（整包，#6 新增 usage / sessionCheckpoint 两键）、
+  `contacts`、`preference_profile`、`desktopAssistant.hotkeyEnabled` 四键并存；
+  API key 仍单独存安全区（F2 范围不变），联系人 / 偏好 / 统计 / 热键开关不走
+  secure storage——非密钥字段，p0-plan F2 只针对 API Key。
+- **诚实边界**：① 桌面粘贴流同样吃联系人/偏好注入（同一份 buildContext，
+  desktop_assistant_page.dart:173-179），但桌面页关系输入仍是页内字段、不经
+  restoreCheckpoint 回填路径；② 热键只有编译与单测覆盖，真机/真实桌面的前台
+  切换、AttachThreadInput 兜底行为本工作流未验证；③ 台账写入通路不存在（9.3）；
+  ④ 偏好样例环形只留最近 5 条，久远原文不再显示勾选属预期（重新点按即重新
+  记录）；⑤ C9 统计卡数字无通知机制，后台增量要重进设置页才刷新。
+
+## 10. 隐私与风险立场（不因重写而改变）
 
 - 聊天文字发送到用户自配的模型服务商；截图仅本机 OCR；历史默认关闭、仅存本地。
 - 「身份不明确宁可拒绝，不猜测」已落为机制：来源不可靠（低置信）的快照不自动
   分析、等用户确认（G3 门控，§8.2）；不可信数据进不了 system 段（G6 边界，§8.5）。
+- 「模型猜测不当事实保存」已落为机制：判断/起草结果绝不自动写联系人档案，
+  「记住这条」先进内存暂存区、用户确认才入库（G8，§9.3）。
 - 无障碍读屏 + 回填在部分聊天 App 条款下有封号风险；桌面端走官网分发。
 - 起草前 SafetyGate 预检永不关闭：违法/自伤/未成年×亲密/安全词/硬边界直接阻断，黄灯与换说法边界降为谨慎提示。

@@ -14,6 +14,16 @@ import 'ledger.dart';
 /// actually said.
 const String noteTypeStyleSample = 'style_sample';
 
+/// [Note.type] marking the user's structured preference addendum (G7 反馈
+/// 学习): the statistic summary of how the user tagged past candidate replies
+/// (too formal, not direct enough, …). Like style samples it is a
+/// **writer-only** channel — [ChatContext.background] skips it because the
+/// judge reads that string and the addendum says nothing about the situation
+/// on screen (it is about the user's own style feedback); the reply prompt
+/// renders it after the background/history block. Carried by the app as a
+/// fixed-id note (see app capture_session.dart 的 _preferenceNoteId).
+const String noteTypePreferenceAddendum = 'preference_addendum';
+
 /// One free-text knowledge note the user maintains by hand.
 class Note {
   const Note({
@@ -162,7 +172,13 @@ class ChatContext {
       }
     }
     for (final n in notes) {
-      if (n.type == noteTypeStyleSample) continue;
+      // 风格样本与 G7 偏好附言都只进回复提示词：前者由 reply_prompt 引用为
+      // <user_style_examples>，后者由 reply_prompt 以固定引导语渲染——两者
+      // 都不该出现在判断路的 background 里（判断缓存键也因此不受它们影响）。
+      if (n.type == noteTypeStyleSample ||
+          n.type == noteTypePreferenceAddendum) {
+        continue;
+      }
       sb.write('${n.title.trim()}: ${n.content.trim()}\n');
     }
     return sb.toString().trim();

@@ -39,11 +39,32 @@ class BlockedPackagesTest {
 
     @Test
     fun bankPrefixIsBlockedRegardlessOfList() {
-        // com.android.bank 前缀命中即拦：黑名单清空也拦（底线清单不可配置）。
+        // com.android.bank 关键词命中即拦（#4 后为中缀匹配，旧前缀写法已废）：
+        // 黑名单清空也拦（底线清单不可配置）。
         assertTrue(CaptureService.isBlockedPackage("com.android.bank", emptySet()))
         assertTrue(CaptureService.isBlockedPackage("com.android.bank.mobile", emptySet()))
-        // 前缀之外的同族包名不受牵连。
+        // 关键词不命中的同族包名不受牵连。
         assertFalse(CaptureService.isBlockedPackage("com.android.chrome", emptySet()))
+    }
+
+    @Test
+    fun hardKeywordFloorHitsRealFinancePackages() {
+        // fix(kimi-review #4)：底线清单改为真实包名可命中的关键词中缀匹配——
+        // 旧清单只有一个虚构前缀 "com.android.bank"，一个真实 App 都拦不住。
+        // 以下全是真实存在的包名（黑名单清空也拦，底线不随 configure 配置）：
+        // 支付宝、云闪付、交通银行、PayPal、Samsung Pay、Google Wallet。
+        assertTrue(CaptureService.isBlockedPackage("com.eg.android.AlipayGmobile", emptySet()))
+        assertTrue(CaptureService.isBlockedPackage("com.unionpay", emptySet()))
+        assertTrue(CaptureService.isBlockedPackage("com.bankcomm.maidianba", emptySet()))
+        assertTrue(CaptureService.isBlockedPackage("com.paypal.android", emptySet()))
+        assertTrue(CaptureService.isBlockedPackage("com.samsung.android.spay", emptySet()))
+        assertTrue(CaptureService.isBlockedPackage("com.google.android.apps.walletnfcrel", emptySet()))
+        // 大小写不敏感（包名段可能带大写，如支付宝的 AlipayGmobile）。
+        assertTrue(CaptureService.isBlockedPackage("com.PayPal.Android", emptySet()))
+        // 采集目标不受关键词牵连（含微信——微信支付与微信同包，随微信规则走）。
+        assertFalse(CaptureService.isBlockedPackage("com.tencent.mobileqq", emptySet()))
+        assertFalse(CaptureService.isBlockedPackage("com.tencent.mm", emptySet()))
+        assertFalse(CaptureService.isBlockedPackage("org.telegram.messenger", emptySet()))
     }
 
     @Test

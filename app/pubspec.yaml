@@ -26,6 +26,20 @@ dependencies:
   # 与工作区统一声明的 ^3.6.0 兼容（11.x 要求 >=3.8.0）；app minSdk 30，
   # 高于插件要求的 23。
   flutter_secure_storage: ^10.3.4
+  # Windows 全局热键（默认 Ctrl+Alt+C 唤起桌面助手页）的实现通道：纯 Dart FFI
+  # 直调系统 user32.dll（RegisterHotKey + WM_HOTKEY 消息泵线程 + 切前台），
+  # 不引入任何原生编译步骤。曾评估 hotkey_manager 0.3.0（sdk ^3.13.0 /
+  # flutter >=3.47.0 与本机匹配），但其 Windows 实现经 nativeapi → cnativeapi
+  # 走 native assets 构建链（cnativeapi 的 hook/build.dart 在构建期用
+  # native_toolchain_c 编译 C++，本会话已核对源码），等价于给工作区第三次引入
+  # 「本机工具链缺失即构建挂」的坑（见根 pubspec.yaml 两处钉版先例），且
+  # analyze/test 门禁无法在不跑构建的前提下验证该 hook。win32 6.4.0 本就是
+  # 锁内传递依赖（flutter_secure_storage_windows 通道），升直依零新增包。
+  # 仅 Windows 代码路径使用，其它平台不 import 不调用。
+  win32: ^6.4.0
+  # win32 的配套：Arena/using（FindWindow 字符串的原生内存生命周期）与
+  # String.toNativeUtf16。同为既有传递依赖升直依，零新增包。
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:

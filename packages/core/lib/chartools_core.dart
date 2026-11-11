@@ -31,6 +31,9 @@ export 'src/persona_kb/domain_brief.dart';
 export 'src/persona_kb/kb_models.dart';
 export 'src/persona_kb/ledger.dart';
 export 'src/persona_kb/persona_card.dart';
+// #6（交互写手的最小越界，已在交付 notes 声明）：C 的新文件按 barrel 头部
+// 规则「新增文件必须挂进这里」挂载，否则 app 层看不到 PreferenceProfile。
+export 'src/persona_kb/preference_profile.dart';
 export 'src/persona_kb/style_profile.dart';
 export 'src/persona_kb/style_source.dart';
 export 'src/persona_kb/topic_scope.dart';
@@ -42,5 +45,6 @@ export 'src/pipeline/reply_client.dart';
 export 'src/pipeline/reply_prompt.dart';
 export 'src/pipeline/reply_review.dart';
 export 'src/pipeline/strategy_order.dart';
+export 'src/pipeline/usage_stats.dart';
 export 'src/safety/safety_gate.dart';
 export 'src/scenarios/scenario.dart';

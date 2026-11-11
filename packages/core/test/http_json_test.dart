@@ -117,6 +117,60 @@ void main() {
       expect((e as ApiException).status, 500);
       expect(server.requestCount, 3);
     });
+
+    test('服务端截断回显 key 片段也脱敏：前后 8 字符不泄漏（kimi-review #10）', () async {
+      // 19 字符的 key：前 8 = sk-abcde，后 8 = ij123456。响应体里只回显
+      // 片段、不含整串——原先的 replaceAll(key) 精确匹配抓不住它们。
+      const key = 'sk-abcdefghij123456';
+      server.enqueue(const MockResponse(
+        401,
+        '{"error":{"message":"invalid key: sk-abcde…（prefix）…ij123456（suffix）"}}',
+      ));
+
+      final e = await failure(
+          () => HttpJson.post(url(), key, body(), Route.judge));
+      final api = e as ApiException;
+
+      expect(api.status, 401);
+      expect(api.message, contains('[key]'));
+      expect(api.message, isNot(contains('sk-abcde')));
+      expect(api.message, isNot(contains('ij123456')));
+      // 客户端错误是终局，一次出网。
+      expect(server.requestCount, 1);
+    });
+
+    test('URL 编码形态的 key 回显也脱敏（kimi-review #10）', () async {
+      // 含保留字符的 key：Uri.encodeComponent('sk=secret123') =
+      // 'sk%3Dsecret123'，服务端按编码形态回显时原先也抓不住。
+      const key = 'sk=secret123';
+      server.enqueue(const MockResponse(
+        401,
+        '{"error":{"message":"auth failed for sk%3Dsecret123"}}',
+      ));
+
+      final e = await failure(
+          () => HttpJson.post(url(), key, body(), Route.judge));
+      final api = e as ApiException;
+
+      expect(api.message, contains('[key]'));
+      expect(api.message, isNot(contains('sk%3Dsecret123')));
+      expect(api.message, isNot(contains('sk=secret123')));
+    });
+
+    test('请求体不可编码：抛参数错误，一次都不出网、不重试（kimi-review #9）', () async {
+      // body 里塞一个 jsonEncode 处理不了的对象。原先它会被 catch-all 当
+      // 传输失败重试满 3 次；现在编码在循环外，编码失败直接抛参数错误。
+      final bad = <String, dynamic>{
+        'model': 'm',
+        'payload': DateTime.now(), // DateTime 没有 toJson，编码必抛
+      };
+
+      final e = await failure(
+          () => HttpJson.post(url(), 'test-key', bad, Route.judge));
+
+      expect(e, isA<ArgumentError>());
+      expect(server.requestCount, 0);
+    });
   });
 
   group('stream SSE 路径', () {
@@ -205,6 +259,19 @@ void main() {
       expect(e, isA<ApiException>());
       expect((e as ApiException).status, 401);
       expect(e.message, contains('回复接口 HTTP 401'));
+    });
+
+    test('stream 路径同样做片段脱敏（kimi-review #10）', () async {
+      const key = 'sk-abcdefghij123456';
+      server.enqueue(const MockResponse(401, 'leaked prefix sk-abcde here'));
+
+      final e = await failure(() =>
+          HttpJson.stream(url(), key, body(), Route.reply, onData: (_) {}));
+
+      expect((e as ApiException).message, isNot(contains('sk-abcde')));
+      // fix(kimi-review #N gate)：上行 as 已把局部 e 提升为 ApiException，这里
+      // 再 cast 触发 analyzer 的 unnecessary_cast（门禁 0 issue 要求）。
+      expect(e.message, contains('[key]'));
     });
   });
 }

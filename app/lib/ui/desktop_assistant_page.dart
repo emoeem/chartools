@@ -3,18 +3,36 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../application/capture_session.dart';
+import '../application/contact_store.dart';
+import '../application/hotkey_controller.dart';
 import '../application/settings_store.dart';
 import '../application/transcript_parser.dart';
+// 联系人 / G7 偏好的共享 UI 在采集页文件里（两个文件同属交互写手）：
+// ContactSection / StagedFactBar / showPreferencesSheet。候选区（候选卡 /
+// B7 / B8 / G1 预览）与卡上的 G7 反馈标签行、「记住这条」按钮抽在
+// widgets/candidate_list.dart（kimi-review #16 共用 widget，两页只传数据
+// 与回调）。
+import 'capture_page.dart';
+import 'widgets/candidate_list.dart';
 
 /// 桌面「粘贴分析」页（Windows）：把剪贴板里的聊天记录按行解析成快照
 /// （[TranscriptParser]），打上 [Provenance.desktop] 来源标记，走与 Android
 /// 采集同一条 判断 → 起草 → 排序 流水线。
 ///
-/// 本阶段没有热键与原生窗口采集：先靠人手粘贴，链路其余部分保持一致，
-/// 后续接入原生采集时只换快照的来路，不用动这一页。
+/// 本阶段没有原生窗口采集：先靠人手粘贴，链路其余部分保持一致，后续接入
+/// 原生采集时只换快照的来路，不用动这一页。Windows 全局热键（Ctrl+Alt+C）
+/// 已接入：开关在页内，触发 = 把本页切到前台并聚焦粘贴输入框
+/// （[HotkeyController]，不读剪贴板、不自动分析）。
 class DesktopAssistantPage extends StatefulWidget {
-  const DesktopAssistantPage(
-      {super.key, required this.config, this.displayMode});
+  const DesktopAssistantPage({
+    super.key,
+    required this.config,
+    this.displayMode,
+    this.contactStore,
+    this.preferences,
+    this.persistPreferences,
+    this.usage,
+  });
 
   final ValueNotifier<JevConfig> config;
 
@@ -24,12 +42,32 @@ class DesktopAssistantPage extends StatefulWidget {
   /// 产品默认（displayModePrimary）渲染。
   final ValueNotifier<String>? displayMode;
 
+  /// #6 联系人档案（A 的 ContactStore）：可选注入——main.dart 传入共享实例。
+  /// 未注入时联系人区不渲染，粘贴分析不带联系人上下文（与基线一致）。
+  final ContactStore? contactStore;
+
+  /// G7 结构化偏好（C 的 PreferenceProfile）：可选注入。未注入时候选卡的
+  /// 反馈标签行与「查看我的偏好」入口不渲染。
+  final PreferenceProfile? preferences;
+
+  /// G7 偏好落盘回调（main.dart 注入）：record/clear 之后由页面触发。
+  final void Function()? persistPreferences;
+
+  /// C9 使用统计（可选注入，[SettingsStore.usage] 同一份实例）：传入后本页
+  /// 的判断/起草/改写调用打点写进它，设置页统计卡读同一份对象。桌面流不经
+  /// [CaptureSession]，需要单独注入。null = 不打点（与接入前逐字节一致）。
+  final UsageStats? usage;
+
   @override
   State<DesktopAssistantPage> createState() => _DesktopAssistantPageState();
 }
 
 class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
   final TextEditingController _input = TextEditingController();
+
+  /// 热键唤起后的聚焦目标：全局热键把本页切到前台时定位到这里
+  /// （[HotkeyController.activationTick] 触发，见 [_onHotkeyActivated]）。
+  final FocusNode _inputFocus = FocusNode();
   final TextEditingController _relationship = TextEditingController(text: '朋友');
 
   /// ③ 补充背景输入框：随判断与起草一起发送（与采集页同一份实现，
@@ -49,6 +87,16 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
 
   /// 正在快速改写的候选下标：busy 只作用于该卡。
   final Set<int> _refining = {};
+
+  /// fix(kimi-review #18)：改写发起时所在轮次的 token，每轮分析自增。改写
+  /// await 期间用户可点「分析」开新一轮（[_runAnalysis] 整体替换候选）——
+  /// 旧快照的改写结果返回后比对 token，轮次已换就作废，不许按 index 写进
+  /// 新轮次的候选。按任务原话持 analysis 实例做 identical 比对不够用：同轮
+  /// 并发的两张卡改写（不同卡可同时改写，[_refining] 只挡同下标），先返回
+  /// 的一张 copyWith 换了 [_analysis] 实例，后返回的一张会被误判成换轮、
+  /// 结果静默丢弃。采集会话对同一问题用的就是轮次 token（见
+  /// capture_session.dart refineCandidate「与 _onSnapshot 同一道防护」）。
+  int _analysisRound = 0;
 
   /// B8：被点开展开的备选卡下标（主推模式下备选默认折叠为两行小字）。
   final Set<int> _expandedCandidates = {};
@@ -76,6 +124,27 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
   void initState() {
     super.initState();
     widget.displayMode?.addListener(_onDisplayModeChanged);
+    // 热键接线（仅 Windows；控制器在别的平台是空操作，但 UI 与监听一并隐藏
+    // 更干净）：页面向控制器登记自己的在树状态与监听——热键触发时控制器负责
+    // 切前台与路由，本页只管把焦点放进粘贴输入框。
+    if (HotkeyController.isSupported) {
+      HotkeyController.instance.attachPage();
+      HotkeyController.instance.activationTick.addListener(_onHotkeyActivated);
+      // 本次热键触发恰好把本页新推入栈的路径：监听注册晚于信号发出，
+      // initState 里补一次消费（消费即清位，两个入口不会重复聚焦）。
+      if (HotkeyController.instance.consumePendingFocus()) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _focusInput());
+      }
+    }
+  }
+
+  /// 热键触发（页面已在树上）：取走聚焦请求，把光标放进粘贴输入框。
+  void _onHotkeyActivated() {
+    if (HotkeyController.instance.consumePendingFocus()) _focusInput();
+  }
+
+  void _focusInput() {
+    if (mounted) _inputFocus.requestFocus();
   }
 
   void _onDisplayModeChanged() {
@@ -84,7 +153,13 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
 
   @override
   void dispose() {
+    if (HotkeyController.isSupported) {
+      HotkeyController.instance.detachPage();
+      HotkeyController.instance.activationTick
+          .removeListener(_onHotkeyActivated);
+    }
     widget.displayMode?.removeListener(_onDisplayModeChanged);
+    _inputFocus.dispose();
     _input.dispose();
     _relationship.dispose();
     _extra.dispose();
@@ -98,6 +173,31 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       ? null
       : '有 ${parsed.unattributed} 行未归属：行首没有「我：/对方：」前缀，按发言人不明处理';
 
+  /// #6 当前激活联系人（A 的 ContactStore.activeContact 直接读；未注入或无
+  /// 激活返回 null）。
+  ContactProfile? get _activeContact =>
+      widget.contactStore?.activeContact.value;
+
+  /// 组装本轮 ctx（补充背景 + 风格样本 + 激活联系人 + G7 偏好附言）：judge 与
+  /// draftAndRank 必须拿同一份，G1 预览由它算出。contact 走 A 的 buildContext
+  /// 契约扩展（ContactProfile? 可选参数）——无激活联系人且无偏好记录时传
+  /// null/空，请求与基线逐字节一致。偏好附言只进写作路（buildContext 内按
+  /// 固定 id 笔记承载，core 侧 background 刻意跳过），G1 预览同步列出。
+  ChatContext? _buildCtx(ChatSnapshot snapshot) => CaptureSession.buildContext(
+        extra: _extra.text,
+        myMessages: CaptureSession.myMessagesOf(snapshot),
+        styleLearning: _styleLearning,
+        contact: _activeContact,
+        preferences: widget.preferences,
+      );
+
+  /// G7 偏好变更（记录/删除/清空）后的页面联动：先落盘回调（main.dart 注入），
+  /// 再重绘——勾选态取自偏好档案的样例，删除后要立即取消对应卡上的 ✓。
+  void _onPreferencesMutated() {
+    widget.persistPreferences?.call();
+    if (mounted) setState(() {});
+  }
+
   Future<void> _analyze() async {
     final parsed = TranscriptParser.parse(_input.text);
     if (parsed.isEmpty) {
@@ -106,6 +206,8 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
         _analysis = null;
         _pendingConfirm = false;
         _error = '没有解析到任何消息：请按「对方：…」「我：…」每行一条粘贴。';
+        // fix(kimi-review #18)：清场也算换轮——在途改写的结果不许写回。
+        _analysisRound++;
       });
       return;
     }
@@ -117,11 +219,7 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
     // G3 置信度门控：不高于阈值（≤，含 OCR+单条发言人未知的精确 0.5）不自动
     // 分析，挂起等确认（见 [_pendingConfirm]）。
     if (CaptureSession.shouldConfirm(snapshot)) {
-      final ctx = CaptureSession.buildContext(
-        extra: _extra.text,
-        myMessages: CaptureSession.myMessagesOf(snapshot),
-        styleLearning: _styleLearning,
-      );
+      final ctx = _buildCtx(snapshot);
       setState(() {
         _snapshot = snapshot;
         _analysis = null;
@@ -156,11 +254,7 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
     // draftAndRank 拿同一份；G1 预览由它算出，与实际发送同源。
     final relationshipText =
         _relationship.text.trim().isEmpty ? '朋友' : _relationship.text.trim();
-    final ctx = CaptureSession.buildContext(
-      extra: _extra.text,
-      myMessages: CaptureSession.myMessagesOf(snapshot),
-      styleLearning: _styleLearning,
-    );
+    final ctx = _buildCtx(snapshot);
     final preview = CaptureSession.buildSendPreview(
       snapshot: snapshot,
       ctx: ctx,
@@ -175,11 +269,14 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       _pendingConfirm = false;
       _expandedCandidates.clear();
       _preview = preview;
+      // fix(kimi-review #18)：换轮记号——在途改写返回后据此作废。
+      _analysisRound++;
     });
     try {
       // 每轮新建客户端：粘贴分析按「点一次跑一轮」走，配置改动天然在下一轮
       // 生效，也不用像采集会话那样维护失效逻辑。实例留在 [_jev] 里给改写用。
-      final jev = _jev = JevClient(widget.config.value);
+      // C9：统计实例随构造传入（C9 接线契约，usage_stats.dart）。
+      final jev = _jev = JevClient(widget.config.value, stats: widget.usage);
       final analysis = await jev.judge(snapshot, relationshipText, ctx: ctx);
       var ranked = const <RankedReply>[];
       if (analysis.error == null) {
@@ -211,8 +308,12 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
   /// ④ 快速改写：走 [CaptureSession.refineText]（与采集页同一份实现），
   /// 成功后原位替换该卡文本，busy 只作用于该卡。
   Future<void> _refine(int index, String instruction) async {
+    // fix(kimi-review #18)：持有发起改写时的 analysis 引用（下标边界与原文
+    // 都按它解释）与轮次 token；返回后 token 不一致 = await 期间点了「分析」
+    // 开了新一轮，旧快照的改写结果作废。
     final analysis = _analysis;
     final snapshot = _snapshot;
+    final round = _analysisRound;
     if (analysis == null || snapshot == null || _busy || _handled) return;
     if (index < 0 || index >= analysis.rankedReplies.length) return;
     if (_refining.contains(index)) return;
@@ -222,20 +323,19 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
     setState(() => _refining.add(index));
     try {
       final refined = await CaptureSession.refineText(
-        jev: _jev ??= JevClient(widget.config.value),
+        jev: _jev ??= JevClient(widget.config.value, stats: widget.usage),
         snapshot: snapshot,
         relationship: _relationship.text.trim().isEmpty
             ? '朋友'
             : _relationship.text.trim(),
-        ctx: CaptureSession.buildContext(
-          extra: _extra.text,
-          myMessages: CaptureSession.myMessagesOf(snapshot),
-          styleLearning: _styleLearning,
-        ),
+        ctx: _buildCtx(snapshot),
         original: original,
         instruction: instruction,
       );
       if (!mounted) return;
+      // fix(kimi-review #18)：轮次已换就不写回——旧快照的改写结果按 index
+      // 写进新轮次候选，等于把上一轮的内容串进这一轮。
+      if (round != _analysisRound) return;
       if (refined == null) {
         messenger
           ..hideCurrentSnackBar()
@@ -243,6 +343,9 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
         return;
       }
       setState(() {
+        // 同轮写回读当前 [_analysis]（同轮另一张卡的改写可能已先写回过、
+        // copyWith 换了实例），只替换自己这张卡。「标记不用回」可能已把本轮
+        // 候选清空：此时没有可替换的卡，与采集会话同一条守卫。
         final list = [..._analysis!.rankedReplies];
         if (index < list.length) {
           list[index] = list[index].copyWith(text: refined);
@@ -251,6 +354,8 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       });
     } catch (_) {
       if (!mounted) return;
+      // fix(kimi-review #18)：同上——轮次已换就不再对当前屏幕报「改写失败」。
+      if (round != _analysisRound) return;
       messenger
         ..hideCurrentSnackBar()
         ..showSnackBar(const SnackBar(content: Text('改写失败，保留原文')));
@@ -283,12 +388,29 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('粘贴分析')),
+      appBar: AppBar(
+        title: const Text('粘贴分析'),
+        actions: [
+          // G7「查看我的偏好」入口：列出全部已记录的反馈并支持删除——
+          // 用户可查可改可删是硬约束（p0-plan G7）。
+          if (widget.preferences != null)
+            IconButton(
+              icon: const Icon(Icons.tune),
+              tooltip: '查看我的偏好',
+              onPressed: () => showPreferencesSheet(
+                context,
+                widget.preferences!,
+                onMutated: _onPreferencesMutated,
+              ),
+            ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(12),
         children: [
           TextField(
             controller: _input,
+            focusNode: _inputFocus,
             maxLines: 10,
             minLines: 5,
             decoration: const InputDecoration(
@@ -298,6 +420,13 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
             ),
           ),
           const SizedBox(height: 8),
+          // #6 联系人入口（与采集页同一份组件）：选择/新建联系人，两区分开
+          // 标注；激活联系人的 relationship/persona/avoidWords 经
+          // [CaptureSession.buildContext] 进入下一轮判断与起草。
+          if (widget.contactStore != null) ...[
+            ContactSection(store: widget.contactStore!),
+            const SizedBox(height: 8),
+          ],
           TextField(
             controller: _relationship,
             decoration: const InputDecoration(
@@ -324,6 +453,49 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
             title: const Text('学习我的说话方式'),
             subtitle: const Text('从粘贴文本的「我：」行里挑几条作为风格样本，随起草发送（只进写作路）。'),
           ),
+          // Windows 全局热键（任务契约 2/3/4）：开关 + 热键显示 + 注册失败的
+          // 可见提示。非 Windows（含 Web）整段不渲染——热键是 Windows 桌面能力。
+          // 触发语义在开关文案里写明：只唤起窗口与输入框，不读剪贴板、
+          // 不自动分析，粘贴与分析始终由用户决定。
+          if (HotkeyController.isSupported) ...[
+            ValueListenableBuilder<bool>(
+              valueListenable: HotkeyController.instance.enabled,
+              builder: (context, hotkeyOn, _) => SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: hotkeyOn,
+                onChanged: (v) => HotkeyController.instance.setEnabled(v),
+                title: Text('全局热键唤起（${HotkeyController.hotkeyLabel}）'),
+                subtitle: const Text('在任意应用按下热键，把本页切到前台并定位到粘贴输入框。'
+                    '热键只负责唤起：不读剪贴板、不自动分析，粘什么、分析与否都由你决定。'),
+              ),
+            ),
+            // 注册失败的可见提示（任务契约 3）：控制器把注册结果写进
+            // [HotkeyController.error]，这里原样展示；开关随后续注册失败弹回
+            // 关位，提示与开关相邻，一眼能对上因果。
+            ValueListenableBuilder<String?>(
+              valueListenable: HotkeyController.instance.error,
+              builder: (context, hotkeyError, _) {
+                if (hotkeyError == null) return const SizedBox.shrink();
+                return Card(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  margin: const EdgeInsets.only(top: 8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Icon(Icons.error_outline,
+                            size: 18,
+                            color:
+                                Theme.of(context).colorScheme.onErrorContainer),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(hotkeyError)),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
           FilledButton.icon(
             onPressed: _busy ? null : _analyze,
             icon: _busy
@@ -342,6 +514,12 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
             style: TextStyle(fontSize: 12),
           ),
           _previewTile(),
+          // G8「确认后入库」的确认条（与采集页同一份共享组件）：「记住这条」
+          // 暂存的候选事实在这里确认/丢弃，确认前绝不写联系人资料。
+          if (widget.contactStore != null) ...[
+            StagedFactBar(store: widget.contactStore!),
+            const SizedBox(height: 8),
+          ],
           const SizedBox(height: 12),
           _resultSection(),
         ],
@@ -349,39 +527,9 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
     );
   }
 
-  /// G1 隐私预览：折叠面板，展开看本轮判断/写作两条调用各自会收到什么。
-  Widget _previewTile() {
-    final preview = _preview;
-    if (preview == null) return const SizedBox.shrink();
-    return Card(
-      child: ExpansionTile(
-        title: const Text('本轮将发送'),
-        subtitle: const Text('隐私预览：展开查看判断与写作各自收到什么'),
-        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        children: [
-          _previewGroup('判断路（先看局势）', preview.judge),
-          const SizedBox(height: 8),
-          _previewGroup('写作路（起草候选）', preview.writer),
-        ],
-      ),
-    );
-  }
-
-  Widget _previewGroup(String title, List<String> lines) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 2),
-          for (final line in lines)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 1),
-              child: Text(
-                '· $line',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-        ],
-      );
+  /// G1 隐私预览：折叠面板，展开看本轮判断/写作两条调用各自会收到什么
+  /// （kimi-review #16 抽成共用 widget，采集流同一条）。
+  Widget _previewTile() => SendPreviewTile(preview: _preview);
 
   Widget _resultSection() {
     final scheme = Theme.of(context).colorScheme;
@@ -435,17 +583,11 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       );
     }
     if (_handled) {
-      // B7：本轮已标记为不用回——安静的确认态，保留「反悔」的入口。
-      return Card(
-        child: ListTile(
-          leading: const Icon(Icons.check_circle_outline),
-          title: const Text('本轮已标记为不用回'),
-          subtitle: const Text('内容有更新时重新粘贴分析即可；也可以现在重新起草。'),
-          trailing: TextButton(
-            onPressed: _busy ? null : _analyze,
-            child: const Text('重新起草'),
-          ),
-        ),
+      // B7：本轮已标记为不用回——安静的确认态，保留「反悔」的入口（共用
+      // widget，采集流同一条；副标题两页口径不同，由页面传；忙碌中按钮禁用）。
+      return HandledReplyCard(
+        subtitle: '内容有更新时重新粘贴分析即可；也可以现在重新起草。',
+        onRedraft: _busy ? null : _analyze,
       );
     }
     final ranked = analysis.rankedReplies;
@@ -472,160 +614,35 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
             ),
           ),
         const SizedBox(height: 8),
-        if (canSkip) ...[
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.mark_chat_unread_outlined),
-              title: const Text('这条可以不回'),
-              subtitle: const Text('判断认为此刻不回也不影响；点了就把本轮标记为已处理。'),
-              trailing: TextButton(
-                onPressed: _markHandled,
-                child: const Text('不用回'),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-        if (ranked.isEmpty)
-          Text('没有候选回复', style: Theme.of(context).textTheme.bodySmall)
-        else
-          Text('候选回复', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 4),
-        // B8「一条推荐 + 两条备选」：排序第一张大卡（含策略标签+概率），其余
-        // 折叠为两行小字、点击展开；all 模式保持全部平铺。
-        if (ranked.isNotEmpty && _primaryMode) ...[
-          _candidateCard(0, ranked[0], recommended: true),
-          for (var i = 1; i < ranked.length; i++)
-            _expandedCandidates.contains(i)
-                ? _candidateCard(i, ranked[i])
-                : _collapsedCandidate(i, ranked[i]),
-        ] else
-          for (var i = 0; i < ranked.length; i++) _candidateCard(i, ranked[i]),
+        // 候选区（B7 出口 + B8 主推/平铺 + 卡片动作 + G7 反馈标签 + 记住这条）
+        // 抽成了共用 widget：两页只传数据与回调（kimi-review #16）。本页差异：
+        // 主按钮是「复制」、空列表显示占位文案、没有「换一组」。
+        CandidateList(
+          ranked: ranked,
+          primaryMode: _primaryMode,
+          expandedCandidates: _expandedCandidates,
+          onToggleExpand: _toggleCandidateExpansion,
+          refiningIndexes: _refining,
+          onRefine: _refine,
+          onPrimary: _copy,
+          primaryLabel: '复制',
+          emptyLabel: '没有候选回复',
+          canSkipReply: canSkip,
+          onMarkHandled: _markHandled,
+          contactStore: widget.contactStore,
+          preferences: widget.preferences,
+          onPreferencesMutated: _onPreferencesMutated,
+        ),
       ],
     );
   }
 
-  Widget _collapsedCandidate(int index, RankedReply r) => InkWell(
-        onTap: () => setState(() => _expandedCandidates.add(index)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  r.text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-              Icon(
-                Icons.expand_more,
-                size: 18,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ],
-          ),
-        ),
-      );
-
-  Widget _candidateCard(int index, RankedReply r, {bool recommended = false}) {
-    final meta = '${r.strategy} · ${(r.prob * 100).toStringAsFixed(0)}%'
-        '${r.reviewNote.isEmpty ? "" : " · ${r.reviewNote}"}';
-    final refining = _refining.contains(index);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (recommended) ...[
-              Row(
-                children: [
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.primary,
-                      borderRadius:
-                          const BorderRadius.all(Radius.circular(999)),
-                    ),
-                    child: Text(
-                      '推荐',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onPrimary,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(meta, style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ),
-            ] else ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(meta,
-                        style: Theme.of(context).textTheme.bodySmall),
-                  ),
-                  // B8 展开来的备选卡给一个收回口，保持折叠语义完整。
-                  if (_expandedCandidates.contains(index))
-                    GestureDetector(
-                      onTap: () =>
-                          setState(() => _expandedCandidates.remove(index)),
-                      child: Icon(
-                        Icons.expand_less,
-                        size: 18,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                ],
-              ),
-            ],
-            const SizedBox(height: 4),
-            Text(r.text, style: Theme.of(context).textTheme.bodyLarge),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                FilledButton.tonal(
-                  onPressed: () => _copy(r.text),
-                  child: const Text('复制'),
-                ),
-                // ④ busy 只作用于本卡：改写中只在这张卡上转圈。
-                if (refining) ...[
-                  const SizedBox(width: 12),
-                  const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  const SizedBox(width: 4),
-                  Text('改写中…', style: Theme.of(context).textTheme.bodySmall),
-                ] else ...[
-                  TextButton(
-                    onPressed: () =>
-                        _refine(index, CaptureSession.refineShorter),
-                    child: const Text('更短'),
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        _refine(index, CaptureSession.refinePoliter),
-                    child: const Text('更礼貌'),
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        _refine(index, CaptureSession.refineRephrase),
-                    child: const Text('换个说法'),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
+  /// B8 备选卡展开/收回的切换（共用 widget 的回调）：点折叠行展开、点展开卡
+  /// 的「收回」折回。集合是页面私有状态；新一轮分析会清空（见 [_runAnalysis]），
+  /// 下标语义只对当批候选有效。
+  void _toggleCandidateExpansion(int index) {
+    setState(() {
+      if (!_expandedCandidates.remove(index)) _expandedCandidates.add(index);
+    });
   }
 }

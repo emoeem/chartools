@@ -5,6 +5,8 @@ import 'package:chartools_core/chartools_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'contact_store.dart';
+
 /// G1 隐私预览：一轮分析的两条模型调用（判断、写作）各自会收到什么。
 /// 只列条目与数量，消息原文以页面上的快照卡为准——预览的职责是让用户在
 /// 发送前知道「有哪些类目的内容出去了」，而不是把聊天记录再抄一遍。
@@ -66,6 +68,73 @@ class CaptureState {
   String get signature => snapshot?.signature() ?? '';
 }
 
+/// C10 会话检查点（p0-plan C10）：一次采集会话的最小可恢复状态——最近快照
+/// 签名 + 当时的全局关系描述 + 激活联系人 id。
+///
+/// 只存这三样是有意的：签名是「上次会话进行到哪一屏」的标识（不是内容——
+/// 快照正文不落盘），relationship 与激活联系人是要在「待确认恢复上次会话」
+/// 上点过确认才回填的会话上下文。**恢复必须过用户确认**（不静默恢复）：
+/// checkpoint 本身只是存档位，谁都不许启动时直接拿它重放会话。
+class SessionCheckpoint {
+  const SessionCheckpoint({
+    required this.signature,
+    required this.relationship,
+    this.activeContactId,
+  });
+
+  /// 最近快照签名（[ChatSnapshot.signature] 的原样拷贝，空串 = 还没有快照）。
+  final String signature;
+
+  /// 检查点时刻的全局关系描述（SettingsStore 的 relationship notifier 原样值，
+  /// 不 trim——存取习惯与 SettingsStore.relationship 一致，修剪留给使用方）。
+  final String relationship;
+
+  /// 检查点时刻的激活联系人 id；null = 当时没有激活联系人。恢复时由 UI 拿
+  /// ContactStore.byId 解析回档案（档案可能已被用户删除——解析不到就按
+  /// 「无联系人」恢复，不猜测）。
+  final String? activeContactId;
+
+  /// 存档形状（键名固定，fromJson 与这里共用）。SettingsStore 把它当作不透明
+  /// 的 Map 存取，形状的真相在这里。
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'signature': signature,
+        'relationship': relationship,
+        'activeContactId': activeContactId,
+      };
+
+  /// 容错解析：缺字段落默认值，绝不抛（坏存档按「没有可恢复内容」处理）。
+  factory SessionCheckpoint.fromJson(Map<String, dynamic> j) =>
+      SessionCheckpoint(
+        signature: j['signature'] is String ? j['signature'] as String : '',
+        relationship:
+            j['relationship'] is String ? j['relationship'] as String : '',
+        activeContactId:
+            j['activeContactId'] is String ? j['activeContactId'] as String : null,
+      );
+
+  /// 没有任何可恢复内容（UI 据此决定要不要弹「待确认恢复」提示）。
+  bool get isEmpty =>
+      signature.isEmpty && relationship.isEmpty && activeContactId == null;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SessionCheckpoint &&
+      other.signature == signature &&
+      other.relationship == relationship &&
+      other.activeContactId == activeContactId;
+
+  @override
+  int get hashCode =>
+      Object.hash(signature, relationship, activeContactId);
+}
+
+/// C10 检查点的落盘句柄：把一份检查点存档覆盖写下去（传 null = 清除「待确认
+/// 恢复」）。由 SettingsStore 的存档实现（settings_store.dart 的
+/// saveSessionCheckpoint，检查点作为 `sessionCheckpoint` 键并入整包 JSON），
+/// UI 接线时把 `store.saveSessionCheckpoint` 撕下传进来；测试用内存实现。
+typedef CheckpointWriter = Future<void> Function(
+    Map<String, dynamic>? checkpoint);
+
 /// Android 端的应用层编排：订阅采集服务的快照流，跑 core 流水线，给出建议。
 ///
 /// 刻意放在 app 而不是插件：判断/起草是纯 Dart 领域逻辑（core 已带测试），
@@ -82,7 +151,26 @@ class CaptureSession {
     required this.relationship,
     required this.overlayEnabled,
     this.displayMode,
+    this.writeCheckpoint,
+    this.stats,
+    this.preferences,
   });
+
+  /// C10 检查点的落盘句柄（可选注入；[CheckpointWriter] 的说明与接线方式见
+  /// 那里）。null = 检查点只算不写（测试/桌面流默认），采集行为不受影响。
+  final CheckpointWriter? writeCheckpoint;
+
+  /// C9 使用统计（可选注入，[SettingsStore.usage] 那一份实例，接线契约见
+  /// core 的 usage_stats.dart）：传进来后 JevClient 四条路由的打点写进它，
+  /// 设置页统计卡读的是同一个对象。null = 不打点（工具页直开的测试场景），
+  /// 行为与统计接入前逐字节一致。
+  final UsageStats? stats;
+
+  /// G7 结构化偏好（可选注入，[PreferenceProfile]）：传入后每轮把
+  /// [PreferenceProfile.styleAddendum] 作为一条固定 id 的偏好笔记随 ctx 进
+  /// **写作路**（不进判断路，见 [_preferenceNoteId]），G1 预览同步列出。
+  /// null = 不注入（与没有记录时同样不发偏好内容）。
+  final PreferenceProfile? preferences;
 
   /// 应用内存里的模型路由配置；改设置后下一轮立即生效（JevClient 每轮重建）。
   final ValueNotifier<JevConfig> config;
@@ -101,6 +189,63 @@ class CaptureSession {
   /// 悬浮窗时透传给原生侧——'primary' 主推第一张大卡、备选折叠，null/'all'
   /// 整列平铺（旧行为）。切换后下一批候选生效。
   final ValueNotifier<String>? displayMode;
+
+  /// 当前激活联系人档案（UI 经 [applyContact] 喂进来）。null = 没有激活，
+  /// 每一处组 ctx / 算关系 / 算预览的路径都回到改前的原样（逐字节一致）。
+  ///
+  /// G8 隔离（有意）：本类只**读**这份档案，不持有 ContactStore、也没有任何
+  /// 写回 ContactProfile 的通路——判断/起草的结果绝不自动进联系人档案。
+  /// UI 改了档案（编辑表单、确认入库）要自己重新调 [applyContact] 喂最新值。
+  ContactProfile? _activeContact;
+
+  /// 激活/切换/取消联系人档案（UI 在联系人选择器与档案编辑后调用）。
+  ///
+  /// - null：取消激活。此后每一轮与改前完全同构：buildContext 不带联系人、
+  ///   relationshipText 就是全局输入、预览不含联系人行——载荷与缓存键都回到
+  ///   逐字节一致的旧形状。
+  /// - 非空：下一轮起，relationship/persona/avoidWords 三个正文字段进
+  ///   ChatContext（contact 关系压全局走 core 的 effectiveRelationship，人设
+  ///   正文经 StyleSource 压全局 style，avoidWords 走一条固定标题的知识笔记）；
+  ///   **notes（浏览信息）在这里被刻意丢弃，永不进提示词**（核心原则④，见
+  ///   ContactProfile 类文档）。
+  ///
+  /// 只换档案引用，不动当前 state（挂起/结果卡照旧显示）：预览在真正起轮时
+  /// 由 _runRound 按当时输入重算，与 G3 挂起注释里的既定行为一致。
+  void applyContact(ContactProfile? contact) {
+    _activeContact = contact;
+    _writeCheckpoint(state.value.signature);
+  }
+
+  /// C10：用户在「待确认恢复上次会话」提示上点了确认之后，UI 用存档里的
+  /// 检查点调这里回填会话上下文。只恢复检查点里有的东西：关系描述回填全局
+  /// notifier，激活联系人由 UI 先拿 ContactStore.byId 解析（解析不到传 null，
+  /// 按「无联系人」恢复——档案可能已被删除，不猜测）。快照本身不恢复：签名
+  /// 只是标识，正文从未落盘。
+  ///
+  /// 这是本类**唯一**写全局 relationship notifier 的地方（其余场合它都由
+  /// 页面写、本类只读）——恢复动作本身就是一次显式的用户输入转达。
+  void restoreCheckpoint(SessionCheckpoint checkpoint,
+      {ContactProfile? contact}) {
+    relationship.value = checkpoint.relationship;
+    applyContact(contact);
+  }
+
+  /// C10：把当前会话状态（最近快照签名 / 全局关系 / 激活联系人）写进检查点。
+  /// 尽力而为：没有句柄或写盘失败都静默——检查点丢了顶多少一次恢复提示，
+  /// 不能让采集主流程为它失败。
+  Future<void> _writeCheckpoint(String signature) async {
+    final writer = writeCheckpoint;
+    if (writer == null || _disposed) return;
+    try {
+      await writer(SessionCheckpoint(
+        signature: signature,
+        relationship: relationship.value,
+        activeContactId: _activeContact?.id,
+      ).toJson());
+    } catch (_) {
+      // 检查点写盘失败不拦截采集：下次快照进门会再写。
+    }
+  }
 
   /// ③ 上下文补充：用户在输入框里写的一句话背景（如「今天是她生日」）。
   /// 由采集页输入框逐键写入，每轮开始时现读——「换一组」不清它（regenerate
@@ -167,21 +312,85 @@ class CaptureSession {
   /// 一致；冒号格式随笔记模板走半角「: 」。
   static const String _extraNoteId = 'extra_context';
 
-  /// ③+A3：组装本轮进 judge/draftAndRank 的上下文。没有补充背景、也没开
-  /// 风格学习时返回 null——请求与旧版「不带 ctx」逐字节一致（载荷、缓存键
-  /// 都不动），任何一个开关打开才发。
+  /// 联系人 avoidWords 进 ChatContext 的承载笔记 id（G7「反馈结构化」）：
+  /// 一条固定标题的知识笔记，两路的 background() 都渲染出「避免用词: …」。
+  /// 用固定 id 让 G1 预览能把它从普通知识笔记里认出来单独列行。
+  static const String _contactAvoidNoteId = 'contact_avoid_words';
+
+  /// G7 偏好附言进 ChatContext 的承载笔记 id：一条固定 id 的偏好笔记，内容是
+  /// [PreferenceProfile.styleAddendum] 的原文。**只进写作路、不进判断路**：
+  /// 笔记 type 用 [noteTypePreferenceAddendum]，core 的 ChatContext.background
+  /// 对该 type 刻意跳过——判断路的 state 与判断缓存键因此都看不到它；写作路
+  /// 的 knowledgeBlock 渲染它。固定 id 同样供 G1 预览单独列行（写出去了什么
+  /// 就列什么）。规格出处：workflow-drafts chartools-6 记忆与个性化包
+  /// .dwf.ts:109「这段进 ReplyPrompt.styleBlock 之后由调用方拼接……调用方在
+  /// app 侧拼」——app 侧的拼接点就是这里（把附言变成随 ctx 出门的笔记）。
+  static const String _preferenceNoteId = 'preference_addendum';
+
+  /// G7 偏好附言 → 一条知识笔记；无记录（附言空串）返回 null，不产空笔记。
+  /// 每轮现算：用户在偏好面板删除后，下一轮起草立即不再带附言。
+  static Note? _preferenceNoteOf(PreferenceProfile? preferences) {
+    final addendum = preferences?.styleAddendum() ?? '';
+    if (addendum.isEmpty) return null;
+    return Note(
+      id: _preferenceNoteId,
+      title: '用户的风格偏好反馈',
+      content: addendum,
+      type: noteTypePreferenceAddendum,
+    );
+  }
+
+  /// avoidWords 笔记的正文前缀：笔记内容 = 前缀 + 「、」连接的词表；G1 预览
+  /// 显示词表时按它剥前缀。
+  static const String _avoidNotePrefix = '不要使用这些词/说法：';
+
+  /// ③+A3+联系人：组装本轮进 judge/draftAndRank 的上下文。没有补充背景、
+  /// 没开风格学习、也没有带正文字段的激活联系人时返回 null——请求与旧版
+  /// 「不带 ctx」逐字节一致（载荷、缓存键都不动），任何一个来源有货才发。
   ///
   /// [myMessages] 是风格样本的原料；采集页传快照里我方消息（[myMessagesOf]），
   /// 桌面页传粘贴文本解析出的「我：」行。
+  ///
+  /// [contact] 是激活联系人档案（采集页传 [CaptureSession.applyContact] 存下
+  /// 的那份；桌面流不传）。三个正文字段的通路：relationship/persona 挂在
+  /// ChatContext.contact 上（人设正文经 core StyleSource 压全局 style、关系
+  /// 经 effectiveRelationship 压全局——两条优先级都是 core 的既定语义）；
+  /// avoidWords 走 [_contactAvoidNoteId] 那条知识笔记。档案的 notes（浏览
+  /// 信息）**在这里被刻意丢弃**——它与 core Contact.notes 同名不同义，后者
+  /// 经 background() 进提示词，照抄就破坏了浏览/正文分离（ContactProfile
+  /// 类文档的硬约束）。
+  ///
+  /// [preferences] 是 G7 结构化偏好（采集页/桌面页传 [SettingsStore.usage]
+  /// 同层的 store 注入）：非空且有记录时，[PreferenceProfile.styleAddendum]
+  /// 的附言作为一条 [_preferenceNoteId] 笔记进 ctx——只进写作路（笔记 type
+  /// 决定 core 两侧的分流，见 [_preferenceNoteId] 的注释），G1 预览按同一份
+  /// ctx 列出。无记录时与不注入逐字节一致。
   static ChatContext? buildContext({
     String? extra,
     List<Msg> myMessages = const [],
     bool styleLearning = false,
+    ContactProfile? contact,
+    PreferenceProfile? preferences,
   }) {
     final extraText = extra?.trim() ?? '';
     final styleOn = styleLearning && myMessages.isNotEmpty;
-    if (extraText.isEmpty && !styleOn) return null;
+    final coreContact = _coreContactOf(contact);
+    final avoidNote = _avoidWordsNoteOf(contact);
+    final preferenceNote = _preferenceNoteOf(preferences);
+    if (extraText.isEmpty &&
+        !styleOn &&
+        coreContact == null &&
+        avoidNote == null &&
+        preferenceNote == null) {
+      return null;
+    }
     final notes = <Note>[];
+    if (avoidNote != null) {
+      notes.add(avoidNote);
+    }
+    if (preferenceNote != null) {
+      notes.add(preferenceNote);
+    }
     if (extraText.isNotEmpty) {
       notes.add(Note(id: _extraNoteId, title: '用户补充', content: extraText));
     }
@@ -195,8 +404,50 @@ class CaptureSession {
         // 风格学习是尽力而为的增强：样本构建出意外不该拖垮整轮分析。
       }
     }
-    if (notes.isEmpty) return null;
-    return ChatContext(notes: notes);
+    // 只写了关系/人设、没有 avoidWords/补充背景/风格样本的联系人也会走到
+    // 这里：notes 为空但 coreContact 在场，照常发——联系人正文本就是 ctx
+    // 的一等来源，不能被「笔记空」吞掉。两头都空才回落「不带 ctx」。
+    if (notes.isEmpty && coreContact == null) return null;
+    return ChatContext(contact: coreContact, notes: notes);
+  }
+
+  /// 联系人档案 → core Contact 的映射（进提示词的只有三个正文字段）。
+  /// relationship 与 persona 都为空时返回 null：档案里没有任何进提示词的
+  /// 内容，就当没激活过——避免一个空壳 contact 让预览/空判断说出「有联系人
+  /// 数据」的假话。
+  static Contact? _coreContactOf(ContactProfile? profile) {
+    if (profile == null) return null;
+    final rel = profile.relationship.trim();
+    final persona = profile.persona.trim();
+    if (rel.isEmpty && persona.isEmpty) return null;
+    return Contact(
+      id: profile.id,
+      name: profile.displayName,
+      aliases: List<String>.of(profile.aliases),
+      relationship: rel,
+      persona: persona,
+      // 浏览信息（档案 notes）到此为止：不进提示词，也绝不冒充 core 侧的
+      // contact notes 通道（见 buildContext 的文档）。
+      notes: '',
+      autoSummary: '',
+      updatedAt: profile.updatedAt,
+    );
+  }
+
+  /// 联系人 avoidWords → 一条知识笔记（id [_contactAvoidNoteId]）；词表为空
+  /// 返回 null，不产空笔记。
+  static Note? _avoidWordsNoteOf(ContactProfile? profile) {
+    if (profile == null) return null;
+    final words = <String>[
+      for (final w in profile.avoidWords)
+        if (w.trim().isNotEmpty) w.trim(),
+    ];
+    if (words.isEmpty) return null;
+    return Note(
+      id: _contactAvoidNoteId,
+      title: '避免用词',
+      content: '$_avoidNotePrefix${words.join('、')}',
+    );
   }
 
   /// A3：风格样本的原料——本会话里确认是我自己发的消息。
@@ -211,8 +462,11 @@ class CaptureSession {
   /// 预览按同一条缺省规则注明「默认按朋友」，两边说同一件事。
   ///
   /// 窗口数与 core 一致：判断路取最近 10 条（JevQuestions.buildState），写作
-  /// 路取最近 20 条（replyWindow）。联系人备注当前版本恒为「无」（联系人库
-  /// 是 #5 的范围），仍按有无如实列出，接入后无需改这段。
+  /// 路取最近 20 条（replyWindow）。激活联系人（ctx.contact 来自
+  /// [buildContext] 的映射）时如实列出：关系行显示联系人关系并注明压过全局、
+  /// avoidWords 单独一行、专用人设也算「联系人备注：有」（它经 StyleSource
+  /// 压全局 style 出了门）。没有激活联系人时所有行与改前逐字节一致。
+  /// G7 偏好附言（[_preferenceNoteId] 笔记，与实际发送同源）列进写作路一列。
   static SendPreview buildSendPreview({
     required ChatSnapshot snapshot,
     ChatContext? ctx,
@@ -222,11 +476,22 @@ class CaptureSession {
     final judgeCount = total > 10 ? 10 : total;
     final writerCount = total > replyWindow ? replyWindow : total;
     var extra = '';
+    var avoid = '';
+    var preference = '';
     var kbNotes = 0;
     var styleSamples = 0;
     for (final n in ctx?.notes ?? const <Note>[]) {
       if (n.id == _extraNoteId) {
         extra = n.content.trim();
+      } else if (n.id == _contactAvoidNoteId) {
+        final c = n.content.trim();
+        avoid = c.startsWith(_avoidNotePrefix)
+            ? c.substring(_avoidNotePrefix.length)
+            : c;
+      } else if (n.id == _preferenceNoteId) {
+        // G7 偏好附言：与实际发送同源（同一份 ctx），列进写作路一列——它
+        // 不进判断路（[_preferenceNoteId] 的注释），判断列里也不出现。
+        preference = n.content.trim();
       } else if (n.type == noteTypeStyleSample) {
         styleSamples++;
       } else {
@@ -237,17 +502,30 @@ class CaptureSession {
     final hasContact = contact != null &&
         (contact.notes.trim().isNotEmpty ||
             contact.relationship.trim().isNotEmpty ||
+            // 专用人设压全局 style（StyleSource.resolve），也算联系人数据
+            // 出了门——只查 notes/relationship 会把 persona-only 的档案漏报
+            // 成「无」，违反 G1「写出去了什么就列什么」。
+            contact.persona.trim().isNotEmpty ||
             contact.autoSummary.trim().isNotEmpty);
     final historyCount = ctx?.history.length ?? 0;
+    final contactRel = contact?.relationship.trim() ?? '';
     final rel = relationship.trim();
     final note = (snapshot.note ?? '').trim();
 
     List<String> common(String window) => [
           // #4 遗留：关系留空时流水线仍会以缺省「朋友」下发，预览要如实
-          // 列出，不能因为没填就整行隐去（写出去了什么就列什么）。
-          if (rel.isNotEmpty) '关系描述：「$rel」' else '关系描述：未填写，默认按「朋友」',
+          // 列出，不能因为没填就整行隐去（写出去了什么就列什么）。联系人
+          // 自己写了关系时显示联系人那份并注明压过全局——与流水线实际下发
+          // 的 effectiveRelationship 同源，两边说同一件事。
+          if (contactRel.isNotEmpty)
+            '关系描述：「$contactRel」（来自联系人「${contact?.name ?? ''}」，压过全局）'
+          else if (rel.isNotEmpty)
+            '关系描述：「$rel」'
+          else
+            '关系描述：未填写，默认按「朋友」',
           '聊天消息：$window',
           if (extra.isNotEmpty) '背景补充：「$extra」（你输入的一句话）',
+          if (avoid.isNotEmpty) '避免用词：「$avoid」（联系人档案）',
           if (hasContact) '联系人备注：有' else '联系人备注：无',
           '知识库笔记：$kbNotes 条',
           '更早历史：$historyCount 条',
@@ -267,6 +545,10 @@ class CaptureSession {
         ...common('最近 $writerCount 条（共 $total 条，写作最多看 $replyWindow 条）'),
         '说话方式样本：$styleSamples 条'
             '（开了「学习我的说话方式」才有；只进写作路，判断路不看）',
+        // G7 偏好附言原文照列（写出去了什么就列什么）；它是用户自己的标注
+        // 统计，不是聊天内容，附言里也从不引用候选原文。
+        if (preference.isNotEmpty)
+          '偏好反馈附言：「$preference」（你在候选卡上标注的结构化偏好，只进写作路）',
       ],
     );
   }
@@ -374,6 +656,10 @@ class CaptureSession {
     // 轮次 token 在门口先 +1：无论本快照走自动分析还是 G3 挂起，在途旧轮
     // 都作废——挂起态要抢在旧轮结果之前写回，否则旧结果会盖掉待确认卡。
     final round = ++_round;
+    // C10 检查点：快照进门即记一笔（自动分析与挂起确认两条路共用这一刻）——
+    // 「上次会话进行到哪一屏、什么关系、激活了谁」在这里定格。尽力而为：
+    // 写失败静默（见 _writeCheckpoint），不阻塞本轮。
+    unawaited(_writeCheckpoint(snapshot.signature()));
     // G3 置信度门控：来源不可靠（如 OCR 兜底、发言人不可归属）的快照不自动
     // 分析，state 置 needsConfirm 挂起；采集页显示「确认分析？」按钮，点了
     // 才起轮（[confirmAnalyze]）。阈值之上照旧自动开轮。
@@ -382,6 +668,8 @@ class CaptureSession {
         extra: extraContext,
         myMessages: myMessagesOf(snapshot),
         styleLearning: styleLearning,
+        contact: _activeContact,
+        preferences: preferences,
       );
       state.value = CaptureState(
         snapshot: snapshot,
@@ -417,12 +705,15 @@ class CaptureSession {
   /// [round] 是进门时领到的轮次 token，await 期间被更新的快照/确认抢先就
   /// 整轮作废（见 [_round] 的乱序/并发防护），旧结果不许写回。
   Future<void> _runRound(ChatSnapshot snapshot, int round) async {
-    // ③/A3：本轮上下文在进 try 前组好——judge 与 draftAndRank 必须拿同一份，
-    // G1 预览也由它算出（预览与实际发送同源，不是两套各说各话的清单）。
+    // ③/A3/联系人：本轮上下文在进 try 前组好——judge 与 draftAndRank 必须
+    // 拿同一份，G1 预览也由它算出（预览与实际发送同源，不是两套各说各话的
+    // 清单）。激活联系人的三个正文字段在这里随 ctx 进两路。
     final ctx = buildContext(
       extra: extraContext,
       myMessages: myMessagesOf(snapshot),
       styleLearning: styleLearning,
+      contact: _activeContact,
+      preferences: preferences,
     );
     final preview = buildSendPreview(
       snapshot: snapshot,
@@ -432,9 +723,14 @@ class CaptureSession {
     state.value =
         CaptureState(snapshot: snapshot, busy: true, preview: preview);
     try {
-      final jev = _jev ??= JevClient(config.value);
-      final relationshipText =
-          relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim();
+      final jev = _jev ??= JevClient(config.value, stats: stats);
+      // 联系人自己写了关系就压过全局（core 的 effectiveRelationship 语义，
+      // kb_models.dart:172-176「两行打架」的既定结论）；没有激活联系人或档案
+      // 没写关系时，fallback 分支就是改前的原样计算，逐字节一致。
+      final relationshipText = effectiveRelationship(
+        ctx,
+        relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim(),
+      );
 
       final analysis = await jev.judge(snapshot, relationshipText, ctx: ctx);
       // await 期间可能已有更新的快照开轮：本轮作废，不许覆盖新快照的状态。
@@ -480,7 +776,8 @@ class CaptureSession {
   /// overlay.currentReplyTexts() 同语义：每轮现取，只在这一个请求里生效，
   /// 不落字段、不跨轮残留）；判断沿用卡上已有的结果（置忙态会把它清掉，
   /// 所以先取局部再写 state）。③：extraContext 与风格学习开关照常生效
-  /// （「换一组」保留补充背景），F1 的策略提升同样接入。
+  /// （「换一组」保留补充背景）；激活联系人的正文字段照常随 ctx 进来；
+  /// F1 的策略提升同样接入。
   Future<void> regenerate() async {
     final snapshot = state.value.snapshot;
     if (snapshot == null || state.value.busy) return;
@@ -494,6 +791,8 @@ class CaptureSession {
       extra: extraContext,
       myMessages: myMessagesOf(snapshot),
       styleLearning: styleLearning,
+      contact: _activeContact,
+      preferences: preferences,
     );
     final preview = buildSendPreview(
       snapshot: snapshot,
@@ -503,9 +802,13 @@ class CaptureSession {
     state.value =
         CaptureState(snapshot: snapshot, busy: true, preview: preview);
     try {
-      final relationshipText =
-          relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim();
-      final ranked = await (_jev ??= JevClient(config.value)).draftAndRank(
+      // 与 _runRound 同一份 effectiveRelationship 语义（无联系人时即原样）。
+      final relationshipText = effectiveRelationship(
+        ctx,
+        relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim(),
+      );
+      final ranked =
+          await (_jev ??= JevClient(config.value, stats: stats)).draftAndRank(
         snapshot,
         relationshipText,
         judgment: judgment,
@@ -569,19 +872,26 @@ class CaptureSession {
     // 轮次 token（与 _onSnapshot 同一道防护）：改写等待期间来了新快照或点了
     // 「换一组」，_round 变化，本轮卡片已被整体替换，改写结果作废不许写回。
     final round = _round;
-    final relationshipText =
-        relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim();
     _setRefining(index, true);
     try {
+      // 与 _runRound 同一份 effectiveRelationship 语义（无联系人时即原样）。
+      // ctx 在 try 内现组：改写请求与当轮采集的两路拿同一份联系人正文字段。
+      final ctx = buildContext(
+        extra: extraContext,
+        myMessages: myMessagesOf(snapshot),
+        styleLearning: styleLearning,
+        contact: _activeContact,
+        preferences: preferences,
+      );
+      final relationshipText = effectiveRelationship(
+        ctx,
+        relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim(),
+      );
       final refined = await refineText(
-        jev: _jev ??= JevClient(config.value),
+        jev: _jev ??= JevClient(config.value, stats: stats),
         snapshot: snapshot,
         relationship: relationshipText,
-        ctx: buildContext(
-          extra: extraContext,
-          myMessages: myMessagesOf(snapshot),
-          styleLearning: styleLearning,
-        ),
+        ctx: ctx,
         original: original,
         instruction: instruction,
       );

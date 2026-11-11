@@ -3,7 +3,14 @@ import 'package:chartools_core/chartools_core.dart';
 import 'package:flutter/material.dart';
 
 import '../application/capture_session.dart';
+// #6 联系人档案（A 的 ContactStore/ContactProfile）：本文件还承载联系人与
+// G7 偏好的共享 UI（ContactSection / StagedFactBar / 两个面板），桌面流页
+// 从这里 import——两个文件同属交互写手，避免复制两份实现。候选区的共用
+// widget（候选卡 / B7 / B8 / G1 预览 / G7 反馈标签 / 记住这条）抽去了
+// widgets/candidate_list.dart（kimi-review #16），两页只传数据与回调。
+import '../application/contact_store.dart';
 import '../application/settings_store.dart';
+import 'widgets/candidate_list.dart';
 
 /// 采集助手页（Android）：无障碍开关入口、采集范围配置、悬浮窗开关、实时
 /// 快照与建议。
@@ -18,6 +25,12 @@ class CapturePage extends StatefulWidget {
     required this.overlayEnabled,
     this.displayMode,
     this.blockedPackages,
+    this.contactStore,
+    this.preferences,
+    this.persistPreferences,
+    this.usage,
+    this.writeCheckpoint,
+    this.sessionCheckpoint,
   });
 
   final ValueNotifier<JevConfig> config;
@@ -44,6 +57,34 @@ class CapturePage extends StatefulWidget {
   /// Kotlin 侧 isBlocked() 保证）；每次 [_pushConfigure] 都以当前值为准。
   final ValueNotifier<Set<String>>? blockedPackages;
 
+  /// #6 联系人档案（A 的 ContactStore）：可选注入——main.dart 传入共享实例
+  /// （与设置侧共享同一份持久化）。未注入（工具页直开本页的测试场景）时整个
+  /// 联系人区不渲染，会话不带联系人上下文（与基线行为一致）。
+  final ContactStore? contactStore;
+
+  /// G7 结构化偏好（C 的 PreferenceProfile）：可选注入。未注入时候选卡的
+  /// 反馈标签行与「查看我的偏好」入口不渲染。
+  final PreferenceProfile? preferences;
+
+  /// G7 偏好落盘回调（main.dart 注入）：record/clear 之后由页面触发——
+  /// PreferenceProfile 只给 toJson/fromJson（core 不落盘），存取时机在 app 层。
+  final void Function()? persistPreferences;
+
+  /// C9 使用统计（可选注入，[SettingsStore.usage] 同一份实例）：传进
+  /// [CaptureSession] 后四条路由的打点写进它，设置页统计卡读同一份对象。
+  /// null = 不打点（工具页直开的测试场景，与接入前逐字节一致）。
+  final UsageStats? usage;
+
+  /// C10 会话检查点的落盘句柄（main.dart 传 [SettingsStore.saveSessionCheckpoint]）：
+  /// 撕给 [CaptureSession]，快照进门/切换联系人时写档。null = 只算不写（测试场景）。
+  final CheckpointWriter? writeCheckpoint;
+
+  /// C10 进页时的检查点存档快照（main.dart 传 store.sessionCheckpoint——store
+  /// 已在 main() 里 load 完）。非空且非空检查点时，进页弹「待确认恢复上次会话」
+  /// 对话框（C10 硬约束：恢复必须过用户确认，不静默恢复）。确认后经
+  /// [CaptureSession.restoreCheckpoint] 回填，再写 null 清档。
+  final Map<String, dynamic>? sessionCheckpoint;
+
   @override
   State<CapturePage> createState() => _CapturePageState();
 }
@@ -57,6 +98,13 @@ class _CapturePageState extends State<CapturePage> {
 
   bool _serviceRunning = false;
   bool _ocrFallback = true;
+
+  /// #11 悬浮窗防截屏（FLAG_SECURE）开关，默认关。页面本地状态（不落盘），
+  /// 与 Kotlin 侧 OverlayController 的缺省一致——原生状态存服务进程内存，
+  /// 服务重启也回默认关。两侧都不持久化是刻意的最小实现：开关只在用户显式
+  /// 点按时下发（重进页面开关显示为关，原生窗口若仍开着 FLAG_SECURE 则继续
+  /// 受保护，不会因进页面被静默撤销），持久化 + 原生状态回读是后续项。
+  bool _overlaySecure = false;
 
   /// A3「学习我的说话方式」开关：写入 [CaptureSession.styleLearning]，下一轮
   /// 起草生效。
@@ -102,13 +150,24 @@ class _CapturePageState extends State<CapturePage> {
   final Set<int> _expandedCandidates = {};
 
   /// v1 适配清单（与旧仓库 ChatApps 一致的子集，包名按需增减）。
+  /// fix(kimi-review #22 复查)：抖音移出本清单——Kotlin 侧 ChatApps 没有它的
+  /// 适配器（ChatApps.kt 只注册了微信的 WeChatOcrAdapter），勾选后事件照常进
+  /// configuredPackages，maybeCapture 在 ChatApps.forPackage 返回 null 处直接
+  /// return，自动采集静默不生效，UI 承诺不兑现。降到 [_manualOcrOnlyApps]
+  /// 灰显标注「仅手动 OCR」，等真机取样确认其无障碍树形态后再评估 OCR 能力
+  /// 面适配器（WeChatOcrAdapter 的「空树」前提是多台真机交叉验证过的）。
   static const Map<String, String> _knownApps = {
     'com.tencent.mobileqq': 'QQ',
     'com.tencent.tim': 'TIM',
     'org.telegram.messenger': 'Telegram',
     'com.whatsapp': 'WhatsApp',
     'com.tencent.mm': '微信（OCR 兜底）',
-    'com.ss.android.ugc.aweme': '抖音（OCR 兜底）',
+  };
+
+  /// 无适配器、自动采集不生效的 App（#22 复查）：chip 灰显不可勾选、永不进
+  /// [_packages]——只有采集页的手动 OCR 图标可用（manualOcr 不查适配器）。
+  static const Map<String, String> _manualOcrOnlyApps = {
+    'com.ss.android.ugc.aweme': '抖音（仅手动 OCR）',
   };
 
   final Set<String> _packages = {
@@ -126,6 +185,13 @@ class _CapturePageState extends State<CapturePage> {
       overlayEnabled: widget.overlayEnabled,
       // B8：展示模式跟随设置页同一份 notifier，推悬浮窗时透传给原生侧。
       displayMode: widget.displayMode,
+      // C10：检查点经闸门句柄写入（见 [_gatedWriteCheckpoint]——恢复提示未决
+      // 期间拦下，防止进页期的空写入覆盖存档里的上次会话）。
+      writeCheckpoint: _gatedWriteCheckpoint,
+      // C9：统计实例随构造注入（C9 接线契约，usage_stats.dart）。
+      stats: widget.usage,
+      // G7：偏好档案注入——每轮把 styleAddendum 附言随 ctx 进写作路。
+      preferences: widget.preferences,
     );
     // 会话状态（快照/分析/忙碌/错误）与改写中的卡片集合变化时重绘：stream 回调
     // 不经过 setState，不监听的话「实时快照与建议」永远停在首次 build。
@@ -135,16 +201,130 @@ class _CapturePageState extends State<CapturePage> {
     _session.overlayPermissionLost.addListener(_onOverlayPermissionLost);
     // B8 展示模式在设置页被改时同步重绘（与设置页共用同一份 notifier）。
     widget.displayMode?.addListener(_onStateChanged);
+    // #6 联系人（A 的 ContactStore）：激活联系人变化（选择面板切换/新建即
+    // 激活/停用）→ 同步进会话（applyContact 把 relationship/persona/avoidWords
+    // 组进下一轮 ChatContext）。null = 停用，与基线逐字节一致。确认入库等
+    // 档案内容变化由 A 的 update() 同步刷新 activeContact，走同一监听。
+    final contacts = widget.contactStore;
+    if (contacts != null) {
+      contacts.activeContact.addListener(_onContactChanged);
+      // 进页即把当前激活联系人交给会话（与选择面板里的切换同一条路径）。
+      _session.applyContact(contacts.activeContact.value);
+    }
     _session.start();
     _relationship = TextEditingController(text: widget.relationship.value);
     _relationship.addListener(() {
       widget.relationship.value = _relationship.text;
     });
+    // C10：恢复提示要等首帧之后再弹（对话框需要 Overlay 上下文）。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _offerSessionRestore());
     _refreshServiceStatus();
+    // fix(kimi-review #2)：本页 initState 的 _pushConfigure 在服务未连时打空
+    // （通道在而服务侧 handler 未挂，MissingPluginException 被 catch 吞掉）。
+    // 「先开采集页、后启无障碍」是最常见启用路径——服务晚连后原生经 control
+    // 通道发 requestConfigure（attachEngineChannels 汇聚点），这里接住并幂等
+    // 重发当前配置。回调为页级：退出页清空，避免悬引用到已 dispose 的状态；
+    // 页面不在时请求被丢弃，下次进页 initState 重新下发。
+    CaptureAndroid.onConfigureReplay = _pushConfigure;
     _pushConfigure();
   }
 
+  /// C10 检查点写入闸门：恢复提示未决期间（进页 → 用户对「待确认恢复上次
+  /// 会话」做出选择）拦下检查点写入。不加闸的话，进页 initState 里的
+  /// applyContact（此时还没有任何快照，签名是空串）会立刻以「空会话」覆盖
+  /// 存档里的上次会话，恢复提示就永远没东西可恢复。提示落定后打开，此后
+  /// 快照进门/切换联系人的写入照常。
+  bool _checkpointGateOpen = false;
+
+  Future<void> _gatedWriteCheckpoint(Map<String, dynamic>? checkpoint) async {
+    if (!_checkpointGateOpen) return;
+    await widget.writeCheckpoint?.call(checkpoint);
+  }
+
+  void _openCheckpointGate() {
+    _checkpointGateOpen = true;
+  }
+
+  /// C10：「待确认恢复上次会话」提示（恢复必须过用户确认，不静默恢复——
+  /// settings_store.dart 与 capture_session.dart 的 C10 契约）。有可恢复内容
+  /// 才弹；确认后回填会话上下文并清档，取消/关闭则保留存档等下次进页再问。
+  Future<void> _offerSessionRestore() async {
+    final raw = widget.sessionCheckpoint;
+    final checkpoint = raw == null ? null : SessionCheckpoint.fromJson(raw);
+    if (checkpoint == null || checkpoint.isEmpty) {
+      _openCheckpointGate();
+      return;
+    }
+    // 联系人按存档 id 解析（档案可能已删——解析不到按「无联系人」恢复，
+    // 不猜测；contact_store.dart:189 的「确认后由 UI 重新 setActive」）。
+    final contact = widget.contactStore?.byId(checkpoint.activeContactId);
+    final contactName = contact?.displayName;
+    if (!mounted) {
+      _openCheckpointGate();
+      return;
+    }
+    final restore = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('待确认恢复上次会话'),
+        content: Text(
+          '上次会话进行到：\n'
+          '${checkpoint.relationship.trim().isEmpty ? '' : '· 关系描述：${checkpoint.relationship.trim()}\n'}'
+          '${contactName != null ? '· 联系人：$contactName\n' : ''}'
+          '· 快照标识：${checkpoint.signature.isEmpty ? '（无）' : checkpoint.signature}\n\n'
+          '恢复只回填关系描述与联系人（聊天内容本身不落盘、无法恢复）。'
+          '不恢复则保持当前状态，存档保留到下次询问。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('不恢复'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('恢复'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (restore == true) {
+      // 输入框先回填（控制器的监听是 controller→notifier 单向，restoreCheckpoint
+      // 直写 notifier 不会回流到输入框），再回填会话上下文。
+      _relationship.text = checkpoint.relationship;
+      if (widget.contactStore != null && checkpoint.activeContactId != null) {
+        // 解析得到才激活；档案已删时保持无联系人（不猜测），关系描述照常回填。
+        if (contact != null) widget.contactStore!.setActive(contact.id);
+      }
+      _session.restoreCheckpoint(checkpoint, contact: contact);
+      // C10：确认恢复即清档——之后由新的快照/切换写新的检查点；清档失败
+      // 不拦恢复（写盘失败顶多下次进页再问一次，幂等）。
+      try {
+        await widget.writeCheckpoint?.call(null);
+      } catch (_) {}
+    }
+    _openCheckpointGate();
+    if (mounted) setState(() {});
+  }
+
   void _onStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// #6 联系人激活变化（选择面板切换 / 新建即激活 / 停用都汇到这里）：同步进
+  /// 会话并重绘。null = 停用——对应 A 契约里「无激活联系人时行为与现在逐字节
+  /// 一致」的那一半。
+  void _onContactChanged() {
+    if (!mounted) return;
+    setState(() {});
+    _session.applyContact(widget.contactStore?.activeContact.value);
+  }
+
+  /// G7 偏好在任何地方被改动（候选卡记录 / 偏好面板删除、清空）后的页面联动：
+  /// 先落盘回调（main.dart 注入），再重绘——勾选态取自偏好档案的样例，删除后
+  /// 要立即取消对应卡上的 ✓。
+  void _onPreferencesMutated() {
+    widget.persistPreferences?.call();
     if (mounted) setState(() {});
   }
 
@@ -172,10 +352,15 @@ class _CapturePageState extends State<CapturePage> {
 
   @override
   void dispose() {
+    // fix(kimi-review #2)：重放回调随页销毁——同身份才清（防误清后来者）。
+    if (CaptureAndroid.onConfigureReplay == _pushConfigure) {
+      CaptureAndroid.onConfigureReplay = null;
+    }
     _session.state.removeListener(_onStateChanged);
     _session.refiningCards.removeListener(_onStateChanged);
     _session.overlayPermissionLost.removeListener(_onOverlayPermissionLost);
     widget.displayMode?.removeListener(_onStateChanged);
+    widget.contactStore?.activeContact.removeListener(_onContactChanged);
     _session.dispose();
     _relationship.dispose();
     _extra.dispose();
@@ -266,11 +451,66 @@ class _CapturePageState extends State<CapturePage> {
         ),
       );
 
+  /// #11 防截屏开关：经 [CaptureAndroid.setSecure] 推给原生（control 通道
+  /// 'setSecure'，参数 bool，Kotlin 侧落在悬浮窗窗口的 WindowManager flag）。
+  /// 控制通道由采集服务注册——服务未连接（或无引擎通道）时这里抛异常：
+  /// 开关保持原位并提示，不静默，也不写本地状态。
+  Future<void> _toggleOverlaySecure(bool v) async {
+    if (v == _overlaySecure) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await CaptureAndroid().setSecure(v);
+    } catch (_) {
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+          content: Text('采集服务未连接，暂时改不了悬浮窗防截屏；启用采集服务后再试。'),
+        ));
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _overlaySecure = v);
+  }
+
+  /// #11 悬浮窗防截屏卡（FLAG_SECURE）——采集页的隐私开关：悬浮窗候选是
+  /// 第三方对话明文，录屏可整段带走；开启后系统截图与屏幕录制都拍不到悬浮
+  /// 窗内容。文案如实写明代价与限制：FLAG_SECURE 只标记悬浮窗自身窗口，
+  /// 本应用的整屏 OCR（截的是别的应用/整屏）在部分机型上也可能因此拿不到
+  /// 画面——「OCR 前自动临时关闭 FLAG_SECURE 再恢复」的路径涉及采集服务侧
+  /// （CaptureService/ScreenCapture），先只做开关 + 文案说明限制。
+  Widget _overlaySecureCard() => Card(
+        child: SwitchListTile(
+          value: _overlaySecure,
+          onChanged: (v) => _toggleOverlaySecure(v),
+          title: const Text('悬浮窗防截屏（FLAG_SECURE）'),
+          subtitle: const Text(
+              '开启后，系统截图与屏幕录制都拍不到悬浮窗里的候选内容——第三方对话明文不再随录屏外泄。'
+              '代价：整屏识别（OCR）在部分机型上也可能因此拿不到画面，识别失败时请先临时关闭本开关再试。'),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('采集助手')),
+      appBar: AppBar(
+        title: const Text('采集助手'),
+        actions: [
+          // G7「查看我的偏好」入口：列出全部已记录的反馈并支持删除——
+          // 用户可查可改可删是硬约束（p0-plan G7）。
+          if (widget.preferences != null)
+            IconButton(
+              icon: const Icon(Icons.tune),
+              tooltip: '查看我的偏好',
+              onPressed: () => showPreferencesSheet(
+                context,
+                widget.preferences!,
+                onMutated: _onPreferencesMutated,
+              ),
+            ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(12),
         children: [
@@ -278,8 +518,17 @@ class _CapturePageState extends State<CapturePage> {
           const SizedBox(height: 8),
           _overlayCard(),
           const SizedBox(height: 8),
+          // #11 防截屏开关：跟在悬浮窗开关后面，管理的就是悬浮窗这扇窗。
+          _overlaySecureCard(),
+          const SizedBox(height: 8),
           _scopeCard(),
           const SizedBox(height: 8),
+          // #6 联系人入口：选择/新建联系人；卡上把「进提示词的正文」与
+          // 「仅浏览信息」两个区明确分开标注（核心原则④）。
+          if (widget.contactStore != null) ...[
+            ContactSection(store: widget.contactStore!),
+            const SizedBox(height: 8),
+          ],
           TextField(
             controller: _relationship,
             decoration: const InputDecoration(
@@ -312,7 +561,14 @@ class _CapturePageState extends State<CapturePage> {
           ),
           const SizedBox(height: 8),
           _snapshotCard(),
-          _previewTile(),
+          // G1 隐私预览（kimi-review #16 抽成共用 widget，桌面流同一条）：
+          // 折叠面板，展开看本轮判断/写作两条调用各自会收到什么；没有轮次
+          // 时不显示。
+          SendPreviewTile(preview: _session.state.value.preview),
+          // G8「确认后入库」的 UI 侧：模型猜测的候选事实先停在 A 的暂存区，
+          // 用户确认才写进联系人资料（共享组件，桌面流同一条）。
+          if (widget.contactStore != null)
+            StagedFactBar(store: widget.contactStore!),
           const SizedBox(height: 8),
           _suggestionsSection(scheme),
         ],
@@ -363,6 +619,9 @@ class _CapturePageState extends State<CapturePage> {
               Wrap(
                 spacing: 6,
                 children: [
+                  // fix(kimi-review #22 复查)：只有进了 Kotlin 侧 ChatApps 注册表
+                  // 的包才可勾选自动采集；未适配的（抖音）灰显标注「仅手动
+                  // OCR」——勾了也不会生效的承诺不给用户。
                   for (final entry in _knownApps.entries)
                     FilterChip(
                       label: Text(entry.value),
@@ -377,6 +636,12 @@ class _CapturePageState extends State<CapturePage> {
                         });
                         _pushConfigure();
                       },
+                    ),
+                  for (final entry in _manualOcrOnlyApps.entries)
+                    FilterChip(
+                      label: Text(entry.value),
+                      selected: false,
+                      onSelected: null, // 灰显：无适配器，自动采集不生效
                     ),
                 ],
               ),
@@ -478,41 +743,6 @@ class _CapturePageState extends State<CapturePage> {
     );
   }
 
-  /// G1 隐私预览：折叠面板，展开看本轮判断/写作两条调用各自会收到什么。
-  /// 内容由会话在轮次开始时算好（与实际发送同源），没有轮次时不显示。
-  Widget _previewTile() {
-    final preview = _session.state.value.preview;
-    if (preview == null) return const SizedBox.shrink();
-    return Card(
-      child: ExpansionTile(
-        title: const Text('本轮将发送'),
-        subtitle: const Text('隐私预览：展开查看判断与写作各自收到什么'),
-        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        children: [
-          _previewGroup('判断路（先看局势）', preview.judge),
-          const SizedBox(height: 8),
-          _previewGroup('写作路（起草候选）', preview.writer),
-        ],
-      ),
-    );
-  }
-
-  Widget _previewGroup(String title, List<String> lines) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 2),
-          for (final line in lines)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 1),
-              child: Text(
-                '· $line',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-        ],
-      );
-
   /// B8 当前模式：与设置页共用 notifier；未注入（main.dart 未传）时按产品
   /// 默认「主推一张大卡」渲染。
   bool get _primaryMode =>
@@ -564,191 +794,958 @@ class _CapturePageState extends State<CapturePage> {
     }
     final ranked = state.analysis?.rankedReplies ?? const <RankedReply>[];
     if (state.handled) {
-      // B7：本轮已标记为不用回——安静的确认态，保留「反悔」的入口。
-      return Card(
-        child: ListTile(
-          leading: const Icon(Icons.check_circle_outline),
-          title: const Text('本轮已标记为不用回'),
-          subtitle: const Text('内容有更新时会自动重新分析；也可以现在重新起草。'),
-          trailing: TextButton(
-            onPressed: _session.regenerate,
-            child: const Text('重新起草'),
-          ),
-        ),
+      // B7：本轮已标记为不用回——安静的确认态，保留「反悔」的入口
+      // （共用 widget，桌面流同一条；副标题两页口径不同，由页面传）。
+      return HandledReplyCard(
+        subtitle: '内容有更新时会自动重新分析；也可以现在重新起草。',
+        onRedraft: _session.regenerate,
       );
     }
     if (ranked.isEmpty && !state.canSkipReply) {
       return const SizedBox.shrink();
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // B7：判断明确说「这条可以不回」时，先给这个出口——点了把本轮标记为
-        // 已处理（收起候选，同签名快照不再起草）。
-        if (state.canSkipReply) ...[
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.mark_chat_unread_outlined),
-              title: const Text('这条可以不回'),
-              subtitle: const Text('判断认为此刻不回也不影响；点了就把本轮标记为已处理。'),
-              trailing: TextButton(
-                onPressed: _session.markHandled,
-                child: const Text('不用回'),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-        if (ranked.isNotEmpty) ...[
-          Row(
-            children: [
-              Expanded(
-                  child: Text('候选回复',
-                      style: Theme.of(context).textTheme.titleSmall)),
-              TextButton(
-                  onPressed: _session.regenerate, child: const Text('换一组')),
-            ],
-          ),
-          const SizedBox(height: 4),
-          // B8「一条推荐 + 两条备选」：排序第一张大卡（含策略标签+概率），
-          // 其余折叠为两行小字、点击展开；all 模式保持全部平铺。
-          if (_primaryMode && ranked.isNotEmpty) ...[
-            _fullCandidateCard(0, ranked[0], scheme, recommended: true),
-            for (var i = 1; i < ranked.length; i++)
-              _expandedCandidates.contains(i)
-                  ? _fullCandidateCard(i, ranked[i], scheme)
-                  : _collapsedCandidate(i, ranked[i]),
-          ] else
-            for (var i = 0; i < ranked.length; i++)
-              _fullCandidateCard(i, ranked[i], scheme),
-        ],
-      ],
+    // 候选区（B7 出口 + B8 主推/平铺 + 卡片动作 + G7 反馈标签 + 记住这条）
+    // 抽成了共用 widget：两页只传数据与回调（kimi-review #16）。本页差异：
+    // 主按钮是「回填」、标题行带「换一组」、空列表不渲染头部（空列表且无
+    // canSkip 时整段已在上面 return 掉）。
+    return CandidateList(
+      ranked: ranked,
+      primaryMode: _primaryMode,
+      expandedCandidates: _expandedCandidates,
+      onToggleExpand: _toggleCandidateExpansion,
+      refiningIndexes: _session.refiningCards.value,
+      onRefine: _refine,
+      onPrimary: _refill,
+      primaryLabel: '回填',
+      canSkipReply: state.canSkipReply,
+      onMarkHandled: _session.markHandled,
+      onSwapReplies: _session.regenerate,
+      contactStore: widget.contactStore,
+      preferences: widget.preferences,
+      onPreferencesMutated: _onPreferencesMutated,
     );
   }
 
-  Widget _collapsedCandidate(int index, RankedReply r) => InkWell(
-        onTap: () => setState(() => _expandedCandidates.add(index)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  r.text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-              Icon(
-                Icons.expand_more,
-                size: 18,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ],
-          ),
-        ),
-      );
+  /// B8 备选卡展开/收回的切换（共用 widget 的回调）：点折叠行展开、点展开卡
+  /// 的「收回」折回。集合是页面私有状态，改完 setState 重绘。
+  void _toggleCandidateExpansion(int index) {
+    setState(() {
+      if (!_expandedCandidates.remove(index)) _expandedCandidates.add(index);
+    });
+  }
+}
 
-  Widget _fullCandidateCard(
-    int index,
-    RankedReply r,
-    ColorScheme scheme, {
-    bool recommended = false,
-  }) {
-    final meta = '${r.strategy} · ${(r.prob * 100).toStringAsFixed(0)}%'
-        '${r.reviewNote.isEmpty ? "" : " · ${r.reviewNote}"}';
-    final refining = _session.refiningCards.value.contains(index);
+// ---------------------------------------------------------------------------
+// #6 联系人 / G7 偏好的共享 UI：桌面流页（desktop_assistant_page.dart）与本页
+// 共用同一份实现——两个文件同属交互写手，放在这里避免复制两份。候选卡上的
+// 「记住这条」（RememberFactButton）与 G7 反馈标签行（FeedbackTagRow）随
+// kimi-review #16 的候选区抽取一并搬去了 widgets/candidate_list.dart。
+// ---------------------------------------------------------------------------
+
+/// G8「确认后入库」的确认条（采集页与桌面流共用）：A 的
+/// [ContactStore.stagedFacts] 是内存态暂存区——模型猜的候选事实只有用户在这
+/// 里点「确认保存到联系人」才写进联系人的人设正文（confirmStagedFact），
+/// 「丢弃」就地撤销（discardStagedFact）；此外没有任何写档案的通路（G8 硬约束）。
+/// 暂存区不落盘（A 的设计：重启即清空），确认/丢弃也无需持久化状态。
+class StagedFactBar extends StatefulWidget {
+  const StagedFactBar({super.key, required this.store});
+
+  final ContactStore store;
+
+  @override
+  State<StagedFactBar> createState() => _StagedFactBarState();
+}
+
+class _StagedFactBarState extends State<StagedFactBar> {
+  @override
+  void initState() {
+    super.initState();
+    widget.store.stagedFacts.addListener(_onChange);
+  }
+
+  @override
+  void dispose() {
+    widget.store.stagedFacts.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  /// G8 确认：目标联系人由 A 解析（确认参数 → 候选自带 contactId → 当前激活）。
+  /// 返回 null 表示解析不出目标，候选留在暂存区——提示用户先选人，不静默吞掉；
+  /// 非 null 返回确认后的最新档案，SnackBar 告知写进了谁的资料。
+  Future<void> _confirm(StagedCandidateFact fact) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final saved = await widget.store.confirmStagedFact(fact);
+    if (!mounted) return;
+    if (saved == null) {
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+          content: Text('没有可保存的联系人——先在「联系人」卡选择/新建，再确认保存。'),
+        ));
+      return;
+    }
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text('已保存到「${saved.displayName}」的人设正文（进提示词）'),
+      ));
+  }
+
+  void _discard(StagedCandidateFact fact) {
+    widget.store.discardStagedFact(fact);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final staged = widget.store.stagedFacts.value;
+    if (staged.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (recommended) ...[
+            Row(
+              children: [
+                Icon(Icons.fact_check_outlined,
+                    size: 18, color: scheme.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text('待确认的事实——保存前需要你确认',
+                      style: Theme.of(context).textTheme.titleSmall),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '以下来自「记住这条」的暂存（模型产出/候选原文），'
+              '不确认就不会写进任何联系人资料。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            for (final fact in staged)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: scheme.outlineVariant),
+                  borderRadius: const BorderRadius.all(Radius.circular(8)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(fact.text),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        FilledButton.tonal(
+                          onPressed: () => _confirm(fact),
+                          child: const Text('确认保存到联系人'),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton(
+                          onPressed: () => _discard(fact),
+                          child: const Text('丢弃'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// G7 反馈标签行（FeedbackTagRow）与其中文文案（feedbackTagLabel）已随
+// kimi-review #16 的候选区抽取搬去 widgets/candidate_list.dart——本页
+// 「查看我的偏好」面板（_PreferencesSheet）仍用它，经顶部 import 引入。
+
+/// #6 联系人入口卡：显示当前激活联系人的 displayName 与「使用中」激活态，并把
+/// 「进提示词的正文」与「仅浏览信息」两区明确分开标注（核心原则④：浏览信息
+/// 永不进提示词——A 的 applyContact 映射保证 notes 不进 ChatContext，UI 在
+/// 这里把边界画给用户看）。
+class ContactSection extends StatefulWidget {
+  const ContactSection({super.key, required this.store});
+
+  final ContactStore store;
+
+  @override
+  State<ContactSection> createState() => _ContactSectionState();
+}
+
+class _ContactSectionState extends State<ContactSection> {
+  @override
+  void initState() {
+    super.initState();
+    widget.store.contacts.addListener(_onChange);
+    // A 的 ContactStore.activeContact 是 ValueNotifier<ContactProfile?>：
+    // 切换/停用/档案更新（update 换新实例）/删除都会写它，一处监听全覆盖。
+    widget.store.activeContact.addListener(_onChange);
+  }
+
+  @override
+  void dispose() {
+    widget.store.contacts.removeListener(_onChange);
+    widget.store.activeContact.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  ContactProfile? get _active => widget.store.activeContact.value;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final active = _active;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.person_outline, size: 18, color: scheme.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text('联系人',
+                      style: Theme.of(context).textTheme.titleSmall),
+                ),
+                TextButton.icon(
+                  onPressed: () =>
+                      showContactPickerSheet(context, widget.store),
+                  icon: const Icon(Icons.swap_horiz, size: 18),
+                  label: const Text('选择 / 新建'),
+                ),
+              ],
+            ),
+            if (active == null)
+              Text(
+                '未选择联系人——不向提示词注入任何联系人信息。',
+                style: Theme.of(context).textTheme.bodySmall,
+              )
+            else ...[
               Row(
                 children: [
+                  Flexible(
+                    child: Text(active.displayName,
+                        style: Theme.of(context).textTheme.titleMedium),
+                  ),
+                  const SizedBox(width: 8),
                   Container(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
-                      color: scheme.primary,
+                      color: scheme.primaryContainer,
                       borderRadius:
                           const BorderRadius.all(Radius.circular(999)),
                     ),
                     child: Text(
-                      '推荐',
-                      style: TextStyle(color: scheme.onPrimary, fontSize: 12),
+                      '使用中',
+                      style: TextStyle(
+                          fontSize: 12, color: scheme.onPrimaryContainer),
                     ),
                   ),
-                  const Spacer(),
-                  Text(meta, style: Theme.of(context).textTheme.bodySmall),
                 ],
               ),
-            ] else ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(meta,
-                        style: Theme.of(context).textTheme.bodySmall),
-                  ),
-                  // B8 展开来的备选卡给一个收回口，保持折叠语义完整。
-                  if (_expandedCandidates.contains(index))
-                    GestureDetector(
-                      onTap: () =>
-                          setState(() => _expandedCandidates.remove(index)),
-                      child: Icon(
-                        Icons.expand_less,
-                        size: 18,
-                        color: scheme.onSurfaceVariant,
-                      ),
+              const SizedBox(height: 8),
+              _contactZone(
+                header: '进提示词的正文（模型会读到）',
+                icon: Icons.description_outlined,
+                borderColor: scheme.primary,
+                rows: [
+                  if (active.relationship.trim().isNotEmpty)
+                    (text: '关系：${active.relationship.trim()}', onRemove: null),
+                  // 人设正文逐行展示（G8 确认入库的事实按行追加，见
+                  // ContactStore.confirmStagedFact）并给逐行移除入口——确认错
+                  // 的事实有撤回通路，不必手改存档 JSON（可纠错性硬约束）。
+                  for (final line in _personaLinesOf(active))
+                    (
+                      text: '人设：$line',
+                      onRemove: () => _removePersonaLine(active, line),
+                    ),
+                  if (active.avoidWords.any((w) => w.trim().isNotEmpty))
+                    (
+                      text: '避谈词：${active.avoidWords.where((w) => w.trim().isNotEmpty).join('、')}',
+                      onRemove: null,
                     ),
                 ],
+              ),
+              const SizedBox(height: 8),
+              _contactZone(
+                header: '仅浏览信息（模型永远看不到）',
+                icon: Icons.visibility_off_outlined,
+                borderColor: scheme.outlineVariant,
+                rows: [
+                  if (active.notes.trim().isNotEmpty)
+                    (text: '备注：${active.notes.trim()}', onRemove: null),
+                ],
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton(
+                      onPressed: () =>
+                          showEditContactDialog(context, widget.store, active),
+                      child: const Text('编辑'),
+                    ),
+                    TextButton(
+                      onPressed: () => widget.store.setActive(null),
+                      child: const Text('停用该联系人'),
+                    ),
+                  ],
+                ),
               ),
             ],
-            const SizedBox(height: 4),
-            Text(r.text, style: Theme.of(context).textTheme.bodyLarge),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                FilledButton.tonal(
-                  onPressed: () => _refill(r.text),
-                  child: const Text('回填'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 一块带标注的分区：进提示词的正文用主色描边，仅浏览信息用弱色描边 +
+  /// 「模型永远看不到」的明示——两区的边界是画给用户看的硬约束。行可带
+  /// 移除动作（[row.onRemove]），用于人设已确认事实的逐行撤回。
+  Widget _contactZone({
+    required String header,
+    required IconData icon,
+    required Color borderColor,
+    required List<({String text, void Function()? onRemove})> rows,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        border: Border.all(color: borderColor),
+        borderRadius: const BorderRadius.all(Radius.circular(8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 4),
+              Text(header, style: Theme.of(context).textTheme.labelLarge),
+            ],
+          ),
+          const SizedBox(height: 4),
+          if (rows.isEmpty)
+            Text('（空）',
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant))
+          else
+            for (final row in rows)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 1),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(row.text,
+                          style: Theme.of(context).textTheme.bodySmall),
+                    ),
+                    if (row.onRemove != null)
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints:
+                            const BoxConstraints(minWidth: 28, minHeight: 28),
+                        iconSize: 16,
+                        icon: const Icon(Icons.delete_outline),
+                        tooltip: '从人设移除这条',
+                        onPressed: row.onRemove,
+                      ),
+                  ],
                 ),
-                // ④ busy 只作用于本卡：改写中只在这张卡上转圈，其它卡的
-                // 「更短/更礼貌/换个说法」照常可点。
-                if (refining) ...[
-                  const SizedBox(width: 12),
-                  const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  const SizedBox(width: 4),
-                  Text('改写中…', style: Theme.of(context).textTheme.bodySmall),
-                ] else ...[
-                  TextButton(
-                    onPressed: () =>
-                        _refine(index, CaptureSession.refineShorter),
-                    child: const Text('更短'),
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        _refine(index, CaptureSession.refinePoliter),
-                    child: const Text('更礼貌'),
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        _refine(index, CaptureSession.refineRephrase),
-                    child: const Text('换个说法'),
-                  ),
-                ],
+              ),
+        ],
+      ),
+    );
+  }
+
+  /// 人设正文按行拆（G8 确认入库的事实一行一条，见
+  /// ContactStore.confirmStagedFact 的追加格式「persona\nfact」）。
+  List<String> _personaLinesOf(ContactProfile contact) => [
+        for (final line in contact.persona.split('\n'))
+          if (line.trim().isNotEmpty) line.trim(),
+      ];
+
+  /// 逐行撤回一条人设事实：删行 → update 落盘（编辑的是激活联系人时 store
+  /// 会同步刷新 activeContact，会话侧经页面监听拿到新档案）。失败要显式提示，
+  /// 静默会让用户以为撤回了、下一轮却还发出去。
+  Future<void> _removePersonaLine(ContactProfile contact, String line) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final lines = contact.persona.split('\n');
+    final idx = lines.indexWhere((s) => s.trim() == line);
+    if (idx < 0) return;
+    lines.removeAt(idx);
+    try {
+      await widget.store.update(contact.copyWith(persona: lines.join('\n')));
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('已从人设移除：$line')));
+    } catch (e) {
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('移除失败：$e')));
+    }
+  }
+}
+
+/// 选择联系人面板：点按即激活（联系人卡与提示词注入随之更新），右上角
+/// 「新建」打开新建对话框，底部给「停用」出口（无激活联系人 = 不注入）。
+void showContactPickerSheet(BuildContext context, ContactStore store) {
+  showModalBottomSheet<void>(
+    context: context,
+    builder: (_) => _ContactPickerSheet(store: store),
+  );
+}
+
+class _ContactPickerSheet extends StatefulWidget {
+  const _ContactPickerSheet({required this.store});
+
+  final ContactStore store;
+
+  @override
+  State<_ContactPickerSheet> createState() => _ContactPickerSheetState();
+}
+
+class _ContactPickerSheetState extends State<_ContactPickerSheet> {
+  @override
+  void initState() {
+    super.initState();
+    widget.store.contacts.addListener(_onChange);
+    widget.store.activeContact.addListener(_onChange);
+  }
+
+  @override
+  void dispose() {
+    widget.store.contacts.removeListener(_onChange);
+    widget.store.activeContact.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  /// 长按删除的确认对话框：档案与其人设/避谈词一并删除、不可恢复——不可恢复
+  /// 的动作必须过一道确认，不能做成一滑就没。
+  Future<void> _confirmDelete(ContactProfile c) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('删除联系人「${c.displayName}」？'),
+        content: const Text('人设正文与避谈词一并删除，删除后不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await widget.store.remove(c.id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final contacts = widget.store.contacts.value;
+    final activeId = widget.store.activeContact.value?.id;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text('选择联系人',
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                TextButton.icon(
+                  onPressed: () => showNewContactDialog(context, widget.store),
+                  icon: const Icon(Icons.person_add_alt_1, size: 18),
+                  label: const Text('新建联系人'),
+                ),
               ],
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (contacts.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        child: Text(
+                          '还没有联系人。点右上角「新建联系人」创建第一个；'
+                          '不选择则不向提示词注入联系人信息。',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      )
+                    else
+                      for (final c in contacts)
+                        ListTile(
+                          leading: Icon(
+                            c.id == activeId
+                                ? Icons.check_circle
+                                : Icons.person_outline,
+                            color: c.id == activeId
+                                ? scheme.primary
+                                : scheme.onSurfaceVariant,
+                          ),
+                          title: Text(c.displayName),
+                          subtitle: c.relationship.trim().isEmpty
+                              ? null
+                              : Text('关系：${c.relationship.trim()}'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon:
+                                    const Icon(Icons.edit_outlined, size: 20),
+                                tooltip: '编辑「${c.displayName}」',
+                                onPressed: () => showEditContactDialog(
+                                    context, widget.store, c),
+                              ),
+                              if (c.id == activeId)
+                                Text('使用中',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: scheme.onPrimaryContainer)),
+                            ],
+                          ),
+                          // 长按删除（可纠错性/隐私：档案可删；删的是激活联系人
+                          // 时 store 一并清空激活态，下一轮按「无联系人」跑）。
+                          onLongPress: () => _confirmDelete(c),
+                          onTap: () => widget.store.setActive(c.id),
+                        ),
+                    if (activeId != null)
+                      ListTile(
+                        leading: const Icon(Icons.person_off_outlined),
+                        title: const Text('停用当前联系人'),
+                        subtitle: const Text('不向提示词注入联系人信息。'),
+                        onTap: () => widget.store.setActive(null),
+                      ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '长按某一行可删除联系人；点右侧铅笔编辑档案。人设里确认错'
+                      '的事实，也可在联系人卡上逐行移除。',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 新建联系人对话框：把「进提示词的正文」与「仅浏览信息」分成两个明确标注
+/// 的区（核心原则④），保存即激活（调 A 的 create + setActive）。
+void showNewContactDialog(BuildContext context, ContactStore store) {
+  showDialog<void>(
+    context: context,
+    builder: (_) => _ContactFormDialog(store: store),
+  );
+}
+
+/// 编辑联系人对话框：与新建同一份表单（[initial] 预填），保存调 A 的 update
+/// （updatedAt 自动刷新；编辑的是激活联系人时 activeContact 同步换新实例，
+/// 会话侧经监听拿到新档案）。可纠错性：联系人建错了/要补充，不再只能手改
+/// 存档 JSON。
+void showEditContactDialog(
+  BuildContext context,
+  ContactStore store,
+  ContactProfile initial,
+) {
+  showDialog<void>(
+    context: context,
+    builder: (_) => _ContactFormDialog(store: store, initial: initial),
+  );
+}
+
+class _ContactFormDialog extends StatefulWidget {
+  const _ContactFormDialog({required this.store, this.initial});
+
+  final ContactStore store;
+
+  /// 非空 = 编辑模式（预填并以 update 保存）；null = 新建模式。
+  final ContactProfile? initial;
+
+  @override
+  State<_ContactFormDialog> createState() => _ContactFormDialogState();
+}
+
+class _ContactFormDialogState extends State<_ContactFormDialog> {
+  final _displayName = TextEditingController();
+  final _aliases = TextEditingController();
+  final _relationship = TextEditingController();
+  final _persona = TextEditingController();
+  final _avoidWords = TextEditingController();
+  final _notes = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = widget.initial;
+    if (initial != null) {
+      _displayName.text = initial.displayName;
+      _aliases.text = initial.aliases.join('、');
+      _relationship.text = initial.relationship;
+      _persona.text = initial.persona;
+      _avoidWords.text = initial.avoidWords.join('、');
+      _notes.text = initial.notes;
+    }
+  }
+
+  @override
+  void dispose() {
+    _displayName.dispose();
+    _aliases.dispose();
+    _relationship.dispose();
+    _persona.dispose();
+    _avoidWords.dispose();
+    _notes.dispose();
+    super.dispose();
+  }
+
+  /// 逗号/顿号分隔 → 去空白去空（别名与避谈词共用）。
+  List<String> _split(String text) => text
+      .split(RegExp('[,，、]'))
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList();
+
+  Future<void> _save() async {
+    final name = _displayName.text.trim();
+    if (name.isEmpty) return; // 保存按钮只在称呼非空时可用，这里兜一道。
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (widget.initial == null) {
+        // A 的 create 生成 id 并落盘（updatedAt 语义都在 A 侧）；写盘失败要
+        // 显式告诉用户，不能静默——静默的话用户以为建好了，下一轮却没联系人。
+        final profile = await widget.store.create(
+          displayName: name,
+          aliases: _split(_aliases.text),
+          relationship: _relationship.text.trim(),
+          persona: _persona.text.trim(),
+          avoidWords: _split(_avoidWords.text),
+          notes: _notes.text.trim(),
+        );
+        // 新建即激活（setActive 是 A 的切换入口；激活态不落盘，重启按 C10 的
+        // 「待确认恢复」流程走）。编辑不改激活态：编辑谁就保持谁。
+        widget.store.setActive(profile.id);
+      } else {
+        // 编辑走 A 的 update（updatedAt 自动刷新；编辑的是激活联系人时
+        // activeContact 同步换新实例，会话侧经页面监听拿到新档案）。id 已被
+        // 并发删除时 update 抛 StateError，原样显示为保存失败。
+        await widget.store.update(widget.initial!.copyWith(
+          displayName: name,
+          aliases: _split(_aliases.text),
+          relationship: _relationship.text.trim(),
+          persona: _persona.text.trim(),
+          avoidWords: _split(_avoidWords.text),
+          notes: _notes.text.trim(),
+        ));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final editing = widget.initial != null;
+    return AlertDialog(
+      title: Text(editing ? '编辑联系人' : '新建联系人'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _field('称呼（必填）', _displayName, onChanged: (_) => setState(() {})),
+            _field('别名（可选，逗号分隔，用于识别同一人的不同会话）', _aliases),
+            const SizedBox(height: 8),
+            _zoneHeader(context, '进提示词的正文（模型会读到）', Icons.description_outlined,
+                scheme.primary),
+            _field('关系（进提示词）', _relationship),
+            _field('人设正文（进提示词，如：喜欢简洁直接的表达）', _persona, maxLines: 2),
+            _field('避谈词（进提示词，逗号/顿号分隔，如：收入、病情）', _avoidWords),
+            const SizedBox(height: 8),
+            _zoneHeader(context, '仅浏览信息（模型永远看不到）',
+                Icons.visibility_off_outlined, scheme.outlineVariant),
+            _field('备注（只在本页浏览，不发给模型）', _notes, maxLines: 2),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _displayName.text.trim().isEmpty ? null : _save,
+          child: Text(editing ? '保存' : '保存并使用'),
+        ),
+      ],
+    );
+  }
+
+  Widget _zoneHeader(
+      BuildContext context, String text, IconData icon, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Expanded(
+              child: Text(text, style: Theme.of(context).textTheme.labelLarge)),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(
+    String label,
+    TextEditingController controller, {
+    int maxLines = 1,
+    ValueChanged<String>? onChanged,
+  }) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: TextField(
+          controller: controller,
+          maxLines: maxLines,
+          onChanged: onChanged,
+          decoration: InputDecoration(
+            labelText: label,
+            border: const OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+      );
+}
+
+/// 「查看我的偏好」面板（G7 硬约束：用户可查可改可删）：列出全部六类反馈的
+/// 计数与最近样例，逐类删除、一键清空；并展示将附进写作提示词的附言原文
+/// （C 的 styleAddendum，只陈述统计事实）。
+void showPreferencesSheet(
+  BuildContext context,
+  PreferenceProfile preferences, {
+  void Function()? onMutated,
+}) {
+  showModalBottomSheet<void>(
+    context: context,
+    builder: (_) => _PreferencesSheet(
+      preferences: preferences,
+      onMutated: onMutated,
+    ),
+  );
+}
+
+class _PreferencesSheet extends StatefulWidget {
+  const _PreferencesSheet({required this.preferences, this.onMutated});
+
+  final PreferenceProfile preferences;
+
+  /// 删除/清空后的联动回调（页面负责落盘 + 重绘卡上勾选态）。
+  final void Function()? onMutated;
+
+  @override
+  State<_PreferencesSheet> createState() => _PreferencesSheetState();
+}
+
+class _PreferencesSheetState extends State<_PreferencesSheet> {
+  void _changed() {
+    widget.onMutated?.call();
+    if (mounted) setState(() {});
+  }
+
+  void _clearTag(PreferenceTag tag) {
+    widget.preferences.clear(tag);
+    _changed();
+  }
+
+  Future<void> _clearAll() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清空全部偏好记录？'),
+        content: const Text('六类反馈的计数与最近样例全部删除，删除后不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    widget.preferences.clearAll();
+    _changed();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final preferences = widget.preferences;
+    final addendum = preferences.styleAddendum();
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text('我的偏好反馈',
+                        style: Theme.of(context).textTheme.titleMedium),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              Text(
+                '你对候选回复的结构化反馈：每类只记「次数 + 最近几条原文」，'
+                '不覆盖人设与联系人资料；删除即时生效。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
+              for (final tag in PreferenceTag.values) _tagTile(tag, scheme),
+              if (preferences.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    '还没有记录。在候选卡下方点标签（太正式 / 太热情 / …）即可记录。',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              if (addendum.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: scheme.primary),
+                    borderRadius: const BorderRadius.all(Radius.circular(8)),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('将附进写作提示词的内容（只陈述统计事实）',
+                          style: Theme.of(context).textTheme.labelLarge),
+                      const SizedBox(height: 4),
+                      Text(addendum,
+                          style: Theme.of(context).textTheme.bodySmall),
+                    ],
+                  ),
+                ),
+              ],
+              if (!preferences.isEmpty) ...[
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: _clearAll,
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                    label: const Text('清空全部'),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tagTile(PreferenceTag tag, ColorScheme scheme) {
+    final preferences = widget.preferences;
+    final count = preferences.count(tag);
+    final examples = preferences.examplesOf(tag);
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        count > 0 ? Icons.check_circle : Icons.radio_button_unchecked,
+        size: 20,
+        color: count > 0 ? scheme.primary : scheme.onSurfaceVariant,
+      ),
+      title: Text(feedbackTagLabel(tag)),
+      subtitle: examples.isEmpty
+          ? null
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final e in examples.take(2))
+                  Text('· $e',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ),
+      // 次数 + 删除按钮；未记录的类别没有可删的东西，不放按钮。
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            count > 0 ? '$count 次' : '未记录',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          if (count > 0)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '删除「${feedbackTagLabel(tag)}」的记录',
+              onPressed: () => _clearTag(tag),
+            ),
+        ],
       ),
     );
   }

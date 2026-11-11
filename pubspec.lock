@@ -348,10 +348,10 @@ packages:
     dependency: transitive
     description:
       name: objective_c
-      sha256: "322d5f1f0680534acaf557c5d68e97b40c3800ee5e15b63dcacc3c31504674c2"
+      sha256: c965d264fd4b0b4dd402dce9d049b70656bf98d3ca108b9bc55d2544ceadbe5e
       url: "https://pub.flutter-io.cn"
     source: hosted
-    version: "9.6.3"
+    version: "9.6.4"
   package_config:
     dependency: transitive
     description:
@@ -476,10 +476,10 @@ packages:
     dependency: transitive
     description:
       name: shared_preferences_foundation
-      sha256: "4e396ac6f8751ab7d2d6e27f22f32c8350b07006028d534f5221503382f1fa69"
+      sha256: "89435cb71ecb1ad1bf29ef73a381f871a06f433d4182b7e2ba7243b02b2c544b"
       url: "https://pub.flutter-io.cn"
     source: hosted
-    version: "2.6.1"
+    version: "2.6.2"
   shared_preferences_linux:
     dependency: transitive
     description:

@@ -166,4 +166,51 @@ void main() {
       expect(c.effectiveReviewModel(), 'review-model');
     });
   });
+
+  group('脏字段不连坐（kimi-review #7）', () {
+    test('单字段类型坏只落回该字段默认，其余字段照常读回', () {
+      // 存档单字段类型坏（手改 JSON / 旧版本写坏）：原先 `as String?` /
+      // `as num?` 裸强转抛 TypeError，SettingsStore.load 的外层 catch 把
+      // 全部设置重置默认；现在只把坏的那个字段按默认值兜底。
+      final json = fullConfig().toJson();
+      json['judgeModel'] = 42; // 字符串字段塞了数字
+      json['replyTemperature'] = '0.9'; // 数值字段塞了字符串
+      json['usePositiveExamples'] = 'true'; // 布尔字段塞了字符串
+
+      final c = JevConfig.fromJson(json);
+
+      // 坏字段各自落回类内默认值。
+      expect(c.judgeModel, '');
+      expect(c.replyTemperature, closeTo(0.8, 1e-9));
+      expect(c.usePositiveExamples, isFalse);
+      // 其余字段一个不少：连坐意味着这里读到的全是出厂默认。
+      expect(c.judgeProvider, 'bocha');
+      expect(c.judgeBaseUrl, 'https://judge.example.com');
+      expect(c.judgeKey, 'judge-key');
+      expect(c.replyBaseUrl, 'https://reply.example.com/v1');
+      expect(c.replyKey, 'reply-key');
+      expect(c.reviewEnabled, isTrue);
+      expect(c.reviewModel, 'review-model');
+      expect(c.polishBaseUrl, 'https://polish.example.com/v1');
+      expect(c.polishModel, 'polish-model');
+      expect(c.style, '克制，短句');
+      expect(c.replyLanguage, 'zh');
+      expect(c.contextHistoryCount, 10);
+    });
+
+    test('显式 null 与缺键语义不变：照旧落默认值', () {
+      // 原实现 `as String? ?? 默认` 对 null / 缺键的处理必须原样保留——
+      // 容错 helper 只改「类型不符」这一种情形的行为。
+      final c = JevConfig.fromJson({'judgeProvider': null});
+      expect(c.judgeProvider, 'jev');
+      expect(c.replyTemperature, closeTo(0.8, 1e-9));
+      expect(c.contextHistoryCount, 30);
+    });
+
+    test('JSON 的 int 数值字段照旧可读（num 统一读再转）', () {
+      // 0 会被 jsonDecode 解析成 int：直接 as double? 会抛，_num 按 num 收。
+      final c = JevConfig.fromJson({'replyTemperature': 1});
+      expect(c.replyTemperature, closeTo(1.0, 1e-9));
+    });
+  });
 }

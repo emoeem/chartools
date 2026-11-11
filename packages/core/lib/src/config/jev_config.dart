@@ -255,32 +255,38 @@ class JevConfig {
   /// 缺键一律落回字段默认值，旧版本或手改过的存档不会把配置读炸。
   /// 数值统一按 `num` 读再转：JSON 里的 `0` 会被解析成 int，
   /// 直接 `as double?` 会抛。
+  ///
+  /// fix(kimi-review #7)：读值全部改走 [_str] / [_num] / [_bool]。原先的
+  /// `as String?` / `as num?` / `as bool?` 是裸强转，存档里**单字段**类型坏
+  /// （手改 JSON、旧版本写坏）就抛 TypeError，SettingsStore.load 的外层
+  /// catch 会把全部设置一起重置成默认——一个坏字段连坐整包。现在类型不符
+  /// 的字段单独落回默认值，其余字段照常读回。
   factory JevConfig.fromJson(Map<String, dynamic> j) => JevConfig()
-        ..judgeProvider = j['judgeProvider'] as String? ?? 'jev'
-        ..judgeBaseUrl = j['judgeBaseUrl'] as String? ?? ''
-        ..judgeKey = j['judgeKey'] as String? ?? ''
-        ..judgeModel = j['judgeModel'] as String? ?? ''
-        ..judgeProtocol = j['judgeProtocol'] as String? ?? ''
-        ..replyBaseUrl = j['replyBaseUrl'] as String? ?? 'https://openrouter.ai/api/v1'
-        ..replyKey = j['replyKey'] as String? ?? ''
-        ..replyModel = j['replyModel'] as String? ?? ''
-        ..reviewEnabled = j['reviewEnabled'] as bool? ?? false
-        ..reviewBaseUrl = j['reviewBaseUrl'] as String? ?? ''
-        ..reviewKey = j['reviewKey'] as String? ?? ''
-        ..reviewModel = j['reviewModel'] as String? ?? ''
-        ..polishBaseUrl = j['polishBaseUrl'] as String? ?? ''
-        ..polishKey = j['polishKey'] as String? ?? ''
-        ..polishModel = j['polishModel'] as String? ?? ''
-        ..style = j['style'] as String? ?? ''
-        ..replyLanguage = j['replyLanguage'] as String? ?? 'follow'
-        ..replyLength = j['replyLength'] as String? ?? 'standard'
-        ..replyTemperature = (j['replyTemperature'] as num?)?.toDouble() ?? 0.8
+        ..judgeProvider = _str(j, 'judgeProvider', 'jev')
+        ..judgeBaseUrl = _str(j, 'judgeBaseUrl', '')
+        ..judgeKey = _str(j, 'judgeKey', '')
+        ..judgeModel = _str(j, 'judgeModel', '')
+        ..judgeProtocol = _str(j, 'judgeProtocol', '')
+        ..replyBaseUrl =
+            _str(j, 'replyBaseUrl', 'https://openrouter.ai/api/v1')
+        ..replyKey = _str(j, 'replyKey', '')
+        ..replyModel = _str(j, 'replyModel', '')
+        ..reviewEnabled = _bool(j, 'reviewEnabled', false)
+        ..reviewBaseUrl = _str(j, 'reviewBaseUrl', '')
+        ..reviewKey = _str(j, 'reviewKey', '')
+        ..reviewModel = _str(j, 'reviewModel', '')
+        ..polishBaseUrl = _str(j, 'polishBaseUrl', '')
+        ..polishKey = _str(j, 'polishKey', '')
+        ..polishModel = _str(j, 'polishModel', '')
+        ..style = _str(j, 'style', '')
+        ..replyLanguage = _str(j, 'replyLanguage', 'follow')
+        ..replyLength = _str(j, 'replyLength', 'standard')
+        ..replyTemperature = _num(j, 'replyTemperature', 0.8).toDouble()
         ..replyFrequencyPenalty =
-            (j['replyFrequencyPenalty'] as num?)?.toDouble() ?? 0.0
-        ..replyPresencePenalty =
-            (j['replyPresencePenalty'] as num?)?.toDouble() ?? 0.0
-        ..contextHistoryCount = (j['contextHistoryCount'] as num?)?.toInt() ?? 30
-        ..usePositiveExamples = j['usePositiveExamples'] as bool? ?? false;
+            _num(j, 'replyFrequencyPenalty', 0.0).toDouble()
+        ..replyPresencePenalty = _num(j, 'replyPresencePenalty', 0.0).toDouble()
+        ..contextHistoryCount = _num(j, 'contextHistoryCount', 30).toInt()
+        ..usePositiveExamples = _bool(j, 'usePositiveExamples', false);
 
   /// 拷贝一份再改：设置页预览、客户端构造前的小调整都走这里，
   /// 不许直接动共享实例。null 参数表示保持原值。
@@ -340,3 +346,28 @@ class JevConfig {
 /// Dart 没有按单字符的 trimEnd，用正则一次剥干净
 /// （`https://x///` → `https://x`）。
 String _stripTrailingSlashes(String s) => s.replaceAll(RegExp(r'/+$'), '');
+
+// fix(kimi-review #7)：fromJson 的逐字段容错读取。三个 helper 都只在
+// [JevConfig.fromJson] 里用：值类型与字段声明一致就原样返回，不一致（或
+// 缺键 / 显式 null）就取调用方给的默认值——单字段脏不再抛 TypeError 连坐
+// 整包。语义与原先「`as T? ?? 默认`」在健康存档上完全一致：null 照旧视为
+// 缺省，缺键照旧落默认。
+
+/// 读一个字符串字段，类型不符取 [fallback]。
+String _str(Map<String, dynamic> j, String key, String fallback) {
+  final v = j[key];
+  return v is String ? v : fallback;
+}
+
+/// 读一个数值字段，类型不符取 [fallback]。JSON 的 int 与 double 都是 num，
+/// 调用方按字段类型自行 toDouble / toInt。
+num _num(Map<String, dynamic> j, String key, num fallback) {
+  final v = j[key];
+  return v is num ? v : fallback;
+}
+
+/// 读一个布尔字段，类型不符取 [fallback]。
+bool _bool(Map<String, dynamic> j, String key, bool fallback) {
+  final v = j[key];
+  return v is bool ? v : fallback;
+}

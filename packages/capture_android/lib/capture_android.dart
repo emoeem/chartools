@@ -29,8 +29,23 @@ class OverlayAction {
 /// 「回填」经 MethodChannel 交给 InputFiller —— 只填输入框，从不发送。服务与
 /// Flutter 引擎是两个组件，通道由谁后到谁挂接（见 CaptureService.attachEngineChannels）。
 class CaptureAndroid {
-  static const MethodChannel _control =
-      MethodChannel('capture_android/control');
+  /// control 通道名（平台 → Dart 的重放请求也走它）。与 Kotlin 侧
+  /// CaptureService.CONTROL_CHANNEL（CaptureService.kt:59）同名同值；
+  /// 改任何一侧必须两侧同步（Dart 测试与 Kotlin ConfigureReplayTest 各自钳
+  /// 字面量）。
+  static const String controlChannelName = 'capture_android/control';
+
+  /// 服务 → Dart 的重放请求方法名。与 Kotlin 侧
+  /// CaptureService.REQUEST_CONFIGURE_METHOD（CaptureService.kt:68）同名同值。
+  static const String requestConfigureMethod = 'requestConfigure';
+
+  /// Dart → 服务的悬浮窗防截屏开关方法名（fix(kimi-review #11)）。与 Kotlin 侧
+  /// CaptureService.SET_SECURE_METHOD（handleControl 的分支键）同名同值；
+  /// 参数就是 bool 本身（Kotlin 侧 `call.arguments as? Boolean`）。改任何一侧
+  /// 必须两侧同步（Kotlin SetSecureContractTest 与本包测试互钳）。
+  static const String setSecureMethod = 'setSecure';
+
+  static const MethodChannel _control = MethodChannel(controlChannelName);
 
   /// 插件自身通道：悬浮窗权限的查/跳（canDrawOverlays / openOverlaySettings）。
   /// 不走 _control——那条通道由 CaptureService 注册，服务未启用时整条不存在。
@@ -38,6 +53,54 @@ class CaptureAndroid {
 
   static const EventChannel _snapshots =
       EventChannel('capture_android/snapshots');
+
+  /// fix(kimi-review #2)：服务侧 configure 重放请求的 Dart 接收端。
+  ///
+  /// 原生在「服务已连接 + 引擎已挂接」的汇聚点（CaptureService.attachEngineChannels）
+  /// 经 control 通道向 Dart 发 `requestConfigure`（fire-and-forget：无参数、
+  /// 无回调、Dart 未接住就丢弃，服务侧不等待不重试——Kotlin 侧由
+  /// ConfigureReplayTest 钳住）。本回调非空时请求交它处理：应用层（采集页
+  /// _pushConfigure）用当前生效的采集配置幂等重发 [configure]，覆盖「先开
+  /// 采集页、后启无障碍」这条最常见路径下首次 configure 打空（服务未连）
+  /// 的静默失效。回调由采集页进页时设置、退出时清空；null = 请求被丢弃
+  /// （无页面持有配置，下次进页 initState 会重新下发）。
+  ///
+  /// 通道契约两侧写死：通道名 `capture_android/control` =
+  /// CaptureService.CONTROL_CHANNEL，方法名 `'requestConfigure'` =
+  /// CaptureService.REQUEST_CONFIGURE_METHOD；改任何一侧必须两侧同步。
+  static Future<void> Function()? onConfigureReplay;
+
+  static bool _controlHandlerAttached = false;
+
+  /// 平台 → Dart 方向的 control 通道只服务重放请求：未知方法按 null 应答、
+  /// 不抛 notImplemented——采集链路不该被一个未知反向方法打断。handler 是
+  /// 进程级单份（const 通道 + 全局 messenger），首个实例挂上即生效，后续
+  /// 挂接是幂等 no-op。
+  void _attachControlHandler() {
+    if (_controlHandlerAttached) return;
+    _controlHandlerAttached = true;
+    _control.setMethodCallHandler(handleControlMethodCall);
+  }
+
+  /// control 通道「平台 → Dart」方向的分发体（fix(kimi-review #2)）：
+  /// `requestConfigure` 重放请求交 [onConfigureReplay]，其余一律 null 应答。
+  /// 供 [_attachControlHandler] 注册，也作为测试缝——不碰二进制 messenger，
+  /// 纯 Dart 可直调，套件加载期零 binding 副作用（第 2 轮门禁实测：
+  /// 测试文件在加载期初始化 flutter_test binding 曾随 runner 的套件派生
+  /// 偶发 "Connection closed before test suite loaded"，故契约测试不走真
+  /// 通道，见 capture_android_test.dart）。
+  // 仅供测试与 [_attachControlHandler]：生产代码不要直接调用。
+  static Future<Object?> handleControlMethodCall(MethodCall call) async {
+    if (call.method == requestConfigureMethod) {
+      final replay = onConfigureReplay;
+      if (replay != null) await replay();
+    }
+    return null;
+  }
+
+  CaptureAndroid() {
+    _attachControlHandler();
+  }
 
   /// 快照与悬浮窗动作共用一条原始事件流。原生侧 eventSink 是单字段（见
   /// CaptureService.streamHandler）：两次 receiveBroadcastStream() 会互相顶掉
@@ -163,6 +226,23 @@ class CaptureAndroid {
   /// 与 [hideSuggestions] 相对；「填入」成功后调这个，让出输入框和键盘给用户
   /// 检查/发送，同时悬浮球仍可随时再点开。
   Future<void> collapseSuggestions() => _control.invokeMethod<void>('collapse');
+
+  /// 悬浮窗防截屏开关（kimi-review #11）：true = 给悬浮窗窗口加 WindowManager
+  /// 的 FLAG_SECURE——系统截图与屏幕录制都拍不到悬浮窗内容（候选是第三方
+  /// 对话明文，录屏可整段带走）；false = 关闭，恢复可拍。默认关（Kotlin 侧
+  /// OverlayController 缺省 false，窗口加 flag 与否由它落地）。
+  ///
+  /// 通道契约写死（与 Kotlin 侧对齐）：control 通道方法 `'setSecure'`，参数
+  /// 就是 bool 本身——Kotlin 侧 `call.arguments as? Boolean`，由
+  /// CaptureService.handleControl 的 'setSecure' 分支转给
+  /// OverlayController.setSecure。开关状态在原生侧是内存态（采集服务重启回
+  /// 默认关），Dart 侧不缓存。
+  ///
+  /// control 通道由采集服务注册：服务未连接时这里抛 MissingPluginException
+  /// （通道在而分支未接时是 PlatformException(notImplemented)），由调用方
+  /// 兜底——采集页的开关保持原位并提示，不静默。
+  Future<void> setSecure(bool secure) =>
+      _control.invokeMethod<void>(setSecureMethod, secure);
 
   /// 把建议文本填进当前会话的输入框（只填不发）。返回 false 表示没找到
   /// 可写的输入框，调用方应退回剪贴板复制。

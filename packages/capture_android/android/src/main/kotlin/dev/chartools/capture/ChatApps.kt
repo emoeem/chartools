@@ -11,7 +11,10 @@ package dev.chartools.capture
 object ChatApps {
 
     val all: List<ChatAppAdapter> = listOf(
-        QQAdapter(), TimAdapter(), XAdapter(), FeishuAdapter(), WhatsAppAdapter(), TelegramAdapter()
+        QQAdapter(), TimAdapter(), XAdapter(), FeishuAdapter(), WhatsAppAdapter(), TelegramAdapter(),
+        // fix(kimi-review #22)：微信的 OCR 能力面——无节点树可读（canReadMessages=
+        // false），extract 恒回空快照，让服务的截屏 + 整屏 OCR 兜底路径接管自动采集。
+        WeChatOcrAdapter(),
     )
 
     /** 包名 → 适配器。服务里多处按包名分发用；一般调用方用 [forPackage]。 */

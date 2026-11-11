@@ -40,6 +40,11 @@ abstract final class HttpJson {
 
   /// POST 一段 JSON，返回解码后的 JSON 对象。每个 HTTP 或传输层失败都归一成
   /// [ApiException]；[route] 只用于组错误文案。
+  ///
+  /// fix(kimi-review #9)：请求体在重试循环**外**编码一次。jsonEncode 抛的
+  /// JsonUnsupportedObjectError 是调用方传参错误（body 里有不可序列化的
+  /// 对象），与网络无关——原先在循环内编码，会被下面的 catch-all 当传输
+  /// 失败白白重试满 3 次。编码失败直接抛参数错误，一次都不出网。
   static Future<Map<String, dynamic>> post(
     String url,
     String key,
@@ -48,12 +53,18 @@ abstract final class HttpJson {
     Map<String, String> extraHeaders = const {},
     HttpScope? scope,
   }) async {
+    final String encodedBody;
+    try {
+      encodedBody = jsonEncode(body);
+    } catch (e) {
+      throw ArgumentError('请求体无法编码为 JSON（调用方传参错误）：$e');
+    }
     var attempt = 0;
     ApiException? last;
     while (attempt < maxAttempts) {
       if (_isAborted(scope)) throw RequestCancelledException(route);
       try {
-        return await _once(url, key, body, route, extraHeaders, scope);
+        return await _once(url, key, encodedBody, route, extraHeaders, scope);
       } on RequestCancelledException {
         rethrow;
       } on ApiException catch (e) {
@@ -111,8 +122,8 @@ abstract final class HttpJson {
       final resp = await req.close();
       if (resp.statusCode < 200 || resp.statusCode > 299) {
         final text = await resp.transform(utf8.decoder).join();
-        final safeText =
-            key.isBlank() ? text : text.replaceAll(key, '[key]');
+        // fix(kimi-review #10)：脱敏走 [redactKey]，编码与片段形态也抹掉。
+        final safeText = redactKey(text, key);
         throw ApiException(
             route, resp.statusCode, safeText.ifBlank('（响应体为空）'));
       }
@@ -177,10 +188,12 @@ abstract final class HttpJson {
   }
 
   /// One attempt. Throws [ApiException] for every HTTP or transport outcome.
+  ///
+  /// [encodedBody] 由调用方（[post]）在重试循环外编码好——本方法只管发送。
   static Future<Map<String, dynamic>> _once(
     String url,
     String key,
-    Map<String, dynamic> body,
+    String encodedBody,
     String route,
     Map<String, String> extraHeaders,
     HttpScope? scope,
@@ -193,7 +206,7 @@ abstract final class HttpJson {
       final req = await _client.openUrl('POST', Uri.parse(url));
       request = req;
       jsonRequestHeaders(key, extraHeaders).forEach(req.headers.set);
-      req.write(jsonEncode(body));
+      req.write(encodedBody);
 
       readTimer = Timer(const Duration(milliseconds: readTimeoutMs), () {
         // 有意为之：缓冲路径有读超时（推理模型的长流式走 stream()，无超时）。
@@ -209,7 +222,8 @@ abstract final class HttpJson {
       // lose it. A truncated or empty error body still has to surface as the
       // real status, otherwise a 401 gets retried as a transport failure.
       if (code < 200 || code > 299) {
-        final safeText = key.isBlank() ? text : text.replaceAll(key, '[key]');
+        // fix(kimi-review #10)：脱敏走 [redactKey]，编码与片段形态也抹掉。
+        final safeText = redactKey(text, key);
         throw ApiException(route, code, safeText.ifBlank('（响应体为空）'));
       }
       if (text.isBlank()) throw ApiException(route, code, '响应体为空');
@@ -238,6 +252,32 @@ abstract final class HttpJson {
               'X-Title': 'Jev Assistant',
             }
           : const {};
+
+  /// fix(kimi-review #10)：错误文案里的密钥脱敏。原先只 `replaceAll(key)`
+  /// 精确匹配全文——服务端把 key URL 编码后回显（`%XX` 形态）、或截断回显
+  /// key 的片段，都能原样漏出去。这里对三种形态都做替换：
+  ///
+  ///  1. key 原文（与原行为一致）；
+  ///  2. `Uri.encodeComponent(key)`——表单 / 查询串里最常见的编码形态；
+  ///  3. key 的前 8 与后 8 字符片段（仅 key 足够长时做：短 key 的片段太
+  ///     通用，替换会把无关文案误伤成 [key]）。长度恰为 8 时前后片段相同，
+  ///     第二次替换是空操作。
+  ///
+  /// 顺序有讲究：先整串后片段——整串替换后，残留的只有片段形态的回显。
+  static String redactKey(String text, String key) {
+    if (key.trim().isEmpty) return text;
+    var out = text.replaceAll(key, '[key]');
+    final encoded = Uri.encodeComponent(key);
+    if (encoded != key && encoded.isNotEmpty) {
+      out = out.replaceAll(encoded, '[key]');
+    }
+    if (key.length >= 8) {
+      out = out
+          .replaceAll(key.substring(0, 8), '[key]')
+          .replaceAll(key.substring(key.length - 8), '[key]');
+    }
+    return out;
+  }
 
   /// Human-readable transport failures (no key material ever appears here).
   static String describe(Object e) {

@@ -66,17 +66,26 @@ abstract final class StreamText {
     }
     if (sawTextField) return parts.join('\n');
     // 对齐 Kotlin 的两步回退（StreamText.kt:66-67）：先 substringAfter 第一个
-    // '['（没有就原样），再剥掉残留的 JSON 脚手架字符，散文原样通过。
+    // '['（没有就原样），再剥掉残留的前导字符，散文原样通过。
+    // fix(kimi-review #19)：剥离集最小化为空白。原集合带 '"{[,]' 这些 JSON
+    // 脚手架字符，可正文恰好以引号/括号开头时（如 "你好"），首字符会被当成
+    // 脚手架吃掉；而剥脚手架只在「text 键还没到」的窗口里有意义——多显示
+    // 几个 {" 字符是瞬态的，吃掉正文首字符是永久的。substringAfter 的截断
+    // 步骤不动（stream_text_test 钉住了它）。
     final bracket = raw.indexOf('[');
     final afterBracket = bracket < 0 ? raw : raw.substring(bracket + 1);
-    return _trimStartChars(
-      afterBracket,
-      const {' ', '\n', '\r', '\t', '{', '"', ',', '[', ']'},
-    );
+    return _trimStartChars(afterBracket, _fallbackStripChars);
   }
+
+  /// 兜底路径的前导剥离集（kimi-review #19）：只剩空白。四个码位与
+  /// [_isWhitespace] 一致，即旧实现集合里的空白子集——JSON 脚手架字符
+  /// 已从集合里移除，理由见 [visible] 内的 fix 注释。
+  static const Set<String> _fallbackStripChars = {' ', '\n', '\r', '\t'};
 
   /// dart:core 的 [String.trimLeft] 只认空白；这里要对齐 Kotlin `trimStart` 的
   /// 「按字符集合剥前缀」语义，剥到第一个不在集合里的字符为止。
+  /// （不用 [String.trimLeft] 还有一个原因：它按 Unicode 空白剥，会连带
+  /// 掉 \u00A0 这类，超出旧实现认的四个码位。）
   static String _trimStartChars(String raw, Set<String> chars) {
     var i = 0;
     while (i < raw.length && chars.contains(raw[i])) {

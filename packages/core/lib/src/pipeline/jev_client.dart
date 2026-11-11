@@ -10,19 +10,27 @@ import 'judge_client.dart';
 import 'reply_cache_key.dart';
 import 'reply_client.dart';
 import 'reply_review.dart';
+import 'usage_stats.dart';
 
 /// Thin facade over the split clients so callers keep one entry point.
 /// Construct with [JevConfig] — every route reads its own address / key / model
 /// from there, so switching providers in settings takes effect on the next call.
 class JevClient {
-  JevClient(JevConfig config)
+  /// [stats] 传 app 层 SettingsStore.usage 这一份实例（C9 接线契约，见
+  /// usage_stats.dart）：打点方与设置页统计卡读写同一个对象。缺省 null =
+  /// 完全不打点，现有调用方与测试零改动。
+  JevClient(JevConfig config, {UsageStats? stats})
       : _judgeClient = JudgeClient(config),
         _replyClient = ReplyClient(config),
-        _config = config;
+        _config = config,
+        _stats = stats;
 
   final JevConfig _config;
   final JudgeClient _judgeClient;
   final ReplyClient _replyClient;
+
+  /// 使用统计（C9）：null 时所有打点行是 `?.` 空操作，行为不变。
+  final UsageStats? _stats;
 
   /// 回复缓存：Dart 的 [LinkedHashMap] 只有插入序；命中时把键摘出重插到末尾，
   /// 等价 Kotlin LinkedHashMap 的 access-order=true，淘汰时删最旧的一条。
@@ -66,6 +74,24 @@ class JevClient {
     }
   }
 
+  /// C9 打点包装：四条路由的真实调用统一从这里走 —— 发起前记一次调用，
+  /// 异常（用户取消除外）补记一次失败后原样上抛，调用方已有的兜底分支
+  /// （换候选、复查放弃、降权保留原文）行为不变。stats 为 null 时零开销
+  /// 直通。打点只读写内存计数器，不碰提示词与请求体 —— 不改变任何请求字节。
+  Future<T> _tracked<T>(UsageRoute route, Future<T> Function() call) async {
+    final s = _stats;
+    if (s == null) return call();
+    s.recordCall(route);
+    try {
+      return await call();
+    } on RequestCancelledException {
+      rethrow;
+    } catch (_) {
+      s.recordFailure(route);
+      rethrow;
+    }
+  }
+
   /// The 7 judgment questions. Errors come back inside [Analysis.error].
   ///
   /// Only successful judgments are cached: a cached transport error would make a
@@ -79,9 +105,17 @@ class JevClient {
   }) async {
     final key = _judgeKey(snapshot, relationship, ctx);
     final hit = _cachedJudge(key);
-    if (hit != null) return hit;
-    final a = await _judgeClient.judge(snapshot, relationship,
-        ctx: ctx, scope: scope);
+    if (hit != null) {
+      _stats?.recordCacheHit(UsageRoute.judge);
+      return hit;
+    }
+    final a = await _tracked(
+        UsageRoute.judge,
+        () =>
+            _judgeClient.judge(snapshot, relationship, ctx: ctx, scope: scope));
+    // 判断路由的失败不是异常而是 Analysis.error（JudgeClient.judge 的既有
+    // 语义：错误返回不抛出）—— 这里补记；异常路径的失败已由 _tracked 记过。
+    if (a.error != null) _stats?.recordFailure(UsageRoute.judge);
     if (a.error == null) _putCachedJudge(key, a);
     return a;
   }
@@ -111,18 +145,24 @@ class JevClient {
         snapshot, relationship, ctx, count, avoid, judgment, intensity,
         aiFlavorLintEnabled: aiFlavorLintEnabled);
     final hit = _cached(key);
-    if (hit != null) return hit;
+    if (hit != null) {
+      _stats?.recordCacheHit(UsageRoute.reply);
+      return hit;
+    }
 
-    final candidates = await _replyClient.draft(
-      snapshot,
-      relationship,
-      ctx: ctx,
-      count: count,
-      avoid: avoid,
-      judgment: judgment,
-      style: _config.style,
-      intensity: intensity,
-      scope: scope,
+    final candidates = await _tracked(
+      UsageRoute.reply,
+      () => _replyClient.draft(
+        snapshot,
+        relationship,
+        ctx: ctx,
+        count: count,
+        avoid: avoid,
+        judgment: judgment,
+        style: _config.style,
+        intensity: intensity,
+        scope: scope,
+      ),
     );
     if (candidates.length <= 1) {
       // 单条候选没有「终榜」，A2 的挂接点（终榜后）在这里不存在：保持原行为，
@@ -135,12 +175,15 @@ class JevClient {
     }
     List<RankedReply> ranked;
     try {
-      final scored = await _judgeClient.rank(
-        snapshot,
-        relationship,
-        [for (final c in candidates) c.text],
-        ctx: ctx,
-        scope: scope,
+      final scored = await _tracked(
+        UsageRoute.judge,
+        () => _judgeClient.rank(
+          snapshot,
+          relationship,
+          [for (final c in candidates) c.text],
+          ctx: ctx,
+          scope: scope,
+        ),
       );
       ranked = [
         for (var i = 0; i < scored.length; i++)
@@ -179,16 +222,19 @@ class JevClient {
     Intensity intensity = Intensity.auto,
     HttpScope? scope,
   }) =>
-      _replyClient.draftOnly(
-        snapshot,
-        relationship,
-        ctx: ctx,
-        count: count,
-        avoid: avoid,
-        judgment: judgment,
-        style: _config.style,
-        intensity: intensity,
-        scope: scope,
+      _tracked(
+        UsageRoute.reply,
+        () => _replyClient.draftOnly(
+          snapshot,
+          relationship,
+          ctx: ctx,
+          count: count,
+          avoid: avoid,
+          judgment: judgment,
+          style: _config.style,
+          intensity: intensity,
+          scope: scope,
+        ),
       );
 
   /// S1 证据复查。默认关（[JevConfig.reviewEnabled]）：开着时让模型逐条核验排序
@@ -211,20 +257,28 @@ class JevClient {
     final texts = [for (final r in ranked) r.text];
     ReviewResult? review;
     try {
-      review = await _replyClient.review(
-        relationship,
-        convoLines(snapshot.messages),
-        ctx,
-        judgment,
-        texts,
-        scope: scope,
+      review = await _tracked(
+        UsageRoute.review,
+        () => _replyClient.review(
+          relationship,
+          convoLines(snapshot.messages),
+          ctx,
+          judgment,
+          texts,
+          scope: scope,
+        ),
       );
     } on RequestCancelledException {
       rethrow;
     } catch (_) {
       return ranked;
     }
-    if (review == null) return ranked;
+    if (review == null) {
+      // 复查的 HTTP 异常已由 _tracked 记过失败；这里补记「响应成功但不可
+      // 解析」（ReplyClient.review 返回 null）这一笔，调用数已由 _tracked 记过。
+      _stats?.recordFailure(UsageRoute.review);
+      return ranked;
+    }
 
     final rejected = review.rejected;
     if (rejected.isEmpty) return ranked;
@@ -233,28 +287,46 @@ class JevClient {
     // 旧契约里「条数对不上 → 放弃替换」的分支在结构上消失——任何一条失败
     // 或为空就整轮放弃替换，「复查只可能改好」的语义原样保留。
     // 「被判定为」的理由进改写指令：重写要修的不只是那条原文，还有它错在哪。
-    final replacements = <RankedReply>[];
-    for (final v in rejected) {
-      RankedReply? rewritten;
-      try {
-        rewritten = await _replyClient.rewriteOnPolishRoute(
-          snapshot,
-          relationship,
-          texts[v.index - 1],
-          '复查判定这条回复站不住：${v.reason}。'
+    //
+    // fix(kimi-review #20)：被拒候选的重写彼此独立、ReplyClient 无状态
+    // （每次请求各自构造），Future.wait 并行发出——原先 3 条全拒 = 3 次串行
+    // 润色往返。Future.wait 按输入顺序回收结果，下面的替换映射不受完成先后
+    // 影响；其余 future 的迟到错误由 wait 吸收，不会变成未处理异常。并行化
+    // 的固有代价：某一条先失败时其余请求已经发出（白跑一趟润色），但落点
+    // 与串行版一致——整轮放弃替换，ranked 原样返回。
+    List<RankedReply?> rewrites;
+    try {
+      rewrites = await Future.wait([
+        for (final v in rejected)
+          _tracked(
+            UsageRoute.polish,
+            () => _replyClient.rewriteOnPolishRoute(
+              snapshot,
+              relationship,
+              texts[v.index - 1],
+              '复查判定这条回复站不住：${v.reason}。'
               '按这个问题把它改写到位，保持原意、称呼与事实，'
               '不要复读最近对话里已经说过的内容。',
-          ctx: ctx,
-          style: _config.style,
-          scope: scope,
-        );
-      } on RequestCancelledException {
-        rethrow;
-      } catch (_) {
+              ctx: ctx,
+              style: _config.style,
+              scope: scope,
+            ),
+          ),
+      ]);
+    } on RequestCancelledException {
+      rethrow;
+    } catch (_) {
+      return ranked;
+    }
+    final replacements = <RankedReply>[];
+    for (final r in rewrites) {
+      if (r == null || r.text.trim().isEmpty) {
+        // 同复查：异常失败已在 _tracked 记过，这里补记「拿到响应却没产出」。
+        // 与串行版一致：记到第一处即整轮放弃，不把同一轮多记几笔。
+        _stats?.recordFailure(UsageRoute.polish);
         return ranked;
       }
-      if (rewritten == null || rewritten.text.trim().isEmpty) return ranked;
-      replacements.add(rewritten);
+      replacements.add(r);
     }
 
     final atIndex = <int, RankedReply>{};
@@ -300,31 +372,62 @@ class JevClient {
   ) async {
     if (ranked.length <= 1) return ranked;
     final hits = AiFlavorLinter.lintGroup([for (final r in ranked) r.text]);
-    final out = <RankedReply>[];
+    // fix(kimi-review #20)：过门槛的候选并行重写（原先逐条 await，3 条全中
+    // = 3 次串行润色往返）。改写彼此独立、ReplyClient 无状态，可直接并行；
+    // Future.wait 按输入顺序回收，下面的组装顺序与串行版一致。
+    final flagged = <int>[];
     for (var i = 0; i < ranked.length; i++) {
-      final hit = hits[i];
-      if (hit.length < AiFlavorLinter.rewriteThreshold) {
-        out.add(ranked[i]);
-        continue;
-      }
-      RankedReply? rewritten;
+      if (hits[i].length >= AiFlavorLinter.rewriteThreshold) flagged.add(i);
+    }
+    if (flagged.isEmpty) return ranked;
+
+    // 逐条隔离非取消异常：某一条的重写失败只影响那一条（保留原文并降权
+    // 0.1），其余候选照常换上重写结果——与串行版逐条 try/catch 的语义一致；
+    // RequestCancelledException 原样上抛，整轮作废。
+    Future<RankedReply?> rewriteOne(int i) async {
       try {
-        rewritten = await _replyClient.rewriteOnPolishRoute(
-          snapshot,
-          relationship,
-          ranked[i].text,
-          AiFlavorLinter.refineInstruction(hit),
-          ctx: ctx,
-          style: _config.style,
-          scope: scope,
+        return await _tracked(
+          UsageRoute.polish,
+          () => _replyClient.rewriteOnPolishRoute(
+            snapshot,
+            relationship,
+            ranked[i].text,
+            AiFlavorLinter.refineInstruction(hits[i]),
+            ctx: ctx,
+            style: _config.style,
+            scope: scope,
+          ),
         );
       } on RequestCancelledException {
         rethrow;
       } catch (_) {
-        rewritten = null;
+        return null;
       }
+    }
+
+    List<RankedReply?> rewrites;
+    try {
+      rewrites = await Future.wait([for (final i in flagged) rewriteOne(i)]);
+    } on RequestCancelledException {
+      rethrow;
+    } catch (_) {
+      // rewriteOne 已隔离非取消异常，此处理论不可达；真发生时按全部失败
+      // 处理，不让异常冒出 draftAndRank——与串行版「lint 失败不外泄」一致。
+      rewrites = List<RankedReply?>.filled(flagged.length, null);
+    }
+
+    final out = <RankedReply>[];
+    for (var i = 0; i < ranked.length; i++) {
+      final k = flagged.indexOf(i);
+      if (k < 0) {
+        out.add(ranked[i]);
+        continue;
+      }
+      final rewritten = rewrites[k];
       if (rewritten == null || rewritten.text.trim().isEmpty) {
         // 失败保留原文并降权 0.1；概率不为负（负数会画出负长度的概率条）。
+        // 这里不补记失败：rewriteOne 的 catch 把结果置 null 后与「成功但空
+        // 解析」已无法区分，异常失败由 _tracked 记过，再记会把同一笔双计。
         final lowered = ranked[i].prob - 0.1;
         out.add(ranked[i].copyWith(prob: lowered < 0.0 ? 0.0 : lowered));
       } else {
@@ -351,14 +454,17 @@ class JevClient {
     String instruction, {
     HttpScope? scope,
   }) =>
-      _replyClient.refine(
-        snapshot,
-        relationship,
-        original,
-        instruction,
-        ctx: ctx,
-        style: _config.style,
-        scope: scope,
+      _tracked(
+        UsageRoute.reply,
+        () => _replyClient.refine(
+          snapshot,
+          relationship,
+          original,
+          instruction,
+          ctx: ctx,
+          style: _config.style,
+          scope: scope,
+        ),
       );
 
   /// The opt-in streaming draft: same candidates as [draftOnly] (unranked), but
@@ -379,17 +485,20 @@ class JevClient {
     required void Function(String) onVisible,
     HttpScope? scope,
   }) async {
-    final out = await _replyClient.draftStream(
-      snapshot,
-      relationship,
-      ctx: ctx,
-      count: count,
-      avoid: avoid,
-      judgment: judgment,
-      style: _config.style,
-      intensity: intensity,
-      onVisible: onVisible,
-      scope: scope,
+    final out = await _tracked(
+      UsageRoute.reply,
+      () => _replyClient.draftStream(
+        snapshot,
+        relationship,
+        ctx: ctx,
+        count: count,
+        avoid: avoid,
+        judgment: judgment,
+        style: _config.style,
+        intensity: intensity,
+        onVisible: onVisible,
+        scope: scope,
+      ),
     );
     return [for (final r in out) r.copyWith(ranked: false, prob: 0.0)];
   }
@@ -404,12 +513,15 @@ class JevClient {
     if (candidates.length != 3) {
       return [for (final c in candidates) c.copyWith(ranked: false, prob: 0.0)];
     }
-    final scored = await _judgeClient.rank(
-      snapshot,
-      relationship,
-      [for (final c in candidates) c.text],
-      ctx: ctx,
-      scope: scope,
+    final scored = await _tracked(
+      UsageRoute.judge,
+      () => _judgeClient.rank(
+        snapshot,
+        relationship,
+        [for (final c in candidates) c.text],
+        ctx: ctx,
+        scope: scope,
+      ),
     );
     return [
       for (var i = 0; i < scored.length; i++)
@@ -512,13 +624,25 @@ class JevClient {
   /// 回复侧的上下文 = 判断侧那三样 + 风格样本笔记（`knowledgeBlock` 逐条引用）
   /// + 技能 L1 目录（`skillNote` 永远骑在 user prompt 最前面）。后两样谁都进
   /// 提示词，谁就得进键。
+  ///
+  /// G7 偏好附言（[noteTypePreferenceAddendum] 笔记）同理由 reply_prompt 渲染
+  /// 进写作提示词，故也进键——用户在偏好面板删除/记录后，下一轮起草立即换键。
+  /// 段位挂在键尾且无附言时整段缺席：没有偏好记录的请求，键与接入前逐字节
+  /// 一致（既有缓存与兼容测试不动）。判断侧不经这里：background() 对该 type
+  /// 刻意跳过，判断键与判断提示词都不含附言。
   String _replyCtxKey(ChatContext? ctx, String relationship) {
     if (ctx == null) return '';
     final styleSamples = [
       for (final n in ctx.notes)
         if (n.type == noteTypeStyleSample) '${n.id}:${n.content}',
     ].join('|');
-    return '${_ctxKeyBase(ctx, relationship)}|$styleSamples|${ctx.catalogue}';
+    final preference = [
+      for (final n in ctx.notes)
+        if (n.type == noteTypePreferenceAddendum) '${n.id}:${n.content}',
+    ].join('|');
+    final preferenceKey = preference.isEmpty ? '' : '|$preference';
+    return '${_ctxKeyBase(ctx, relationship)}'
+        '|$styleSamples|${ctx.catalogue}$preferenceKey';
   }
 
   String _ctxKeyBase(ChatContext ctx, String relationship) =>

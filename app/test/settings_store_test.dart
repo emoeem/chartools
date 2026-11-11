@@ -165,4 +165,45 @@ void main() {
     expect(store.config.value.replyModel, 'm1');
     expect(store.overlayEnabled.value, isFalse);
   });
+
+  test('save 两步隔离：secure 写失败不连坐，普通设置照常落盘且异常仍上抛（kimi-review #8）', () async {
+    // 存档里 key 明文不存在（F2 之后），save 的 secure 一步写的是内存里
+    // 的 key。key 必须非空——空值走 delete 路径，不在失败注入范围内。
+    SharedPreferences.setMockInitialValues({});
+    final store = SettingsStore();
+    store.config.value.replyKey = 'sk-new';
+    store.config.value.judgeKey = 'sk-judge-new';
+    store.config.value.replyModel = 'model-after-fail';
+    store.relationship.value = '战友';
+
+    failWrites = true;
+    // 异常不能被静默吞掉：设置页要靠它显示「写盘失败」（_writeSecure 的
+    // 契约——吞掉会让旧 key 留在安全区、下次启动复活盖掉新 key）。
+    await expectLater(store.save(), throwsA(isA<PlatformException>()));
+
+    // 连坐被切断：secure 失败后 prefs 整包写入照常执行，普通设置已落盘。
+    final archive = await readArchive();
+    expect(archive['relationship'], '战友');
+    final savedConfig = archive['config'] as Map<String, dynamic>;
+    expect(savedConfig['replyModel'], 'model-after-fail');
+    expect(archive['overlayEnabled'], true);
+    // 安全区确实没写成：新 key 不在里面（写失败原样，不做部分提交）。
+    expect(secureStore.containsKey('config.replyKey'), isFalse);
+    expect(secureStore.containsKey('config.judgeKey'), isFalse);
+  });
+
+  test('save 两步都健康时行为不变：key 进安全区、明文不进存档', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = SettingsStore();
+    store.config.value.replyKey = 'sk-ok';
+    store.config.value.replyModel = 'm-ok';
+
+    await store.save();
+
+    expect(secureStore['config.replyKey'], 'sk-ok');
+    final archive = await readArchive();
+    final savedConfig = archive['config'] as Map<String, dynamic>;
+    expect(savedConfig['replyModel'], 'm-ok');
+    expect(archive.toString(), isNot(contains('sk-ok')));
+  });
 }

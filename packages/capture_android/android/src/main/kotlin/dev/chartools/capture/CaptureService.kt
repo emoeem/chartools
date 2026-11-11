@@ -54,8 +54,29 @@ class CaptureService : AccessibilityService() {
         const val SNAPSHOT_CHANNEL = "capture_android/snapshots"
 
         /** MethodChannel：configure / isRunning / openAccessibilitySettings / refill /
-         *  manualOcr / showSuggestions / hideSuggestions / collapse / getCapabilities。 */
+         *  manualOcr / showSuggestions / hideSuggestions / collapse / getCapabilities /
+         *  setSecure，以及服务 → Dart 方向的 [REQUEST_CONFIGURE_METHOD]。 */
         const val CONTROL_CHANNEL = "capture_android/control"
+
+        /**
+         * fix(kimi-review #2)：服务 → Dart 的配置重放请求（无参数，fire-and-forget）。
+         * 用户「先配开关、后启无障碍」是最常见路径：服务连接时 configuredPackages
+         * 还是空的，自动采集静默失效。服务与引擎两侧都就绪的时刻（attachEngineChannels）
+         * 由 [requestConfigureOver] 向 Dart 发起，Dart 侧在 capture_android/control
+         * 上 setMethodCallHandler 接住，用持久化的设置重新下发 configure（幂等）。
+         */
+        internal const val REQUEST_CONFIGURE_METHOD = "requestConfigure"
+
+        /**
+         * fix(kimi-review #11)：Dart → 服务的悬浮窗防截屏开关（control 通道）。
+         * 参数就是 bool 本身（capture_android.dart 的 [setSecure] 契约：Kotlin 侧
+         * `call.arguments as? Boolean`）。独立复核（2026-11-12）发现 handleControl
+         * 漏了这个分支：Dart 恒收 notImplemented，开关在服务已连接时也弹「未连接」
+         * 错误，OverlayController.setSecure 与建窗的 FLAG_SECURE 注入成了够不着的
+         * 死代码——原漏洞（录屏可带走悬浮窗候选明文）原样存在。常量供
+         * SetSecureContractTest 与 Dart 侧测试互钳两侧方法名。
+         */
+        internal const val SET_SECURE_METHOD = "setSecure"
 
         /** 同一包名事件防抖窗口。 */
         private const val DEBOUNCE_MS = 300L
@@ -97,23 +118,32 @@ class CaptureService : AccessibilityService() {
             private set
 
         /**
-         * WeChat. Not adapted: it gives accessibility an empty node tree (1 node /
-         * 407 bytes, verified with every accessibility service on the phone
-         * switched off), so there is nothing to adapt. Its pixel entry path
-         * （maybeCaptureWeChat）未随本插件移植；这里只保留常量供 targetFor /
-         * ocrByRects 的微信分支使用。
+         * WeChat. It gives accessibility an empty node tree (1 node / 407 bytes,
+         * verified with every accessibility service on the phone switched off),
+         * so there are no node rules to adapt. fix(kimi-review #22)：自动采集经
+         * [WeChatOcrAdapter]（OCR 能力面 + 空快照触发既有 OCR 兜底路径）接管；
+         * 旧服务的像素入口 maybeCaptureWeChat 仍未随本插件移植。这里保留常量供
+         * targetFor / ocrByRects 的微信分支使用。
          */
         private const val WECHAT_PKG = "com.tencent.mm"
         private const val WECHAT_VOICE_TRANSCRIPT_NOTE =
             "微信语音尚未转成可识别文字。请长按语音消息，选择“转文字”后再分析；助手不会读取或上传语音音频。"
 
         /**
-         * 银行类 App 的包名前缀：前缀命中即拦（p0-plan ⑦ 隐私底线的另一半）。
-         * 这类应用保护自身内容不被读屏/截屏，任何采集尝试都不被允许。底线清单
-         * 不随 configure 配置、UI 清空黑名单也拦它，与可编辑的 [blockedPackages]
-         * 分开放。
+         * fix(kimi-review #4)：银行/支付类包名的底线清单。旧清单只有一个虚构的
+         * 前缀 "com.android.bank"，匹配不到任何真实 App，隐私底线形同虚设。
+         * 改为关键词**中缀匹配**（包名小写后包含即拦）：真实命中支付宝
+         * （com.eg.android.AlipayGmobile 含 "pay"）、云闪付（com.unionpay）、
+         * 交通银行（com.bankcomm.*）、PayPal（com.paypal.android）、Samsung Pay
+         * （com.samsung.android.spay）、Google Wallet（…apps.walletnfcrel）等。
+         * 已知缺口（关键词不命中，靠可编辑 [blockedPackages] 兜底）：工商银行
+         * com.icbc、招商银行 cmb.pb、中国银行 com.chinamworld.* 等——关键词层
+         * 是底线不是完备清单。微信支付与微信同包（com.tencent.mm），不能按包
+         * 拆分（拆了等于拉黑整个微信采集目标），随微信的采集规则走。这类应用
+         * 保护自身内容不被读屏/截屏，任何采集尝试都不被允许：底线清单不随
+         * configure 配置、UI 清空黑名单也拦它，优先级仍高于可编辑清单。
          */
-        private val BLOCKED_PKG_PREFIXES = listOf("com.android.bank")
+        private val BLOCKED_PKG_KEYWORDS = listOf("bank", "pay", "wallet", "paypal", "unionpay")
 
         /**
          * 黑名单判定的纯函数本体（p0-plan ⑦）：无 Android 依赖，离线单测直接钉它
@@ -125,31 +155,17 @@ class CaptureService : AccessibilityService() {
         internal fun isBlockedPackage(pkg: String?, blocked: Set<String>): Boolean {
             if (pkg == null) return false
             if (pkg in blocked) return true
-            return BLOCKED_PKG_PREFIXES.any { pkg.startsWith(it) }
+            // fix(kimi-review #4)：startsWith 换成小写中缀匹配（见
+            // [BLOCKED_PKG_KEYWORDS]），真实金融 App 的包名才拦得住。
+            val lower = pkg.lowercase()
+            return BLOCKED_PKG_KEYWORDS.any { lower.contains(it) }
         }
 
         /**
-         * 微信的能力表（G2）：微信没有适配器——无障碍树全空（见 [WECHAT_PKG] 上方
-         * 的注释），自动采集进不来；前台在微信时手动「截屏识别一次」仍可用
-         * （manualOcr 只拦 allowScreenshot=false 的适配器，微信没有适配器所以不拦），
-         * 整屏 OCR 的像素气泡分边（WeChatBubbles.find）是它唯一的归属来源。
-         * canIdentifySender=false：像素分边在本插件没有真机回归记录（取样记录在
-         * 旧仓库 8.0.78，且自动入口未随本插件移植），能力展示宁可少许诺——分边
-         * 不可靠的行会被 OcrGrouping 标成 unknown-speaker，由 G3 的置信度扣分。
-         * verifiedAppVersion=null：同上，未在本插件真机复验。
-         */
-        internal val weChatCapabilities = AdapterCapabilities(
-            canReadMessages = false,
-            canIdentifySender = false,
-            canReadHistory = false,
-            allowsOcrFallback = true,
-            verifiedAppVersion = null,
-        )
-
-        /**
          * G2 能力查询（control 方法 `getCapabilities {pkg}`）：
-         * - 已适配包 → 该适配器 [ChatAppAdapter.capabilities] 的 Map 投影；
-         * - 微信（无适配器）→ [weChatCapabilities]；
+         * - 已适配包（含微信——fix(kimi-review #22) 起由 [WeChatOcrAdapter] 提供
+         *   同形的 OCR 能力面，原先单列的 weChatCapabilities 已并入）→ 该适配器
+         *   [ChatAppAdapter.capabilities] 的 Map 投影；
          * - 其余包名（含 null）→ null：「未适配/不支持」。
          *
          * 返回 Map 而非 JSON 串：StandardMethodCodec 原生编解码 Map 与 null，
@@ -159,9 +175,7 @@ class CaptureService : AccessibilityService() {
          */
         internal fun capabilitiesFor(pkg: String?): Map<String, Any?>? {
             if (pkg == null) return null
-            val caps = ChatApps.forPackage(pkg)?.capabilities
-                ?: weChatCapabilities.takeIf { pkg == WECHAT_PKG }
-                ?: return null
+            val caps = ChatApps.forPackage(pkg)?.capabilities ?: return null
             return mapOf(
                 "canReadMessages" to caps.canReadMessages,
                 "canIdentifySender" to caps.canIdentifySender,
@@ -169,6 +183,18 @@ class CaptureService : AccessibilityService() {
                 "allowsOcrFallback" to caps.allowsOcrFallback,
                 "verifiedAppVersion" to caps.verifiedAppVersion,
             )
+        }
+
+        /**
+         * fix(kimi-review #2)：把重放请求发到 Dart（fire-and-forget，无回调）。
+         * Dart 未注册 handler / 引擎正在销毁时消息会被丢弃——重放请求只能尽力
+         * 而为，不得把服务炸掉，所以整体 runCatching。放在 companion 与
+         * [capabilitiesFor] 同一取舍：CaptureService 在测试环境实例化不了，
+         * 单测直接钳这个函数（ConfigureReplayTest）。
+         */
+        internal fun requestConfigureOver(channel: MethodChannel) {
+            runCatching { channel.invokeMethod(REQUEST_CONFIGURE_METHOD, null) }
+                .onFailure { Log.w(TAG, "requestConfigure send failed: $it") }
         }
 
         /** On an app whose adapter has been reading bubbles, an empty read must
@@ -239,7 +265,15 @@ class CaptureService : AccessibilityService() {
         snapshotChannel = EventChannel(messenger, SNAPSHOT_CHANNEL)
             .also { it.setStreamHandler(streamHandler) }
         controlChannel = MethodChannel(messenger, CONTROL_CHANNEL)
-            .also { it.setMethodCallHandler(controlHandler) }
+            .also {
+                it.setMethodCallHandler(controlHandler)
+                // fix(kimi-review #2)：这里是「服务已连接 + 引擎已挂接」两态同时
+                // 就绪的唯一汇聚点（onServiceConnected 里 messenger 已就绪时走到
+                // 这里；服务先连、引擎后到时由 CaptureAndroidPlugin 走到这里），
+                // 向 Dart 请求重放 configure。热重启换 messenger 后再请求一次，
+                // Dart 重放幂等。
+                requestConfigureOver(it)
+            }
     }
 
     // ---- 会话与去重状态（旧服务 CaptureConversationState 的采集子集） --------
@@ -274,10 +308,20 @@ class CaptureService : AccessibilityService() {
         if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         ) return
-        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            foregroundPkg = rootInActiveWindow?.packageName?.toString()
-        }
+        // fix(kimi-review #13)：任何窗口/内容事件都可能意味着树变了——清掉
+        // 回填路径的 targetOf 提取 memo（TargetMemo 的正确性依据是「两次提取
+        // 之间无事件 ⇒ 树未变」；有事件就重算，绝不跨内容变化复用，否则
+        // 窗口内切聊天会漏检、回填写进切换后的输入框）。宁可多提取一次，
+        // 也不背陈旧标题。
+        targetMemo.invalidate()
         val eventPkg = event.packageName?.toString() ?: return
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // fix(kimi-review #14)：foregroundPkg 直接取 event.packageName——
+            // WINDOW_STATE_CHANGED 的来源就是新窗口。原来为此读
+            // rootInActiveWindow（跨 binder 调用 + 全树构建），每次换窗白付一遍；
+            // 消费方 manualOcr 只拿它当包名回退用。
+            foregroundPkg = eventPkg
+        }
         // 黑名单优先于白名单（p0-plan ⑦）：先拦用户明确拉黑的包（即使它也被
         // 加进了采集范围），再做采集范围白名单判断。
         if (isBlocked(eventPkg)) return
@@ -298,8 +342,9 @@ class CaptureService : AccessibilityService() {
     private fun maybeCapture() {
         val root = rootInActiveWindow ?: return
         val pkg = root.packageName?.toString() ?: return
-        // 微信等无适配器的包：旧服务另有像素路径（maybeCaptureWeChat），本插件
-        // 只保留适配器驱动的采集，未适配包静默跳过。
+        // 无适配器的包（抖音等）：旧服务另有像素路径（maybeCaptureWeChat），本插件
+        // 只保留适配器驱动的采集，未适配包静默跳过。fix(kimi-review #22)：微信
+        // 由 WeChatOcrAdapter 提供「OCR 能力面」，空快照走下面的 OCR 兜底分支。
         val adapter = ChatApps.forPackage(pkg) ?: return
         val rawSnapshot = adapter.extract(root, resources)
         Trace.log(
@@ -314,7 +359,10 @@ class CaptureService : AccessibilityService() {
             // 本插件无编排可拆，直接返回（会话状态保留，见 targetFor/observeTarget）。
             return
         }
-        val target = targetFor(root) ?: return
+        // fix(kimi-review #12)：把已提取的快照传给 targetFor，主链路每次事件只
+        // 做一次全树遍历（原来 targetFor 内部再 extract 一次，两次结果还可能在
+        // 边界下不一致——lastSignature 用第一次、messagesSignature 用第二次）。
+        val target = targetFor(root, rawSnapshot) ?: return
         observeTarget(target)
         val snapshot = rawSnapshot
         // In a chat window but the tree holds no text (Feishu draws its bodies)
@@ -335,7 +383,14 @@ class CaptureService : AccessibilityService() {
                 emptySinceTarget = target
                 emptySinceAt = now
             }
-            if (lastNonEmptyTarget == target && now - emptySinceAt < EMPTY_READ_GRACE_MS) {
+            // fix(kimi-review #1)：判等用 sameConversation 的身份语义
+            // （pkg/windowId/title）。原写法 lastNonEmptyTarget == target 是 data
+            // class 全等，含 messagesSignature——非空读存的 Target 带真实指纹、
+            // 空读构造的 Target 签名恒为 null → 永不相等，4 秒宽限是死代码，
+            // TIM 类「msgs=8 → 0 → null」瞬时空帧立刻触发截屏 OCR。
+            if (lastNonEmptyTarget?.sameConversation(target) == true &&
+                now - emptySinceAt < EMPTY_READ_GRACE_MS
+            ) {
                 Trace.log("cap empty read held ${now - emptySinceAt}ms on $pkg")
                 return
             }
@@ -375,23 +430,43 @@ class CaptureService : AccessibilityService() {
         emitSnapshot(snapshot)
     }
 
-    /** 会话身份解析，照抄 ChatCaptureService.targetFor（221-254 行）。 */
-    private fun targetFor(root: AccessibilityNodeInfo): ConversationSession.Target? {
+    /**
+     * 会话身份解析，照抄 ChatCaptureService.targetFor（221-254 行）。
+     * fix(kimi-review #12)：[snapshot] 接收调用方已提取的快照（maybeCapture 主
+     * 链路传入，避免每次事件双重全树遍历）；null 时（手动 OCR、回填的 targetOf）
+     * 才在内部提取，行为与旧实现一致。
+     */
+    private fun targetFor(
+        root: AccessibilityNodeInfo,
+        snapshot: ChatSnapshot? = null,
+    ): ConversationSession.Target? {
         val pkg = root.packageName?.toString() ?: return null
         if (isBlocked(pkg) || pkg == packageName || pkg == "com.android.systemui" ||
             pkg.contains("launcher", true) || pkg == "com.miui.home"
         ) return null
         val adapter = ChatApps.byPackage[pkg]
         var messagesSignature: String? = null
-        val title = if (adapter != null) {
-            val snapshot = adapter.extract(root, resources) ?: return null
-            messagesSignature = snapshot.takeIf { it.messages.isNotEmpty() }?.signature()
+        val title = if (pkg == WECHAT_PKG) {
+            // fix(kimi-review #22)：微信有 WeChatOcrAdapter 后适配器分支也会命中，
+            // 但它的 extract 永远给不出标题（树是空的，见 WeChatOcrAdapter）——
+            // 标题只能来自 OCR 读到的顶栏（sticky WeChatTitleState）。这个分支
+            // 必须先于适配器分支判定，且允许 title=null 返回 Target：否则首次
+            // 进窗会走适配器分支的「无标题 → null」，OCR 永远没机会跑（死锁）。
+            // WeChat gives no node tree at all (1 empty node), so there is no
+            // title to find: the OCR pass reads it off the top band and stores it
+            // here. It has to be STICKY — the session identity is app + window +
+            // title, so answering null between two reads would make every single
+            // capture invalidate itself the moment it finished.
+            weChatTitle.titleForWindow(root.windowId)
+        } else if (adapter != null) {
+            val extracted = snapshot ?: adapter.extract(root, resources) ?: return null
+            messagesSignature = extracted.takeIf { it.messages.isNotEmpty() }?.signature()
             // A loading/unknown title cannot prove which conversation is open —
             // unless the SAME app+window already has a known one: animated
             // headers swap in skeleton/transient titles for a beat (#68), and
             // unbinding the session there killed in-flight analyses. Keep the
             // previously verified title instead.
-            val fresh = snapshot.title?.takeUnless { isTransientTitle(it) }
+            val fresh = extracted.title?.takeUnless { isTransientTitle(it) }
             if (fresh != null) fresh
             else {
                 val known = session.target
@@ -399,13 +474,6 @@ class CaptureService : AccessibilityService() {
                     !known.title.isNullOrBlank()
                 ) known.title else return null
             }
-        } else if (pkg == WECHAT_PKG) {
-            // WeChat gives no node tree at all (1 empty node), so there is no
-            // title to find: the OCR pass reads it off the top band and stores it
-            // here. It has to be STICKY — the session identity is app + window +
-            // title, so answering null between two reads would make every single
-            // capture invalidate itself the moment it finished.
-            weChatTitle.titleForWindow(root.windowId)
         } else {
             findTitleInActionBar(
                 root, Int.MAX_VALUE, resources.displayMetrics.widthPixels,
@@ -836,6 +904,19 @@ class CaptureService : AccessibilityService() {
     /** 手动 OCR（manualOcr）的挂起结果；finishOcr/失败路径里恰好回一次。 */
     private var manualOcrResult: MethodChannel.Result? = null
 
+    /**
+     * fix(kimi-review #3)：refill 的挂起结果（集合登记，可并发）。GuardedInputWriter
+     * 的重试链由 main.postDelayed 驱动、对每个 result 恰好一次 complete；onDestroy
+     * 的 removeCallbacksAndMessages(null) 会把 pending 重试一并杀掉，没人再回话，
+     * Dart 侧 await refill 永久悬挂（剪贴板兜底、收卡都不执行）。这里登记每个
+     * in-flight 的 result，onDestroy 清回调前先逐个替它回 false。
+     * 恰好一次的保证全在主线程上：完成回调先从集合移除（remove 返回 false =
+     * onDestroy 已代为回过）再回话；挂起期间只有主线程读写本集合，无并发。
+     * fill 的 isCurrent 静默返回路径（不回话）从 refill 不可达——accepts 检查
+     * 与它同主线程紧邻；即便如此 onDestroy 的兜底也只会回一次 false，不悬挂。
+     */
+    private val pendingRefillResults = mutableSetOf<MethodChannel.Result>()
+
     private fun replyManualOcr(json: String?) {
         val r = manualOcrResult ?: return
         manualOcrResult = null
@@ -903,6 +984,14 @@ class CaptureService : AccessibilityService() {
             // 由服务注册——服务未连接时整条通道不存在，Dart 连上后取一次缓存即可
             // （能力表是静态数据）。
             "getCapabilities" -> result.success(capabilitiesFor(call.argument<String>("pkg")))
+            // fix(kimi-review #11)：悬浮窗防截屏开关。窗口未建（悬浮窗还没弹出）
+            // 时 OverlayController.setSecure 先记状态，ensureWindow 建窗时按它补
+            // FLAG_SECURE；窗口在屏上则即时 updateViewLayout（其内部 runCatching，
+            // 加 flag 失败只记日志）。参数是 bool 本身（见 [SET_SECURE_METHOD]）。
+            SET_SECURE_METHOD -> {
+                overlay.setSecure(call.arguments as? Boolean ?: false)
+                result.success(true)
+            }
             else -> result.notImplemented()
         }
     }
@@ -917,7 +1006,12 @@ class CaptureService : AccessibilityService() {
         // 填入是唯一要写别的 App 输入框的动作：InputFiller 内部每一步重解析来源
         // 会话（fill(token, text) 的第一条就是 isCurrent 检查，与本处同一谓词、
         // 同一主线程，不会在检查通过后又被拒）。
+        // fix(kimi-review #3)：登记挂起结果；完成时先解除登记再回话（解除失败 =
+        // onDestroy 已代回 false），onDestroy 就不会把已回复的 result 再回一遍
+        // （恰好一次）。
+        pendingRefillResults.add(result)
         filler.fill(token, text) { ok ->
+            if (!pendingRefillResults.remove(result)) return@fill
             runCatching { result.success(ok) }
         }
     }
@@ -951,10 +1045,22 @@ class CaptureService : AccessibilityService() {
 
     // ---- 回填 --------------------------------------------------------------
 
+    /**
+     * fix(kimi-review #13)：回填路径 targetOf 的提取 memo（[TargetMemo]）。
+     * 提取本体仍是 [targetFor]；失效钩子在 [onAccessibilityEvent]——每条
+     * WINDOW_STATE_CHANGED / WINDOW_CONTENT_CHANGED 事件都清，树静默期内
+     * 同窗（pkg+windowId）的重复提取直接复用。
+     */
+    private val targetMemo = TargetMemo { root -> targetFor(root) }
+
     private val filler: InputFiller by lazy {
         InputFiller(object : InputFiller.Host {
             override fun activeRoot(): AccessibilityNodeInfo? = rootInActiveWindow
-            override fun targetOf(root: AccessibilityNodeInfo): ConversationSession.Target? = targetFor(root)
+            // fix(kimi-review #13)：Host 层 memo——原 InputFiller 内按 root 实例
+            // 引用的缓存永不命中（框架每次 getRootInActiveWindow 都给新实例）。
+            override fun targetOf(root: AccessibilityNodeInfo): ConversationSession.Target? =
+                targetMemo.targetOf(root)
+
             override fun isCurrent(token: ConversationSession.Token): Boolean = session.accepts(token)
             override fun post(delayMs: Long, action: () -> Unit) { main.postDelayed({ action() }, delayMs) }
             override fun copyToClipboard(text: String) = this@CaptureService.copyToClipboard(text)
@@ -1007,6 +1113,13 @@ class CaptureService : AccessibilityService() {
         eventSink = null
         // 服务可以单独被解绑停掉而进程不死：悬浮窗必须跟着服务一起下线。
         runCatching { overlay.hide() }
+        // fix(kimi-review #3)：下一行的 removeCallbacksAndMessages(null) 会杀掉
+        // GuardedInputWriter 的 pending 重试和未返回的截屏回调——必须先把所有
+        // in-flight 的通道 result 收尾（refill 逐个→false、manualOcr→null）再清
+        // 回调，否则 Dart 侧 await 永久悬挂。
+        for (pending in pendingRefillResults) runCatching { pending.success(false) }
+        pendingRefillResults.clear()
+        replyManualOcr(null)
         main.removeCallbacksAndMessages(null)
         pixelWorker.shutdownNow()
         super.onDestroy()

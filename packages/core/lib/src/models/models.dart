@@ -143,6 +143,13 @@ class ChatSnapshot {
   ///
   /// 对齐 Kotlin 的 `takeLast(6)`（不足六条全取）：该方法在 package:collection
   /// 里，core 零依赖，用 skip 等价实现。
+  ///
+  /// 口径与 capture_android `Model.kt` 的 `ChatSnapshot.signature()` 逐字段
+  /// 一致：末 6 条、每条 `side:text`、以 `|` 连接 —— 两端口径一致，允许跨端
+  /// 对拍；金样契约测试在两侧钉死同一期望串（core/test/contract_golden_test.dart
+  /// ↔ capture_android …/SignatureContractTest.kt）。
+  // fix(kimi-review #21)：两端口径注释。实测 Kotlin 侧同为 `|`（Model.kt
+  // signature()，git 全历史无 `join('/')`），格式无需改动，互指注释即为修复。
   String signature() {
     final from = messages.length > 6 ? messages.length - 6 : 0;
     return messages.skip(from).map((m) => '${m.side}:${m.text}').join('|');

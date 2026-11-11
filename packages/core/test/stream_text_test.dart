@@ -83,5 +83,17 @@ void main() {
       // 再剥脚手架字符——这是参考实现的既定行为，钉住防走样。
       expect(StreamText.visible('你看 [1] 好'), '1] 好');
     });
+
+    test('正文以引号开头时首字符不被兜底剥掉（kimi-review #19）', () {
+      // 旧实现的剥离集带 '"'：正文恰好以引号开头时首字符被当脚手架吃掉。
+      expect(StreamText.visible('"你好呀，今天先到这吧"'), '"你好呀，今天先到这吧"');
+    });
+
+    test('兜底剥离集最小化为空白：脚手架不再剥，空白照剥（kimi-review #19）', () {
+      // text 键未到的窗口里多显示几个 {" 字符是瞬态的；吃掉正文首字符是
+      // 永久的——所以脚手架字符从剥离集里移除，空白保留。
+      expect(StreamText.visible('[{"strategy":"safe'), '{"strategy":"safe');
+      expect(StreamText.visible(' 你好'), '你好');
+    });
   });
 }

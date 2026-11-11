@@ -135,6 +135,43 @@ void main() {
     );
   });
 
+  test('判断键六个分量逐个变异，键都要变', () {
+    // 与 reply 侧那条互为镜像：judge 的 6 个分量里 judgeModel / judgeProtocol /
+    // title 在上一条有对照，但 signature / relationship / ctxKey 此前没有
+    // 单独变异——键里少一个分量的表现是不报错、只串味（本文件头注释），所以
+    // 六个都钉。分量数写死：judge() 往签名里加参数却漏进 join 时，这条先红。
+    String judgeOf({
+      String title = 'T',
+      String signature = 'S',
+      String relationship = 'R',
+      String judgeModel = 'judge-1',
+      String judgeProtocol = 'openai',
+      String ctxKey = 'C',
+    }) =>
+        ReplyCacheKey.judge(
+          title: title,
+          signature: signature,
+          relationship: relationship,
+          judgeModel: judgeModel,
+          judgeProtocol: judgeProtocol,
+          ctxKey: ctxKey,
+        );
+
+    final base = judgeOf();
+    final mutated = <String, String>{
+      'title': judgeOf(title: 'T2'),
+      'signature': judgeOf(signature: 'S2'),
+      'relationship': judgeOf(relationship: 'R2'),
+      'judgeModel': judgeOf(judgeModel: 'judge-2'),
+      'judgeProtocol': judgeOf(judgeProtocol: 'anthropic'),
+      'ctxKey': judgeOf(ctxKey: 'C2'),
+    };
+    expect(mutated.length, 6);
+    mutated.forEach((name, key) {
+      expect(base, isNot(key), reason: '判断键分量 [$name] 没进键');
+    });
+  });
+
   test('回复键与判断键不会互相命中', () {
     // 两个 LRU 分开存，但键本身也不该长得一样：串了就是把判断当候选回复用。
     final replySide = const _In(

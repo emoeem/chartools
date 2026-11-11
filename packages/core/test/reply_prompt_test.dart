@@ -795,4 +795,62 @@ void main() {
       expect(addendumAt, lessThan(withScenario.lastIndexOf(ask)));
     });
   });
+
+  group('G7 偏好附言（preference_addendum 笔记，写手专用通道）', () {
+    const addendum = '用户对历史候选的反馈统计：回复偏正式（3 次）——应更口语';
+
+    Note preferenceNote() => const Note(
+          id: 'preference_addendum',
+          title: '用户的风格偏好反馈',
+          content: addendum,
+          type: noteTypePreferenceAddendum,
+        );
+
+    test('knowledgeBlock 渲染偏好附言（只带附言的 ctx 不再整段丢弃）', () {
+      final out = ReplyPrompt.knowledgeBlock(
+          '朋友', context(notes: [preferenceNote()]), 30);
+
+      expect(out, contains(addendum));
+      expect(out, contains('结构化反馈'));
+    });
+
+    test('background() 跳过偏好附言笔记：判断路的 state 看不到它', () {
+      final background =
+          context(notes: [preferenceNote()]).background('朋友');
+
+      expect(background, isEmpty);
+      // 对照：普通知识笔记照常进 background（判断路看得到），附言不混进去。
+      final normal = context(notes: [
+        const Note(id: 'n1', title: '备忘', content: '普通知识笔记'),
+        preferenceNote(),
+      ]).background('朋友');
+      expect(normal, contains('普通知识笔记'));
+      expect(normal, isNot(contains('回复偏正式')));
+    });
+
+    test('无偏好附言时 knowledgeBlock 不出现偏好段（与接入前同形）', () {
+      final out = ReplyPrompt.knowledgeBlock(
+          '朋友',
+          context(
+            history: const [LogEntry(side: 'other', text: '在吗')],
+          ),
+          30);
+      expect(out, isNot(contains('结构化反馈')));
+      // 只有风格样本也不触发偏好段——两种写手专用通道互不串味。
+      final withStyle = ReplyPrompt.knowledgeBlock(
+          '朋友',
+          context(
+            history: const [LogEntry(side: 'other', text: '在吗')],
+            notes: const [
+              Note(
+                  id: 's1',
+                  title: '样本',
+                  content: '我今天顺路把票取了。',
+                  type: noteTypeStyleSample),
+            ],
+          ),
+          30);
+      expect(withStyle, isNot(contains('结构化反馈')));
+    });
+  });
 }

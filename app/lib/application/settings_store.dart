@@ -29,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// - [displayMode]：候选展示模式（p0-plan B8，主推一张大卡或全部展开）。
 /// - [onboarded]：首次运行引导完成标记（p0-plan ②，引导页写、主入口读）。
 /// - [scenarioId]：引导第一步记住的场景（p0-plan ②「单选并记住」）。
+/// - [usage]：四条模型路由的调用统计（C9），累计口径随设置存档持久化。
 class SettingsStore {
   SettingsStore();
 
@@ -127,6 +128,40 @@ class SettingsStore {
   /// 起草流水线消费场景附加段的接线在后续工作流。
   final ValueNotifier<String> scenarioId = ValueNotifier('');
 
+  /// 四条模型路由的调用统计（C9，见 core 的 usage_stats.dart）：累计口径随
+  /// 设置存档持久化（[toJson] 的 'usage' 键），本次会话口径纯运行态。
+  /// 同一份实例要交给 JevClient —— `JevClient(config, stats: usage)`（C9
+  /// 接线契约）—— 采集 / 桌面助手链路打点、设置页统计卡读数、重置按钮
+  /// 清零，读写的是同一个对象；load 经 [UsageStats.restore] 就地恢复，
+  /// 引用从构造起始终有效。
+  final UsageStats usage = UsageStats();
+
+  /// C10 会话检查点的存档位（p0-plan C10）：CaptureSession 最近一次快照进门
+  /// /切换联系人时记下的会话状态（最近快照签名 / 关系描述 / 激活联系人 id）。
+  /// 形状归 capture_session.dart 的 SessionCheckpoint 管——本类把它当作不透明
+  /// Map 存取，读写始终对称，内容解析与恢复回填都在采集侧。
+  ///
+  /// **恢复必须过用户确认（「待确认恢复上次会话」提示），不静默恢复**：
+  /// UI 启动（或进采集页）时读 [sessionCheckpoint] 决定要不要弹提示；确认后
+  /// 由 CaptureSession.restoreCheckpoint 回填，再经 [saveSessionCheckpoint]
+  /// 传 null 清档。任何「启动即拿它重放会话」的用法都违反 C10。
+  Map<String, dynamic>? _sessionCheckpoint;
+
+  /// 上一次会话的检查点；null = 没有可恢复的会话（首次启动 / 已确认恢复 /
+  /// 已清档）。只读；写入走 [saveSessionCheckpoint]。
+  Map<String, dynamic>? get sessionCheckpoint => _sessionCheckpoint;
+
+  /// 覆盖写检查点（传 null = 清除）并整包落盘。独立于 [save]：检查点由
+  /// CaptureSession 随每次快照进门/切换联系人写入，不该等设置页的保存按钮；
+  /// 但 [save] 同样会带上当前检查点（[toJson] 单一形状），设置页保存不会把
+  /// 它冲掉。写失败原样抛出——采集侧捕获后静默（检查点是尽力而为的存档），
+  /// UI 的清档调用可自行提示。
+  Future<void> saveSessionCheckpoint(Map<String, dynamic>? checkpoint) async {
+    _sessionCheckpoint = checkpoint;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_storageKey, jsonEncode(toJson()));
+  }
+
   // ------------------------------------------------------------------ 存取
 
   /// 应用启动时调用：读存档，逐项灌入上面的 ValueNotifier。
@@ -183,6 +218,16 @@ class SettingsStore {
         if (savedOnboarded is bool) onboarded.value = savedOnboarded;
         final savedScenarioId = decoded['scenarioId'];
         if (savedScenarioId is String) scenarioId.value = savedScenarioId;
+        // 调用统计（C9）就地恢复：缺键 / 坏形状按 0 处理（UsageStats.restore
+        // 的容错规则），不挡其余字段。
+        final savedUsage = decoded['usage'];
+        if (savedUsage is Map<String, dynamic>) usage.restore(savedUsage);
+        // C10 会话检查点：只读回来等 UI 弹「待确认恢复上次会话」提示——
+        // 这里绝不拿它重放会话（C10 的「不静默恢复」）。
+        final savedCheckpoint = decoded['sessionCheckpoint'];
+        if (savedCheckpoint is Map<String, dynamic>) {
+          _sessionCheckpoint = savedCheckpoint;
+        }
       }
     } catch (_) {
       // shared_preferences / 安全区不可用（平台通道缺失等）：保持内存默认值。
@@ -234,12 +279,33 @@ class SettingsStore {
   /// 设置页保存时调用：key 先写安全区，其余字段整包写盘。顺序有讲究——先
   /// 安全区后 prefs：若第二步失败，安全区已持有新 key，下次启动读到的是新值；
   /// 反过来则可能把旧 key 留在安全区，静默复活盖掉用户刚改的 key。
+  ///
+  /// fix(kimi-review #8)：两步各自 try/catch 隔离，不再连坐。原先安全区写
+  /// 失败直接抛出，后面的 prefs 整包写入根本不执行——key 存不进安全区，
+  /// 普通设置（路由、文风、台账……）跟着一起丢。现在 secure 失败只记下
+  /// 错误状态、照常写 prefs，最后把第一个失败原样抛出：设置页仍会显示
+  /// 「写盘失败」（[_writeSecure] 的契约不变——静默吞掉会让旧 key 留在
+  /// 安全区、下次启动复活盖掉新 key），但普通设置已经落盘保住了。
   Future<void> save() async {
     final c = config.value;
-    await _writeSecure(_secureReplyKey, c.replyKey);
-    await _writeSecure(_secureJudgeKey, c.judgeKey);
+    Object? secureError;
+    try {
+      await _writeSecure(_secureReplyKey, c.replyKey);
+      await _writeSecure(_secureJudgeKey, c.judgeKey);
+    } catch (e) {
+      secureError = e;
+    }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_storageKey, jsonEncode(toJson()));
+    Object? prefsError;
+    try {
+      await prefs.setString(_storageKey, jsonEncode(toJson()));
+    } catch (e) {
+      prefsError = e;
+    }
+    // 两步都完成后按先后顺序上抛：secure 失败优先——它是「写盘失败」提示
+    // 的直接原因，且不抛出去旧 key 就会静默复活（见 [_writeSecure] 的注释）。
+    if (secureError != null) throw secureError;
+    if (prefsError != null) throw prefsError;
   }
 
   /// 存档形状：config（不含 replyKey/judgeKey 明文——它们只存安全区，见
@@ -257,6 +323,8 @@ class SettingsStore {
       'displayMode': displayMode.value,
       'onboarded': onboarded.value,
       'scenarioId': scenarioId.value,
+      'usage': usage.toJson(),
+      'sessionCheckpoint': _sessionCheckpoint,
     };
   }
 

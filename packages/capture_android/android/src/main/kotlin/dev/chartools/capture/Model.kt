@@ -77,7 +77,15 @@ data class ChatSnapshot(
 ) {
     val latestFrom: String? get() = messages.lastOrNull()?.side
 
-    /** A stable signature of the last few messages, to detect real changes. */
+    /** A stable signature of the last few messages, to detect real changes.
+     *
+     * 口径与 Dart 侧 models.dart 的 `ChatSnapshot.signature()` 逐字段一致：
+     * 末 6 条、每条 `side:text`、以 `|` 连接 —— 两端口径一致，允许跨端对拍；
+     * 金样契约测试在两侧钉死同一期望串（capture_android …/SignatureContractTest.kt
+     * ↔ packages/core/test/contract_golden_test.dart）。
+     */
+    // fix(kimi-review #21)：两端口径注释。实测 Dart 侧同为 `|`（models.dart
+    // signature()，git 全历史无 `join('/')`），格式无需改动，互指注释即为修复。
     fun signature(): String =
         messages.takeLast(6).joinToString("|") { "${it.side}:${it.text}" }
 }
