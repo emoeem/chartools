@@ -100,10 +100,13 @@ class _CapturePageState extends State<CapturePage> {
   bool _ocrFallback = true;
 
   /// #11 悬浮窗防截屏（FLAG_SECURE）开关，默认关。页面本地状态（不落盘），
-  /// 与 Kotlin 侧 OverlayController 的缺省一致——原生状态存服务进程内存，
-  /// 服务重启也回默认关。两侧都不持久化是刻意的最小实现：开关只在用户显式
-  /// 点按时下发（重进页面开关显示为关，原生窗口若仍开着 FLAG_SECURE 则继续
-  /// 受保护，不会因进页面被静默撤销），持久化 + 原生状态回读是后续项。
+  /// 是服务连接期间原生开关的「期望值」单一事实来源：原生状态存服务进程内存，
+  /// 服务重启回默认关——fix(#9 K-2) 起把它随 [_pushConfigure] 的 configure
+  /// 载荷（`secure` 键）一起下发，服务重连重放（[CaptureAndroid.onConfigureReplay]
+  /// 触发的幂等重发）会把原生 FLAG_SECURE 恢复成本字段的当前值，开关显示不再
+  /// 与实际相反；拨动开关时以 [CaptureAndroid.isSecure] 的服务回读值做早退
+  /// 判定（见 [_toggleOverlaySecure]），本地字段陈旧也不会阻断重新下发。仍不
+  /// 落盘：应用进程重启回默认关（与原生缺省一致），持久化仍是后续项。
   bool _overlaySecure = false;
 
   /// A3「学习我的说话方式」开关：写入 [CaptureSession.styleLearning]，下一轮
@@ -384,6 +387,10 @@ class _CapturePageState extends State<CapturePage> {
         packages: _packages,
         ocrFallback: _ocrFallback,
         blocked: _effectiveBlocked,
+        // fix(#9 K-2)：防截屏期望值随 configure 载荷走——本方法同时是服务重连
+        // 重放（onConfigureReplay）的落点，服务重启后原生 FLAG_SECURE 由这次
+        // 幂等重发自动恢复，不再依赖用户重进页面/重拨开关。
+        secure: _overlaySecure,
       );
     } catch (_) {
       // 同上：无引擎通道时静默，状态行会显示「未连接」。
@@ -455,9 +462,34 @@ class _CapturePageState extends State<CapturePage> {
   /// 'setSecure'，参数 bool，Kotlin 侧落在悬浮窗窗口的 WindowManager flag）。
   /// 控制通道由采集服务注册——服务未连接（或无引擎通道）时这里抛异常：
   /// 开关保持原位并提示，不静默，也不写本地状态。
+  ///
+  /// fix(#9 K-2) 早退判定：原来 `if (v == _overlaySecure) return` 拿陈旧的
+  /// 本地字段当事实——服务重启后原生已回默认关而页面保活（tab 不重建）时，
+  /// 本地仍显示「开」，与实际相反且无法经本方法重新下发。改为比较「期望值
+  /// [v] vs 服务回读值（[CaptureAndroid.isSecure]）」：不一致才下发 setSecure；
+  /// 一致但本地字段陈旧时只就地同步回读值（服务已是期望状态，无需下发）。
+  /// 回读本身失败（服务未连接）与下发失败同一条提示路径。
   Future<void> _toggleOverlaySecure(bool v) async {
-    if (v == _overlaySecure) return;
     final messenger = ScaffoldMessenger.of(context);
+    final bool serviceValue;
+    try {
+      serviceValue = await CaptureAndroid().isSecure();
+    } catch (_) {
+      // 读不回也就改不了（同一条 control 通道）：与下发失败同一提示。
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+          content: Text('采集服务未连接，暂时改不了悬浮窗防截屏；启用采集服务后再试。'),
+        ));
+      return;
+    }
+    if (v == serviceValue) {
+      // 服务已是期望值：不下发；本地字段若是陈旧的（服务重启后的漂移）就地
+      // 同步为回读值，开关显示从此与实际一致。
+      if (mounted && v != _overlaySecure) setState(() => _overlaySecure = v);
+      return;
+    }
     try {
       await CaptureAndroid().setSecure(v);
     } catch (_) {

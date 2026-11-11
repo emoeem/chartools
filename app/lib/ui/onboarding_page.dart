@@ -215,7 +215,12 @@ class _OnboardingPageState extends State<OnboardingPage>
     try {
       await widget.store.save();
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('已生效但写盘失败：$e')));
+      // fix(#9 K-6) 写盘失败时内存态已生效、本轮照常进首页，但 onboarded 标记
+      // 没落盘——下次启动仍会进引导页。明说一句，避免用户以为「完成」丢了或
+      // 配置没保存（三步的选择在本轮内存里都是生效的）。
+      messenger.showSnackBar(SnackBar(
+        content: Text('已生效但写盘失败：$e；下次启动会再看到本页。'),
+      ));
     }
     if (!mounted) return;
     Navigator.of(context).pushReplacement(

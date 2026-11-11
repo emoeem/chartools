@@ -45,6 +45,14 @@ class CaptureAndroid {
   /// 必须两侧同步（Kotlin SetSecureContractTest 与本包测试互钳）。
   static const String setSecureMethod = 'setSecure';
 
+  /// Dart → 服务的悬浮窗防截屏状态回读方法名（fix(#9 K-2)）。与 Kotlin 侧
+  /// CaptureService.IS_SECURE_METHOD（handleControl 的分支键）同名同值：无参数、
+  /// 返回 bool（OverlayController 当前内存态，窗口未建也返回已记录的开关值）。
+  /// 采集页开关用它做「期望值 vs 服务回读值」比较——服务重启后原生状态回默认，
+  /// 本地状态可能与之相反，早退必须以回读为准而不是本地字段。改任何一侧必须
+  /// 两侧同步（Kotlin SetSecureContractTest 的回放场景与本包测试互钳）。
+  static const String isSecureMethod = 'isSecure';
+
   static const MethodChannel _control = MethodChannel(controlChannelName);
 
   /// 插件自身通道：悬浮窗权限的查/跳（canDrawOverlays / openOverlaySettings）。
@@ -62,7 +70,9 @@ class CaptureAndroid {
   /// ConfigureReplayTest 钳住）。本回调非空时请求交它处理：应用层（采集页
   /// _pushConfigure）用当前生效的采集配置幂等重发 [configure]，覆盖「先开
   /// 采集页、后启无障碍」这条最常见路径下首次 configure 打空（服务未连）
-  /// 的静默失效。回调由采集页进页时设置、退出时清空；null = 请求被丢弃
+  /// 的静默失效。fix(#9 K-2) 起 [configure] 载荷含 `secure`：服务重启后原生
+  /// FLAG_SECURE（内存态，回默认关）随这次重放自动恢复，采集页开关不再与
+  /// 实际相反。回调由采集页进页时设置、退出时清空；null = 请求被丢弃
   /// （无页面持有配置，下次进页 initState 会重新下发）。
   ///
   /// 通道契约两侧写死：通道名 `capture_android/control` =
@@ -167,15 +177,24 @@ class CaptureAndroid {
   /// 采集应用黑名单（p0-plan ⑦，如支付宝/云闪付）：黑名单优先于白名单——包
   /// 在 [blocked] 里时，即使加进 [packages] 也不采。银行类前缀（com.android.bank）
   /// 的底线拦阻硬编码在 Kotlin 侧，不随本参数配置。
+  ///
+  /// [secure] 是悬浮窗防截屏（FLAG_SECURE）的期望值（fix(#9 K-2)）：随本载荷
+  /// 进 configure，Kotlin 侧落为 overlay.setSecure——服务重连重放（[onConfigureReplay]
+  /// → 采集页 _pushConfigure）时用它把原生内存态恢复成 Dart 侧当前值，服务重启
+  /// 后 FLAG_SECURE 不再静默丢失。载荷契约：`{packages, ocrFallback, blocked,
+  /// secure}`；`secure` 键在旧调用方/旧载荷缺省时按 false 处理（Kotlin 侧缺省
+  /// 语义，向后兼容）。configure 是幂等重放：同一载荷重复下发无副作用。
   Future<void> configure({
     required Set<String> packages,
     required bool ocrFallback,
     required Set<String> blocked,
+    required bool secure,
   }) =>
       _control.invokeMethod<void>('configure', {
         'packages': packages.toList(),
         'ocrFallback': ocrFallback,
         'blocked': blocked.toList(),
+        'secure': secure,
       });
 
   /// 采集服务是否已连接并可用。
@@ -236,13 +255,29 @@ class CaptureAndroid {
   /// 就是 bool 本身——Kotlin 侧 `call.arguments as? Boolean`，由
   /// CaptureService.handleControl 的 'setSecure' 分支转给
   /// OverlayController.setSecure。开关状态在原生侧是内存态（采集服务重启回
-  /// 默认关），Dart 侧不缓存。
+  /// 默认关），Dart 侧不缓存——重启后的恢复靠 [configure] 载荷里的 `secure`
+  /// 随服务连接重放（fix(#9 K-2)），当前实际状态用 [isSecure] 回读。
   ///
   /// control 通道由采集服务注册：服务未连接时这里抛 MissingPluginException
   /// （通道在而分支未接时是 PlatformException(notImplemented)），由调用方
   /// 兜底——采集页的开关保持原位并提示，不静默。
   Future<void> setSecure(bool secure) =>
       _control.invokeMethod<void>(setSecureMethod, secure);
+
+  /// 回读服务侧悬浮窗防截屏的当前状态（fix(#9 K-2)）：control 通道
+  /// `'isSecure'`，无参数、返回 bool——OverlayController 的当前内存态（窗口
+  /// 未建时返回已记录的开关值：setSecure 先记状态、建窗时按它补 FLAG_SECURE，
+  /// 回读值与将来建窗的窗口 flags 一致）。
+  ///
+  /// 用途：采集页防截屏开关的早退判定——「期望值 vs 服务回读值」不一致才下发
+  /// [setSecure]（服务重启后本地状态是陈旧的，早退以回读为准）。通道契约与
+  /// Kotlin 侧 CaptureService.IS_SECURE_METHOD 同名同值，改任何一侧必须两侧
+  /// 同步（Kotlin SetSecureContractTest 互钳）。
+  ///
+  /// 与 [setSecure] 同一条 control 通道：服务未连接时抛 MissingPluginException，
+  /// 由调用方兜底。
+  Future<bool> isSecure() async =>
+      await _control.invokeMethod<bool>(isSecureMethod) ?? false;
 
   /// 把建议文本填进当前会话的输入框（只填不发）。返回 false 表示没找到
   /// 可写的输入框，调用方应退回剪贴板复制。

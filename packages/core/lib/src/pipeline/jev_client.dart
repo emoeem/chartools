@@ -19,11 +19,18 @@ class JevClient {
   /// [stats] 传 app 层 SettingsStore.usage 这一份实例（C9 接线契约，见
   /// usage_stats.dart）：打点方与设置页统计卡读写同一个对象。缺省 null =
   /// 完全不打点，现有调用方与测试零改动。
-  JevClient(JevConfig config, {UsageStats? stats})
+  ///
+  /// [onTrace] 是 fix(#9 K-3) 的诊断留痕回调：管线里「行为保留但静默」的
+  /// 降级路径经它留一行中文痕（目前只有 [rankOnly] 的排序资格守卫）。core
+  /// 是纯 Dart 包，不自己打印——与 [UsageStats] 同款接线契约，app 层愿意
+  /// 听就传一个回调，缺省 null = 零开销直通，现有调用方与测试零改动。
+  JevClient(JevConfig config,
+      {UsageStats? stats, void Function(String message)? onTrace})
       : _judgeClient = JudgeClient(config),
         _replyClient = ReplyClient(config),
         _config = config,
-        _stats = stats;
+        _stats = stats,
+        _trace = onTrace;
 
   final JevConfig _config;
   final JudgeClient _judgeClient;
@@ -31,6 +38,9 @@ class JevClient {
 
   /// 使用统计（C9）：null 时所有打点行是 `?.` 空操作，行为不变。
   final UsageStats? _stats;
+
+  /// 诊断 trace（fix(#9 K-3)）：null 时 `?.` 空操作，行为不变。
+  final void Function(String message)? _trace;
 
   /// 回复缓存：Dart 的 [LinkedHashMap] 只有插入序；命中时把键摘出重插到末尾，
   /// 等价 Kotlin LinkedHashMap 的 access-order=true，淘汰时删最旧的一条。
@@ -503,6 +513,18 @@ class JevClient {
     return [for (final r in out) r.copyWith(ranked: false, prob: 0.0)];
   }
 
+  /// 只排序、不起草：把外部（如流式路径）攒出的候选交给判断路由排出
+  /// best-first 顺序。候选不是 3 条时不抛异常，显式按 ranked:false 原样
+  /// 返回并经 [_trace] 留痕（fix(#9 K-3)）。
+  ///
+  /// fix(#9 K-3)：守卫里的 3 不是「调用方的 count 契约」——count 是可配
+  /// 参数（本文件三个起草入口的默认值，起草侧另有 clamp(1,3)），而这里是
+  /// **排序协议的固定槽位数**：JevQuestions.rankQuestion 只构造 reply_a/b/c
+  /// 三个键、非 3 条会抛 ArgumentError（jev_questions.dart 的守卫）。把
+  /// 这两处并成同一个「条数常量」会把可配条数焊死在协议槽位上，将来任一
+  /// 侧单独调整就会误导；且真正的协议守卫在 jev_questions.dart，本文件
+  /// 够不着。所以选「保留行为但可见」：资格判定保持 3 = 协议槽位数并写明
+  /// 依据，不符时显式 ranked:false + trace 留痕，不再静默退化。
   Future<List<RankedReply>> rankOnly(
     ChatSnapshot snapshot,
     String relationship,
@@ -511,6 +533,9 @@ class JevClient {
     HttpScope? scope,
   }) async {
     if (candidates.length != 3) {
+      _trace?.call(
+          'rankOnly：候选 ${candidates.length} 条 ≠ 排序协议固定 3 条'
+          '（reply_a/b/c），本轮不排序，按 ranked:false 原样返回。');
       return [for (final c in candidates) c.copyWith(ranked: false, prob: 0.0)];
     }
     final scored = await _tracked(

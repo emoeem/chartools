@@ -55,7 +55,7 @@ class CaptureService : AccessibilityService() {
 
         /** MethodChannel：configure / isRunning / openAccessibilitySettings / refill /
          *  manualOcr / showSuggestions / hideSuggestions / collapse / getCapabilities /
-         *  setSecure，以及服务 → Dart 方向的 [REQUEST_CONFIGURE_METHOD]。 */
+         *  setSecure / isSecure，以及服务 → Dart 方向的 [REQUEST_CONFIGURE_METHOD]。 */
         const val CONTROL_CHANNEL = "capture_android/control"
 
         /**
@@ -77,6 +77,17 @@ class CaptureService : AccessibilityService() {
          * SetSecureContractTest 与 Dart 侧测试互钳两侧方法名。
          */
         internal const val SET_SECURE_METHOD = "setSecure"
+
+        /**
+         * fix(#9 K-2)：Dart → 服务的悬浮窗防截屏状态回读（control 通道），与
+         * [SET_SECURE_METHOD] 成对。无参数、返回 bool（[OverlayController] 当前
+         * 内存态：窗口未建也返回已记录的开关值，setSecure 先记状态、ensureWindow
+         * 建窗时按它补 FLAG_SECURE）。消费方是采集页开关的早退判定——服务重启后
+         * 本地状态是陈旧的，早退必须比较「期望值 vs 服务回读值」而不是本地字段。
+         * 常量供 SetSecureContractTest 与 Dart 侧 capture_android.isSecureMethod
+         * 互钳两侧方法名。
+         */
+        internal const val IS_SECURE_METHOD = "isSecure"
 
         /** 同一包名事件防抖窗口。 */
         private const val DEBOUNCE_MS = 300L
@@ -196,6 +207,18 @@ class CaptureService : AccessibilityService() {
             runCatching { channel.invokeMethod(REQUEST_CONFIGURE_METHOD, null) }
                 .onFailure { Log.w(TAG, "requestConfigure send failed: $it") }
         }
+
+        /**
+         * fix(#9 K-2)：configure 载荷的 `secure` 解析（缺省 false，向后兼容）。
+         * 纯函数放 companion 与 [isBlockedPackage] 同一取舍：handleControl 是
+         * CaptureService 实例方法，测试环境实例化不了，单测直接钳这个解析
+         * （SetSecureContractTest 的回放场景）。载荷契约：
+         * `{packages, ocrFallback, blocked, secure}`——键缺省（旧调用方不带该
+         * 字段）或类型不符一律回 false，与服务侧/OverlayController 的缺省一致，
+         * 旧载荷解析不破。
+         */
+        internal fun overlaySecureOf(arguments: Any?): Boolean =
+            (arguments as? Map<*, *>)?.get("secure") as? Boolean ?: false
 
         /** On an app whose adapter has been reading bubbles, an empty read must
          *  persist this long before the OCR fallback may take a screenshot: a
@@ -935,10 +958,20 @@ class CaptureService : AccessibilityService() {
                     ServiceConfig.blockedPackages = blocked.filterIsInstance<String>().toSet()
                 }
                 ServiceConfig.ocrFallbackEnabled = call.argument<Boolean>("ocrFallback") ?: false
+                // fix(#9 K-2)：防截屏期望值随 configure 载荷走（缺省 false，向后
+                // 兼容——旧调用方不带 secure 键，解析见 [overlaySecureOf]）。
+                // 服务重连时 requestConfigure → Dart 重放 configure，原生
+                // FLAG_SECURE（内存态，服务重启回默认关）由这里恢复成 Dart 侧
+                // 当前值。overlay 是 lazy：首次 configure 只是把控制器对象建出来
+                // （窗口仍未建），setSecure 先记状态，ensureWindow 建窗时按它补
+                // FLAG_SECURE——开关先于弹窗下发也生效。
+                val secure = overlaySecureOf(call.arguments)
+                overlay.setSecure(secure)
                 Trace.log(
                     "configure pkgs=${pkgs.size} " +
                         "blocked=${ServiceConfig.blockedPackages.size} " +
-                        "ocrFallback=${ServiceConfig.ocrFallbackEnabled}"
+                        "ocrFallback=${ServiceConfig.ocrFallbackEnabled} " +
+                        "secure=$secure"
                 )
                 result.success(true)
             }
@@ -992,6 +1025,10 @@ class CaptureService : AccessibilityService() {
                 overlay.setSecure(call.arguments as? Boolean ?: false)
                 result.success(true)
             }
+            // fix(#9 K-2)：防截屏状态回读——Dart 侧开关早退判定用（期望值 vs
+            // 服务回读值，见 [IS_SECURE_METHOD]）。返回 OverlayController 当前
+            // 内存态（窗口未建也返回已记录的开关值）。
+            IS_SECURE_METHOD -> result.success(overlay.isSecure())
             else -> result.notImplemented()
         }
     }

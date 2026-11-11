@@ -134,6 +134,9 @@ class OverlayController(
      * FLAG_SECURE：系统截图与屏幕录制都拍不到窗口内容——候选是第三方对话
      * 明文，录屏可整段带走。状态存内存：服务重启回默认关；窗口不在屏上时
      * 只记状态，下次 [ensureWindow] 建窗时带上（开关先于弹窗打开也生效）。
+     * fix(#9 K-2)：重启后的恢复不靠本类持久化——Dart 把期望值带进 configure
+     * 载荷随服务连接重放（CaptureService.handleControl 的 configure 分支调
+     * [setSecure]），当前状态经 [isSecure] 回读。
      */
     private var secure = false
 
@@ -497,6 +500,15 @@ class OverlayController(
                 "JEVASSIST", "overlay setSecure updateViewLayout failed: ${e.message}")
         }
     }
+
+    /**
+     * fix(#9 K-2)：当前防截屏状态回读（control 通道 isSecure 的本体，Dart 侧
+     * 采集页开关的「期望值 vs 服务回读值」早退判定用）。与 [secure] 内存态同
+     * 一事实来源：窗口未建时返回已记录的开关值——[setSecure] 先记状态、
+     * [ensureWindow] 建窗时按它补 FLAG_SECURE，所以回读值与将来建窗的窗口
+     * flags 一致（与 [isShowing] 的取舍相同：读状态不建窗）。
+     */
+    fun isSecure(): Boolean = secure
 
     /**
      * Take the overlay out of the picture for one screenshot. INVISIBLE, not

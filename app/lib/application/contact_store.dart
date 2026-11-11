@@ -267,18 +267,28 @@ class ContactStore {
   /// 被替换的正是激活联系人时，[activeContact] 同步换成新实例（监听方拿到
   /// 的永远是最新的字段值，不需要自己重新 byId）。
   Future<void> update(ContactProfile profile) async {
-    final updated =
-        profile.copyWith(updatedAt: DateTime.now().millisecondsSinceEpoch);
-    final next = <ContactProfile>[
-      for (final c in contacts.value)
-        if (c.id == profile.id) updated else c,
-    ];
-    if (next.length == contacts.value.length) {
+    // 存在性判断不能用替换推导的长度比较：逐元素映射不改变列表长度，判不
+    // 出替换是否命中。直接查名单。
+    final prev = byId(profile.id);
+    if (prev == null) {
       // id 不在名单里：update 不是 upsert，静默忽略会把编辑结果弄丢——抛出
       // 让调用方（编辑页）显式决定新建还是提示。
       throw StateError('ContactStore.update: id 不存在（${profile.id}），'
           '请改用 create');
     }
+    // updatedAt 按「同一联系人上一次修改」严格递增：同一毫秒内连续两次
+    // update 会产出 updatedAt 相同的新旧实例，而 ContactProfile.== 按
+    // (id, updatedAt) 判等、ValueNotifier 的 value setter 对相等的值跳过
+    // 赋值——activeContact 就会停在旧实例上，监听方拿不到最新字段值，
+    // 违反本方法「同步换成新实例」的契约。递增时间戳让每次 update 的产出
+    // 都与旧值不等，赋值必然生效。
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final updated = profile.copyWith(
+        updatedAt: now > prev.updatedAt ? now : prev.updatedAt + 1);
+    final next = <ContactProfile>[
+      for (final c in contacts.value)
+        if (c.id == profile.id) updated else c,
+    ];
     contacts.value = next;
     if (activeContact.value?.id == profile.id) {
       activeContact.value = updated;
@@ -340,6 +350,11 @@ class ContactStore {
     ];
   }
 
+  /// 确认事实追加进 persona 的行数上限（fix(#9 K-5)）：persona 是提示词
+  /// 正文，无界增长会推高 token 成本并稀释其它字段——最多保留最近 30 行，
+  /// 超限从最旧（最前）一行开始淘汰。
+  static const int _personaLineLimit = 30;
+
   /// 用户确认了一条候选：追加进目标联系人的人设正文（[ContactProfile.persona]
   /// ——进提示词的正文；此时它已经是用户确认过的事实，G8 的关卡已过）并落盘，
   /// 然后把它移出暂存区。
@@ -348,20 +363,43 @@ class ContactStore {
   /// 顺序解析；三者都落空时返回 null、候选**留在暂存区**（UI 提示先选一个
   /// 联系人再确认）。落盘失败原样抛出、候选保留，用户可重试。返回确认后
   /// 的最新档案（已同步进 [contacts] 与 [activeContact]）。
+  ///
+  /// fix(#9 K-5) 追加的两条约束（按行处理——persona 没有行级来源标记，手写
+  /// 的多行正文与确认事实共享同一份行预算）：
+  /// - **去重**：候选文本与 persona 现有某一行相同（两边都按 trim 后比较）
+  ///   时不重复追加。此时没有任何变化值得写：不改 persona、不落盘、不刷新
+  ///   updatedAt，候选照常移出暂存区、返回现档案。
+  /// - **上限**：追加后超过 [_personaLineLimit] 行时淘汰最旧行。
   Future<ContactProfile?> confirmStagedFact(
     StagedCandidateFact fact, {
     String? targetContactId,
   }) async {
     final target = byId(targetContactId) ?? byId(fact.contactId) ?? activeContact.value;
     if (target == null) return null;
-    final persona = target.persona.isEmpty ? fact.text : '${target.persona}\n${fact.text}';
-    final updated = target.copyWith(persona: persona);
-    await update(updated);
+    // fix(#9 K-5) 空正文算 0 行：''.split('\n') 会得到一个空串行，照搬会让
+    // 首次追加产出前导空行。
+    final existingLines =
+        target.persona.isEmpty ? const <String>[] : target.persona.split('\n');
+    final text = fact.text.trim();
+    // fix(#9 K-5) 去重：同文本（trim 后逐行比较）已在正文里、或候选 trim 后
+    // 为空（没有可入库的内容），都不追加。
+    final duplicate =
+        text.isEmpty || existingLines.any((line) => line.trim() == text);
+    if (!duplicate) {
+      var nextLines = <String>[...existingLines, text];
+      // fix(#9 K-5) 上限：超限淘汰最旧（最前）的行，保住最近 30 行。
+      if (nextLines.length > _personaLineLimit) {
+        nextLines = nextLines.sublist(nextLines.length - _personaLineLimit);
+      }
+      await update(target.copyWith(persona: nextLines.join('\n')));
+    }
     stagedFacts.value = [
       for (final f in stagedFacts.value)
         if (f != fact) f,
     ];
-    return updated;
+    // 非 null 返回值即「确认成功」的契约（capture_page._confirm 据此提示）：
+    // 去重路径没有产生新实例，返回名单里现存的这份即可。
+    return byId(target.id);
   }
 
   /// 用户放弃一条候选：只移出暂存区，任何档案都不动。
