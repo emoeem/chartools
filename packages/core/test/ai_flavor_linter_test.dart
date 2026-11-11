@@ -235,7 +235,7 @@ void main() {
   });
 
   group('短文本规则跳过（fix(#8 DS-7)）', () {
-    test('短于 _uniformMinLength 的候选跳过全部单条规则', () {
+    test('短于 _uniformMinLength 的候选跳过其余单条规则（not_but 例外见下组）', () {
       // 对照（长文本，17 字）：emoji 滥用照常命中——证明早退跳过的是
       // 「短」，不是规则本身。
       final long = AiFlavorLinter.lintGroup(['😀😀😀太好了真的太好了呀啦哦']);
@@ -250,6 +250,8 @@ void main() {
       final short = AiFlavorLinter.lintGroup(['😀😀😀', '总之然而', '好的']);
       expect(short, hasLength(3));
       expect(short.every((h) => h.isEmpty), isTrue);
+      // fix(#10 DS-10-2)：not_but 不参与早退，由下面专门的组覆盖；本组输入
+      // 均不含「不是…而是…」，故断言与 DS-7 时一致。
 
       // 边界：线下（9 字）跳过、线上（11 字）书面词照常命中——阈值钉在
       // _uniformMinLength(10)。
@@ -265,6 +267,31 @@ void main() {
       // 逐条判定——早退是 lintGroup 的批量口径，不是规则本身变了。
       expect(AiFlavorLinter.lint('总之然而').map((h) => h.rule),
           ['summary_tail', 'written_word']);
+    });
+  });
+
+  group('短文本 not_but 放行（fix(#10 DS-10-2)）', () {
+    test('9 字含「不是…而是…」的候选命中 not_but，其余规则仍被早退拦下', () {
+      // 「然而不是你，而是我」恰好 9 字：低于 _uniformMinLength(10)。若
+      // not_but 参与早退就会漏检——它是确定性特征，短文本漏检成本高于
+      // 检测成本（见 lintGroup 注释），故短候选放行这一条。文本里同时埋
+      // 了「然而」：若早退被整个去掉，written_word 也会命中，断言失败，
+      // 证明其余规则维持 <10 字跳过。
+      const short = '然而不是你，而是我';
+      expect(short.length, 9);
+      final hits = AiFlavorLinter.lintGroup([short]).single;
+      expect(hits.map((h) => h.rule), ['not_but']);
+      expect(hits.single.evidence, contains('不是'));
+      expect(hits.single.evidence, contains('而是'));
+    });
+
+    test('9 字不含该句式的候选仍早退', () {
+      // 「说到底都是我的错了」恰好 9 字，且尾句以「说到底」开头——若
+      // DS-7 的早退被 DS-10-2 意外放宽，summary_tail 会命中；断言为空
+      // 证明不含 not_but 句式的短文本照常早退。
+      const short = '说到底都是我的错了';
+      expect(short.length, 9);
+      expect(AiFlavorLinter.lintGroup([short]), everyElement(isEmpty));
     });
   });
 

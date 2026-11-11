@@ -32,8 +32,9 @@ class FlavorHit {
 ///  - [lint] 查一条文本自己的特征；
 ///  - [lintGroup] 查一组候选——整组特征（长度过度均匀、每条问号结尾）只有把
 ///    几条放在一起才看得出来，命中时挂在**每一条**上（每条都是这个「整齐
-///    模子」的一部分）；单条特征照常逐条挂，唯独短于 [_uniformMinLength]
-///    的候选整组跳过单条规则（DS-7 短文本早退，见 [lintGroup] 注释）。
+///    模子」的一部分）；单条特征照常逐条挂，短于 [_uniformMinLength] 的
+///    候选跳过其余单条规则（DS-7 短文本早退，not_but 例外，见 [lintGroup]
+///    注释）。
 ///
 /// 调用方（`JevClient.draftAndRank`）拿每条候选的命中数做门槛：≥
 /// [rewriteThreshold] 条才进 refineReply 重写。单一特征不动手——一次误伤的
@@ -151,7 +152,8 @@ abstract final class AiFlavorLinter {
   /// 整组特征命中时挂在每一条上。与 [lint] 一样纯函数。
   ///
   /// fix(#8 DS-7) 短文本早退：短于 [_uniformMinLength] 的候选在入口处跳过
-  /// 全部单条规则（不切句、不跑正则），只挂整组特征。阈值直接沿用
+  /// 全部单条规则（不切句、不跑正则），只挂整组特征。fix(#10 DS-10-2) 起
+  /// not_but 例外放行（只跑它这一条正则），见下段。阈值直接沿用
   /// [_uniformMinLength] 的既有口径——句长方差规则已经把短回复（「好」「嗯」
   /// 这类）排除在判定之外（见其注释），单条规则取同一条线，理由：
   ///  - 低于 10 字的回复不值得为它发一次改写模型调用——[rewriteThreshold]
@@ -163,6 +165,17 @@ abstract final class AiFlavorLinter {
   /// [_uniformLength] 自带同款短文本早退。单条入口 [lint] 不做早退——它是
   /// 「明确要求判定这一条」的公开 API，语义保持完整；早退只放在消费方
   /// （JevClient.draftAndRank）实际走的批量入口上。
+  ///
+  /// fix(#10 DS-10-2) not_but 单规则不参与早退：「不是…而是…」是确定性
+  /// 特征——一个正则就定，检测成本近乎为零；而这类对比句式常见于短回复，
+  /// 短文本漏检成本高于检测成本（漏掉它等于放过最高置信度的信号）。故短
+  /// 候选除整组特征外补跑这一条规则（见 [_shortTextHits]），其余单条规则
+  /// 维持上一段的 <10 字跳过口径不变。
+  ///
+  /// 放行的连带后果（显式承认）：not_but + 整组特征（如 all_question）可使
+  /// <10 字候选达到 rewriteThreshold=2 并触发一次改写调用——这是「漏检
+  /// 优先级高于改写成本」的有意代价；若日后认为短文本改写确不可取，改为
+  /// 「检测放行、门槛排除整组特征」而非整体收回放行。
   static List<List<FlavorHit>> lintGroup(List<String> texts) {
     final groupHits = <FlavorHit>[];
     final uniform = _uniformLength(texts);
@@ -172,12 +185,21 @@ abstract final class AiFlavorLinter {
     return [
       for (final t in texts)
         // fix(#8 DS-7) 短文本早退：只挂整组特征，不跑单条规则（阈值口径见
-        // 方法注释）。
+        // 方法注释）。fix(#10 DS-10-2)：not_but 例外放行，见 [_shortTextHits]。
         if (t.length < _uniformMinLength)
-          [...groupHits]
+          _shortTextHits(t, groupHits)
         else
           [...groupHits, ...lint(t)],
     ];
+  }
+
+  /// fix(#10 DS-10-2) 短候选（< [_uniformMinLength] 字）的命中：整组特征
+  /// 照挂，单条规则里只放行 not_but——它是确定性特征，短文本漏检成本高于
+  /// 检测成本（理由见 [lintGroup] 注释）；其余规则维持 <10 字跳过。
+  static List<FlavorHit> _shortTextHits(
+      String text, List<FlavorHit> groupHits) {
+    final notBut = _notButHit(text);
+    return [...groupHits, if (notBut != null) notBut];
   }
 
   /// 把命中的规则翻成 refineReply 的改写指令：每条规则一句人话描述。
