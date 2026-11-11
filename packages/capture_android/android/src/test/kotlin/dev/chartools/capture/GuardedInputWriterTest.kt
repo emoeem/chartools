@@ -186,19 +186,36 @@ class GuardedInputWriterTest {
     fun clearFails_skipsPaste_butStillChecksAndCompletesOnce() {
         // 清空 SET_TEXT("") 返回 false：不 PASTE，但仍挂 checkPaste 收尾——
         // complete 恰一次的保证不许因为跳过 PASTE 而破。
+        //
+        // 甄别 #8 kotlin-test（判测试错、实现对）：清空打在 checkRetry **重解析
+        // 出的输入框**上，不是 retry 步骤的旧对象。依据：GuardedInputWriter 头
+        // 注释契约「resolve must validate the live session on every call」+
+        // InputFiller 类注释「Every step re-resolves the originating conversation,
+        // so a chat switch mid-retry can never land the text in the wrong
+        // window」——对 150ms 前的旧节点清空 = 绕过重校验写入，会话已切时会把
+        // SET_TEXT("") 打进别的窗口；姊妹用例
+        // retryStillStale_copiesClearsAndPastes_pasteThenVerifiesTrue 钉的也是
+        // 同一语义（清空落在 checkRetry 解析位 pasteHost 上）。原版把
+        // applyText=false 挂在 retry 步骤对象上、却期望清空日志也落在它——
+        // 与契约矛盾（实得 [setText("hi")]：清空按实现打在重解析对象上）。
+        // 改模型：retry 重写失败（旧值不动），checkRetry 重解析出的输入框清空
+        // 失败 → 不 PASTE，checkPaste 照排、complete 恰一次。
         val h = Harness()
-        val retryInput = FakeInput("旧草稿", applyText = false)   // 重试写入与清空都失败
+        val retryWriteMiss = FakeInput("旧草稿", applyText = false)  // retry 重写失败
+        val clearMiss = FakeInput("旧草稿", applyText = false)       // checkRetry 位：清空失败
         h.resolve(
-            FakeInput(), FakeInput("旧草稿"), retryInput,
-            FakeInput("旧草稿"), FakeInput("旧草稿"),
+            FakeInput(), FakeInput("旧草稿"), retryWriteMiss,
+            clearMiss, FakeInput("旧草稿"),
         )
         h.writer().fill("hi")
-        assertEquals(4, h.clock.runPending())
+        assertEquals(4, h.clock.runPending())          // checkPaste 照排（4 个延时全链）
         assertEquals(listOf(150L, 300L, 150L, 150L), h.clock.scheduledDelays)
         assertEquals(listOf(false), h.results)
         assertEquals(listOf("copy", "complete(false)"), h.log)
-        assertEquals(listOf("setText(\"hi\")", "setText(\"\")"), retryInput.log)
-        assertEquals("旧草稿", retryInput.text)        // 两次写入都没生效
+        assertEquals(listOf("setText(\"hi\")"), retryWriteMiss.log)
+        assertEquals(listOf("setText(\"\")"), clearMiss.log)   // 清空打在重解析位
+        assertEquals("旧草稿", retryWriteMiss.text)    // 重写没生效
+        assertEquals("旧草稿", clearMiss.text)         // 清空也没生效
         // 没有任何 Input 收到 PASTE。
         assertTrue(h.allInputActions.none { it == "paste" })
     }

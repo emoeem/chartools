@@ -94,6 +94,10 @@ class InputFillerTest {
      *
      * [windowId] / [pkg]：TargetMemo 的缓存键读 root 的这两项，测试用它构造
      * 「同窗新实例」（键不变）与「换窗」（键变）两种框架行为。
+     *
+     * SET_TEXT 的载荷经 Bundle 传入，JVM 单测里 Bundle 无真实存储——会执行写入
+     * 的用例必须包在 [withBundleStorage] 里，否则读出恒 null、写入恒不生效
+     * （见该函数注释的甄别依据）。
      */
     private class StubNode(
         initial: CharSequence? = null,
@@ -152,17 +156,54 @@ class InputFillerTest {
         }
     }
 
-    private fun fillerFor(host: FakeHost, input: AccessibilityNodeInfo?): InputFiller {
+    private fun fillerFor(host: FakeHost, vararg roots: AccessibilityNodeInfo): InputFiller {
         val adapter = Mockito.mock(ChatAppAdapter::class.java)
         // fix(kimi-review 循环)：不能用 `when`(adapter.findInput(any()))——any() 返回
         // null，而 findInput 是 Kotlin 接口的非空参数位，调用点的平台类型断言直接
         // NPE（"any(...) must not be null"，实测）。改 doReturn 风格 + 具体实例注册
-        // 桩（不用匹配器，彻底绕开调用点断言与匹配器状态污染）；input 为 null 时
-        // 不打桩，mock 默认返回 null 即所期行为。
-        if (input != null) {
-            Mockito.doReturn(input).`when`(adapter).findInput(input)
-        }
+        // 桩（不用匹配器，彻底绕开调用点断言与匹配器状态污染）；一个 root 都不给时
+        // 不打桩，mock 默认返回 null 即所期行为（fill_noInputOnScreen）。
+        // 甄别 #8 kotlin-test：fill_newRootInstance / fill_windowIdChanges 在 fill
+        // 途中换 host.root，checkFirst 的 resolve 会拿**新** root 实例问 findInput——
+        // 每个将要被解析到的 root 实例都要各自注册（StubNode 是单节点树：root 即
+        // 输入框，生产里 findInput(root) 恰好也是「在当前 root 树里找编辑框」）。
+        roots.forEach { r -> Mockito.doReturn(r).`when`(adapter).findInput(r) }
         return InputFiller(host, { _ -> adapter })
+    }
+
+    /**
+     * JVM 单测的 SET_TEXT 载荷存储（甄别 #8 kotlin-test，7 个 fill_*「results 期望
+     * [true] 实得 [false]」的根因）。
+     *
+     * 判定依据：InputFiller.setTextRaw 以 ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE
+     * 键经 Bundle 传 SET_TEXT 载荷——Android 无障碍 API 的唯一正规用法、走框架
+     * 常量，实现无缺陷。坏的是本文件 StubNode 的假设：它直接读传入 Bundle 的
+     * getCharSequence，而 JVM 单测里的 android.os.Bundle 是 AGP mockable jar 的
+     * 桩实现（build.gradle.kts isReturnDefaultValues=true）——putCharSequence
+     * 空操作、getCharSequence 恒 null。实测：SET_TEXT 动作被记录进 actions、
+     * node.text 却保持 null，fill 走满 5 动作后仍 complete(false)。fullRetryPath
+     * 两个测试能过纯属侥幸：其最终判定依赖 PASTE（1 参 performAction，不经
+     * Bundle），从不读 SET_TEXT 载荷。
+     *
+     * 修复：mockConstruction 把 fill 期间构造的每个 Bundle 变成带 HashMap 存储
+     * 的 mock，put/get 按真实键往返。这不止解堵，还把载荷键契约一并钳住：若
+     * setTextRaw 用错键，读出 null、checkFirst 判不等、fill 失败——测试变红。
+     * scope 必须罩住 fill 与 runPending 两段：入口写入在 fill 的同步栈构造
+     * Bundle，重试链写入在 runPending 里构造。
+     */
+    private fun withBundleStorage(block: () -> Unit) {
+        Mockito.mockConstruction(
+            Bundle::class.java,
+            org.mockito.MockedConstruction.MockInitializer<Bundle> { mock, _ ->
+                val store = java.util.HashMap<String, CharSequence?>()
+                Mockito.doAnswer { inv ->
+                    store[inv.getArgument<String>(0)] = inv.getArgument<CharSequence>(1)
+                    null
+                }.`when`(mock).putCharSequence(Mockito.anyString(), Mockito.any())
+                Mockito.doAnswer { inv -> store[inv.getArgument<String>(0)] }
+                    .`when`(mock).getCharSequence(Mockito.anyString())
+            },
+        ).use { block() }
     }
 
     private fun target(
@@ -219,8 +260,10 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.runPending()
+        withBundleStorage {
+            fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), results)
         // happy path 只有一次 SET_TEXT 写入；没有任何可能发送/系统级的动作。
         assertEquals(listOf(AccessibilityNodeInfo.ACTION_SET_TEXT), node.actions)
@@ -237,8 +280,10 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.runPending()
+        withBundleStorage {
+            fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), results)
         assertEquals(
             listOf(
@@ -265,8 +310,10 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.runPending()
+        withBundleStorage {
+            fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(false), results)        // complete 恰一次
         assertTrue(
             node.actions.all {
@@ -298,8 +345,10 @@ class InputFillerTest {
         val host = FakeHost(root = node.node, target = t)
         node.onContentChanged = host::onAccessibilityEvent
         val results = mutableListOf<Boolean>()
-        fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.runPending()
+        withBundleStorage {
+            fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), results)
         assertEquals(2, host.targetOfCalls.size)
         assertSame(node.node, host.targetOfCalls[0])
@@ -318,8 +367,10 @@ class InputFillerTest {
         val host = FakeHost(root = node.node, target = t)
         node.onContentChanged = host::onAccessibilityEvent
         val results = mutableListOf<Boolean>()
-        fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.runPending()
+        withBundleStorage {
+            fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), results)
         assertEquals(3, host.targetOfCalls.size)
     }
@@ -333,8 +384,10 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.runPending()
+        withBundleStorage {
+            fillerFor(host, node.node).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), results)
         assertEquals(1, host.targetOfCalls.size)
         assertSame(node.node, host.targetOfCalls[0])
@@ -349,10 +402,13 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        val filler = fillerFor(host, node.node)
-        filler.fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.root = StubNode().node     // 同窗新实例，无事件
-        host.runPending()
+        val newRoot = StubNode().node   // 同窗新实例，无事件（先建好供桩注册）
+        val filler = fillerFor(host, node.node, newRoot)
+        withBundleStorage {
+            filler.fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.root = newRoot
+            host.runPending()
+        }
         assertEquals(listOf(true), results)
         assertEquals(1, host.targetOfCalls.size)
     }
@@ -365,10 +421,13 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        val filler = fillerFor(host, node.node)
-        filler.fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
-        host.root = StubNode(windowId = 99).node    // 换窗，无事件也必须重提取
-        host.runPending()
+        val newRoot = StubNode(windowId = 99).node  // 换窗（先建好供桩注册）
+        val filler = fillerFor(host, node.node, newRoot)
+        withBundleStorage {
+            filler.fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+            host.root = newRoot                     // 换窗，无事件也必须重提取
+            host.runPending()
+        }
         assertEquals(listOf(true), results)         // FakeHost 恒回同一 Target：仍同会话
         assertEquals(2, host.targetOfCalls.size)
         assertSame(node.node, host.targetOfCalls[0])
@@ -384,14 +443,18 @@ class InputFillerTest {
         val host = FakeHost(root = node.node, target = t)
         val filler = fillerFor(host, node.node)
         val r1 = mutableListOf<Boolean>()
-        filler.fill(ConversationSession.Token(t, 0), "你好") { r1.add(it) }
-        host.runPending()
+        withBundleStorage {
+            filler.fill(ConversationSession.Token(t, 0), "你好") { r1.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), r1)
         assertEquals(1, host.targetOfCalls.size)
         host.onAccessibilityEvent()                 // 树上发生了变化
         val r2 = mutableListOf<Boolean>()
-        filler.fill(ConversationSession.Token(t, 0), "第二条") { r2.add(it) }
-        host.runPending()
+        withBundleStorage {
+            filler.fill(ConversationSession.Token(t, 0), "第二条") { r2.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), r2)
         assertEquals(2, host.targetOfCalls.size)
     }
@@ -406,12 +469,16 @@ class InputFillerTest {
         val host = FakeHost(root = node.node, target = t)
         val filler = fillerFor(host, node.node)
         val r1 = mutableListOf<Boolean>()
-        filler.fill(ConversationSession.Token(t, 0), "你好") { r1.add(it) }
-        host.runPending()
+        withBundleStorage {
+            filler.fill(ConversationSession.Token(t, 0), "你好") { r1.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), r1)
         val r2 = mutableListOf<Boolean>()
-        filler.fill(ConversationSession.Token(t, 0), "第二条") { r2.add(it) }
-        host.runPending()
+        withBundleStorage {
+            filler.fill(ConversationSession.Token(t, 0), "第二条") { r2.add(it) }
+            host.runPending()
+        }
         assertEquals(listOf(true), r2)
         assertEquals(1, host.targetOfCalls.size)
     }
@@ -438,7 +505,7 @@ class InputFillerTest {
         val t = target()
         val host = FakeHost(root = node.node, target = t)
         val results = mutableListOf<Boolean>()
-        fillerFor(host, null).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
+        fillerFor(host).fill(ConversationSession.Token(t, 0), "你好") { results.add(it) }
         host.runPending()
         assertEquals(listOf(false), results)         // complete 恰一次
         assertEquals(emptyList<Int>(), node.actions)

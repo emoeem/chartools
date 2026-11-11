@@ -32,7 +32,8 @@ class FlavorHit {
 ///  - [lint] 查一条文本自己的特征；
 ///  - [lintGroup] 查一组候选——整组特征（长度过度均匀、每条问号结尾）只有把
 ///    几条放在一起才看得出来，命中时挂在**每一条**上（每条都是这个「整齐
-///    模子」的一部分）；单条特征照常逐条挂。
+///    模子」的一部分）；单条特征照常逐条挂，唯独短于 [_uniformMinLength]
+///    的候选整组跳过单条规则（DS-7 短文本早退，见 [lintGroup] 注释）。
 ///
 /// 调用方（`JevClient.draftAndRank`）拿每条候选的命中数做门槛：≥
 /// [rewriteThreshold] 条才进 refineReply 重写。单一特征不动手——一次误伤的
@@ -148,6 +149,20 @@ abstract final class AiFlavorLinter {
 
   /// 查一组候选（draftAndRank 的终榜）。返回与 [texts] 等长的命中列表；
   /// 整组特征命中时挂在每一条上。与 [lint] 一样纯函数。
+  ///
+  /// fix(#8 DS-7) 短文本早退：短于 [_uniformMinLength] 的候选在入口处跳过
+  /// 全部单条规则（不切句、不跑正则），只挂整组特征。阈值直接沿用
+  /// [_uniformMinLength] 的既有口径——句长方差规则已经把短回复（「好」「嗯」
+  /// 这类）排除在判定之外（见其注释），单条规则取同一条线，理由：
+  ///  - 低于 10 字的回复不值得为它发一次改写模型调用——[rewriteThreshold]
+  ///    门槛设计本来就是省这笔钱，改写一条几个字的短回复更是无从改起；
+  ///  - 这是 DS-7 有意的行为口径收窄（<10 字不再上报单条特征），不是纯性能
+  ///    重构。这些文本即使凑满 2 条单点命中（最短的组合是 4 字的「总之然而」
+  ///    ：summary_tail + written_word），改写也是花真金白银换一句短话。
+  /// 整组特征不受影响：每次调用只各扫一遍长度/结尾，本来就轻，且
+  /// [_uniformLength] 自带同款短文本早退。单条入口 [lint] 不做早退——它是
+  /// 「明确要求判定这一条」的公开 API，语义保持完整；早退只放在消费方
+  /// （JevClient.draftAndRank）实际走的批量入口上。
   static List<List<FlavorHit>> lintGroup(List<String> texts) {
     final groupHits = <FlavorHit>[];
     final uniform = _uniformLength(texts);
@@ -155,7 +170,13 @@ abstract final class AiFlavorLinter {
     final allQ = _allQuestion(texts);
     if (allQ != null) groupHits.add(allQ);
     return [
-      for (final t in texts) [...groupHits, ...lint(t)],
+      for (final t in texts)
+        // fix(#8 DS-7) 短文本早退：只挂整组特征，不跑单条规则（阈值口径见
+        // 方法注释）。
+        if (t.length < _uniformMinLength)
+          [...groupHits]
+        else
+          [...groupHits, ...lint(t)],
     ];
   }
 

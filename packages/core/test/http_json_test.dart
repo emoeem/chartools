@@ -106,6 +106,19 @@ void main() {
       expect(server.requestCount, 2);
     });
 
+    test('fix(#8 DS-3) 529（overloaded）走重试，第二次成功', () async {
+      // 白名单的另一半：429/529 是仅有的两个「稍后再来」的客户端语义码。
+      // 529 不落 [400, 500) 区间，重试判定里显式写出的 status != 529 今天
+      // 恒真——这条单测钉住的是行为本身：将来区间或判定被改坏时它先红。
+      server.enqueue(const MockResponse(529, 'overloaded'));
+      server.enqueue(const MockResponse(200, '{"answers":{}}'));
+
+      final resp = await post();
+
+      expect(resp['answers'], isA<Map<String, dynamic>>());
+      expect(server.requestCount, 2);
+    });
+
     test('5xx 重试满三次后按最后一次上报', () async {
       server
         ..enqueue(const MockResponse(500, 'boom'))

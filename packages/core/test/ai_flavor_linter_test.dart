@@ -234,6 +234,40 @@ void main() {
     });
   });
 
+  group('短文本规则跳过（fix(#8 DS-7)）', () {
+    test('短于 _uniformMinLength 的候选跳过全部单条规则', () {
+      // 对照（长文本，17 字）：emoji 滥用照常命中——证明早退跳过的是
+      // 「短」，不是规则本身。
+      final long = AiFlavorLinter.lintGroup(['😀😀😀太好了真的太好了呀啦哦']);
+      expect(long, hasLength(1));
+      expect(long.single.map((h) => h.rule),
+          contains(AiFlavorLinter.ruleEmojiAbuse));
+
+      // 短回复：emoji 滥用、总结尾句 + 书面词一律不上报（「总之然而」4 字
+      // 在早退前能凑满 rewriteThreshold=2 的改写门槛——改一条几个字的短
+      // 回复得不偿失，这正是早退的意图，见 lintGroup 注释）。整组特征对
+      // 短组也不误挂。
+      final short = AiFlavorLinter.lintGroup(['😀😀😀', '总之然而', '好的']);
+      expect(short, hasLength(3));
+      expect(short.every((h) => h.isEmpty), isTrue);
+
+      // 边界：线下（9 字）跳过、线上（11 字）书面词照常命中——阈值钉在
+      // _uniformMinLength(10)。
+      expect(AiFlavorLinter.lintGroup(['然而今天真的有点累']),
+          everyElement(isEmpty));
+      expect(
+          AiFlavorLinter.lintGroup(['然而我今天真的有点累了'])
+              .single
+              .map((h) => h.rule),
+          contains(AiFlavorLinter.ruleWrittenWord));
+
+      // 单条入口 lint() 不早退（见 lintGroup 注释）：同一条文本在那里仍
+      // 逐条判定——早退是 lintGroup 的批量口径，不是规则本身变了。
+      expect(AiFlavorLinter.lint('总之然而').map((h) => h.rule),
+          ['summary_tail', 'written_word']);
+    });
+  });
+
   // ------------------------------------------------------- draftAndRank 挂接
 
   group('draftAndRank 的 AI 腔挂接', () {

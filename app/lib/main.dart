@@ -1,4 +1,8 @@
 import 'dart:convert';
+// AppExitResponse 只在 dart:ui（platform_dispatcher.dart 的枚举），material/
+// widgets 都不转发这个符号（widgets/binding.dart 自己也是从 dart:ui show 进
+// 来的），覆写 didRequestAppExit 必须显式带这一行。
+import 'dart:ui' show AppExitResponse;
 
 import 'package:chartools_core/chartools_core.dart';
 import 'package:flutter/foundation.dart';
@@ -28,23 +32,52 @@ Future<PreferenceProfile> _loadPreferences() async {
     final Object? decoded = jsonDecode(raw);
     return PreferenceProfile.fromJson(
         decoded is Map<String, dynamic> ? decoded : null);
-  } catch (_) {
+  } catch (e) {
+    // fix(#8 DS-6) 读档失败不再全吞：debugPrint 留痕（磁盘满、平台通道异常
+    // 这类环境问题有迹可循）。降级行为不变——按空档案继续，不打断启动。
+    debugPrint('偏好档案读盘失败，按空档案继续：$e');
     return PreferenceProfile();
   }
 }
 
-/// record/clear 之后写盘：失败静默——内存里的偏好仍然生效，与设置页「已生效
-/// 但写盘失败」同一态度。
+/// record/clear 之后写盘：失败不再全吞（fix(#8 DS-6)）——debugPrint 留痕后
+/// 照旧继续，内存里的偏好仍然生效，不打扰用户的口径不变。设置页自己的保存
+/// 路径已有「已生效但写盘失败」的 SnackBar（[SettingsPage._save]），那条
+/// 路径保持不动。
 Future<void> _savePreferences(PreferenceProfile preferences) async {
   try {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
         _preferenceProfileKey, jsonEncode(preferences.toJson()));
-  } catch (_) {}
+  } catch (e) {
+    // fix(#8 DS-6) 写盘失败至少 debugPrint 留痕，不再无声丢失。
+    debugPrint('偏好档案写盘失败：$e');
+  }
+}
+
+/// fix(#8 DS-8) 退出清理观察者：Windows 关窗会先走框架的退出请求流程——
+/// runner 的 FlutterWindow::MessageHandler 把窗口消息先转给引擎
+/// （flutter_window.cpp 的 HandleTopLevelWindowProc），embedder 把 WM_CLOSE
+/// 转成 requestAppExit，最后由 [WidgetsBindingObserver.didRequestAppExit]
+/// 逐个询问观察者（任一返回 cancel 才取消，否则放行，见 widgets
+/// binding.dart 的 handleRequestAppExit）。这里抢在放行前反注册全局热键并
+/// 关停泵线程；非 Windows 下 [HotkeyController.stop] 是空操作，观察者常驻
+/// 无害。兜底：即便反注册的异步收尾没赶上进程退出，OS 在进程终止时也会
+/// 回收本进程注册的所有热键。
+class _HotkeyExitObserver with WidgetsBindingObserver {
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await HotkeyController.instance.stop();
+    // 只做清理，不拦退出：返回 exit 放行。
+    return AppExitResponse.exit;
+  }
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // fix(#8 DS-8) 接线退出清理：热键反注册挂在退出请求钩子上（Windows 关窗
+  // 即触发）。观察者随进程存活，无须移除。
+  WidgetsBinding.instance.addObserver(_HotkeyExitObserver());
   // 启动即读存档：拿到持久化的设置再进 UI，避免先渲染默认值再跳变。
   // 读不到存档（首次启动 / JSON 损坏 / 平台通道不可用）就按默认值起。
   final store = SettingsStore();

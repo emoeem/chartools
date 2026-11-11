@@ -73,7 +73,15 @@ abstract final class HttpJson {
         // (overloaded), which are the two that mean "come back later".
         // 5xx 与传输失败按服务端问题重试。
         final status = e.status;
-        if (status != null && status >= 400 && status < 500 && status != 429) {
+        if (status != null &&
+            status >= 400 &&
+            status < 500 &&
+            status != 429 &&
+            // fix(#8 DS-3)：529 显式入白名单。529 不落 [400, 500) 区间，这一项
+            // 今天恒真——但上面注释承诺的「429 与 529 是仅有的两个可重试的
+            // 客户端语义码」必须由代码显式背着：将来若有人把区间扩成
+            // [400, 600) 或改写判定，这条挡得住 529 被静默改成不重试。
+            status != 529) {
           throw e;
         }
         last = e;

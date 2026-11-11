@@ -130,6 +130,24 @@ class HotkeyController {
     if (on) await setEnabled(true, persist: false);
   }
 
+  /// 应用退出前的清理（fix(#8 DS-8)）：反注册全局热键并关停泵线程。由
+  /// main.dart 挂在 WidgetsBindingObserver.didRequestAppExit 上——Windows
+  /// 关窗会先经 runner 的 HandleTopLevelWindowProc 转成框架的退出请求，
+  /// 这里抢在放行退出前释放热键（路径见 main.dart 的 _HotkeyExitObserver）。
+  ///
+  /// - 幂等：热键没在运行时是空操作（走 [setEnabled] 的幂等分支）。
+  /// - persist: false——退出清理是系统收尾，不是用户的开关选择，不许改写
+  ///   存档：下次启动恢复的还是用户自己的偏好。
+  /// - 非 Windows：isSupported 门控使本方法为空操作（与 [setEnabled] 同一
+  ///   口径），调用方无须再写平台判断。
+  /// - 兜底：即便反注册的异步收尾（WM_QUIT → 泵线程 finally 里
+  ///   UnregisterHotKey）没赶上进程退出，OS 在进程终止时也会回收本进程
+  ///   注册的所有热键，此处保证的是正常退出路径下的及时释放。
+  Future<void> stop() async {
+    if (!isSupported) return;
+    await setEnabled(false, persist: false);
+  }
+
   /// 开关热键：value=true 起泵线程注册；false 发 WM_QUIT 关停（泵线程在
   /// finally 里注销热键后自行退出）。幂等；失败置 [error] 且 [enabled] 为 false。
   Future<void> setEnabled(bool value, {bool persist = true}) async {
