@@ -1,4 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- fix(#11 P0-2)：模型调用要出网，主清单必须声明 INTERNET。src/debug 的
+         同名权限只在 debug 构建里自动合并（Flutter 模板为热重载加的），release
+         合并清单此前没有网络权限、模型调用必失败——本机 debug 构建没炸正是
+         因为 debug manifest 掩盖了它。CI 侧防回归：ci.yml 的 aapt2 dump
+         permissions 检查 release 合并 APK。 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="chartools_app"
         android:name="${applicationName}"

@@ -216,18 +216,24 @@ class PersonaCard {
         case 'examples':
           break;
         default:
-          final existing = scalars[field];
-          scalars[field] =
-              (existing == null || existing.isEmpty) ? value : '$existing $value';
+          // 同键多次出现取**最后一次**：后写的定义覆盖先写的（register 同
+          // 口径）。拼接会把两段语义缝成一句不通的话（CCV2 导入里 persona
+          // 的「情境：…」行原样进补充后，scenario 的「情境：…」键行会跟它
+          // 并存——场景必须是后者，见 PersonasController.importCcv2 的映射表）。
+          scalars[field] = value;
       }
     }
 
     // A recognised *key* is what makes this a card. Example lines alone are
     // not enough, or a free-form note that happens to contain "我：..." would
-    // silently change shape.
+    // silently change shape. 示例行不算结构化，但**照实带上**：raw 原样返回
+    // 的承诺不受影响（promptText 对非结构化卡逐字返回），而开场白-only 的
+    // 条目（如 CCV2 导入只有 first_mes）也能从 [examples] 读回自己的示例。
     final structured =
         scalars.isNotEmpty || boundaries.isNotEmpty || avoid.isNotEmpty;
-    if (!structured) return PersonaCard(raw: text);
+    if (!structured) {
+      return PersonaCard(raw: text, examples: examples, extra: extra);
+    }
 
     return PersonaCard(
       raw: text,

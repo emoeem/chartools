@@ -21,7 +21,7 @@ void main() {
     expect(a, isNot(b));
   });
 
-  test('十四个分量逐个变异，键都要变', () {
+  test('十五个分量逐个变异，键都要变', () {
     // params 捆绑包按子字段拆三份变异（与 Kotlin 参考逐字一致）。
     final pLang = 'en|standard|0.8|0.0|0.0|false|review-model';
     final pTemp = 'follow|standard|0.9|0.0|0.0|false|review-model';
@@ -41,9 +41,11 @@ void main() {
       'params-语言': base.copyWith(params: pLang),
       'params-温度': base.copyWith(params: pTemp),
       'params-复查': base.copyWith(params: pReview),
+      // fix(#11 P0-N)：场景 id 进键——场景变了缓存必须作废（第 15 个分量）。
+      'scenarioId': base.copyWith(scenarioId: 'support_agent'),
     };
     // 分量数写死：以后往 reply 里加了新参数却忘了进键，这条会红。
-    expect(mutated.length, 14);
+    expect(mutated.length, 15);
     mutated.forEach((name, input) {
       expect(base.key(), isNot(input.key()), reason: '分量 [$name] 没进键');
     });
@@ -83,6 +85,35 @@ void main() {
     expect(
       const _In(avoid: ['a\u001fb']).key(),
       isNot(const _In(avoid: ['a', 'b']).key()),
+    );
+  });
+
+  test('场景变了键必须变（fix(#11 P0-N)：scenarioId 变 → 键变）', () {
+    // 场景附加段进起草提示词：用户把「客服坐席」换成「外语陪练」，缓存里
+    // 旧场景的候选必须作废，不能同键命中。
+    final support = const _In(scenarioId: 'support_agent').key();
+    final learning = const _In(scenarioId: 'language_learning').key();
+    expect(support, isNot(learning));
+
+    // 同一个场景两次构造，键逐字相同（缓存命中的前提）。
+    expect(
+      const _In(scenarioId: 'support_agent').key(),
+      const _In(scenarioId: 'support_agent').key(),
+    );
+
+    // 空串（未选场景）与任一场景互不相同；默认场景 chat_copilot 的附加段是
+    // 空串、提示词与无场景一致，但它与空串是两个键——命中哪个都不串味。
+    expect(const _In().key(), isNot(support));
+    expect(
+      const _In(scenarioId: '').key(),
+      isNot(const _In(scenarioId: 'chat_copilot').key()),
+    );
+
+    // 键尾的空分量不会把「无场景」和「场景正文撞出同一串」：分隔符隔开，
+    // 'support_agent' 不可能与前面的分量拼接巧合出空串键。
+    expect(
+      const _In(ctx: 'C\u001e').key(),
+      isNot(const _In().key()),
     );
   });
 
@@ -211,6 +242,7 @@ class _In {
     this.judgment = 'J',
     this.intensity = 'AUTO',
     this.params = 'follow|standard|0.8|0.0|0.0|false|review-model',
+    this.scenarioId = '',
   });
 
   final String title;
@@ -226,6 +258,9 @@ class _In {
   final String intensity;
   final String params;
 
+  /// fix(#11 P0-N)：场景 id 分量（默认空串 = 无场景，与接入前同构）。
+  final String scenarioId;
+
   String key() => ReplyCacheKey.reply(
         title: title,
         signature: sig,
@@ -239,6 +274,7 @@ class _In {
         judgmentKey: judgment,
         intensity: intensity,
         params: params,
+        scenarioId: scenarioId,
       );
 
   _In copyWith({
@@ -254,6 +290,7 @@ class _In {
     String? judgment,
     String? intensity,
     String? params,
+    String? scenarioId,
   }) =>
       _In(
         title: title ?? this.title,
@@ -268,5 +305,6 @@ class _In {
         judgment: judgment ?? this.judgment,
         intensity: intensity ?? this.intensity,
         params: params ?? this.params,
+        scenarioId: scenarioId ?? this.scenarioId,
       );
 }

@@ -99,6 +99,9 @@ Future<void> main() async {
         builder: (_) => DesktopAssistantPage(
           config: store.config,
           displayMode: store.displayMode,
+          // fix(#11 P0-N) 场景接线：引导页「选场景」写的那份 notifier，桌面流
+          // 与采集流共用同一份值、同一个解析点（CaptureSession.resolveScenario）。
+          scenarioId: store.scenarioId,
           contactStore: contactStore,
           preferences: preferences,
           // C9 接线：统计与设置页/采集流是同一份实例（usage_stats.dart 契约）。
@@ -162,6 +165,11 @@ class ChartoolsApp extends StatelessWidget {
       // 页面推入栈顶，拿不到 BuildContext，只能经 navigatorKey（见
       // hotkey_controller.dart 的 _handleActivated）。非 Windows 下它闲置。
       navigatorKey: HotkeyController.instance.navigatorKey,
+      // fix(#11 P0-3)：采集页 RouteAware 的路由观察者接线——RouteAware 的
+      // didPopNext（应用内路由 pop 回来触发采集页刷新）依赖观察者被
+      // navigatorObservers 引用才会派发；实例由 CapturePage 静态持有（进程
+      // 一份，main.dart 已 import capture_page.dart）。
+      navigatorObservers: [CapturePage.routeObserver],
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
       ),
@@ -226,6 +234,11 @@ class ScenarioListPage extends StatelessWidget {
                     // 展示模式被永久钉在 primary）。悬浮窗同构模式由
                     // CaptureSession 从同一份 notifier 在推候选时透传。
                     displayMode: store.displayMode,
+                    // fix(#11 P0-N) 场景接线（独立复核补接）：采集流此前漏接
+                    // scenarioId——引导页选的场景只对桌面流生效，Android 采集
+                    // 流每轮 resolveScenario 都拿到 null。现在与热键路由/粘贴
+                    // 分析入口同源（store.scenarioId），同一份值、同一个解析点。
+                    scenarioId: store.scenarioId,
                     // 采集应用黑名单（p0-plan ⑦）：与设置页同一份清单。
                     blockedPackages: store.blockedPackages,
                     // #6 联系人档案与 G7 结构化偏好（可查可改可删）+ 落盘回调。
@@ -255,6 +268,8 @@ class ScenarioListPage extends StatelessWidget {
                     config: store.config,
                     // B8 候选展示模式：与设置页共享同一份 notifier（此前漏接）。
                     displayMode: store.displayMode,
+                    // fix(#11 P0-N) 场景接线：与热键路由那份同源（store.scenarioId）。
+                    scenarioId: store.scenarioId,
                     // #6 联系人档案与 G7 结构化偏好（可查可改可删）+ 落盘回调。
                     contactStore: contactStore,
                     preferences: preferences,

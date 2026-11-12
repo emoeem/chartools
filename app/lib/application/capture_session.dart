@@ -151,6 +151,7 @@ class CaptureSession {
     required this.relationship,
     required this.overlayEnabled,
     this.displayMode,
+    this.scenarioId,
     this.writeCheckpoint,
     this.stats,
     this.preferences,
@@ -189,6 +190,29 @@ class CaptureSession {
   /// 悬浮窗时透传给原生侧——'primary' 主推第一张大卡、备选折叠，null/'all'
   /// 整列平铺（旧行为）。切换后下一批候选生效。
   final ValueNotifier<String>? displayMode;
+
+  /// 场景选择（fix(#11 P0-N)，可选注入，[SettingsStore.scenarioId] 同一份）：
+  /// 引导页「选场景」写入、[SettingsStore.load] 从存档恢复的那份 notifier，
+  /// 这里只读。每轮起草时经 [resolveScenario] 现查 [Scenarios.byId] 并把模板
+  /// 传给 JevClient.draftAndRank——场景换掉后下一轮立即生效（与 extraContext/
+  /// styleLearning 的「每轮现读」同一节奏），不注册监听（流水线没有重绘诉求）。
+  ///
+  /// null = 未注入（测试/旧构造方）：所有轮次都不带场景，请求与缓存键和接入
+  /// 前逐字节同构（键在 core 侧多一个空串分量，提示词一个字节都不变）。
+  /// 注入了但值是空串或未知 id 时同样落到「无场景」（Scenarios.byId 返回
+  /// null 的约定，settings_store.dart scenarioId 字段注释）。
+  final ValueNotifier<String>? scenarioId;
+
+  /// 场景 id → 场景模板的唯一解析点（fix(#11 P0-N)）。采集会话每轮用它把
+  /// [scenarioId] notifier 的当前值换成 [ScenarioTemplate] 传给
+  /// JevClient.draftAndRank；桌面流（desktop_assistant_page）与测试也走这里，
+  /// 保证两端「空串/未知 id → 无场景」的回退口径一致。
+  ///
+  /// notifier 为 null（未注入）或值查不到内置场景（空串、已下线的 id）时返回
+  /// null——null 场景进 JevClient 后提示词逐字节不变（chat_copilot 的附加段
+  /// 是空串，选了默认场景与没选在提示词上等价）。
+  static ScenarioTemplate? resolveScenario(ValueNotifier<String>? scenarioId) =>
+      scenarioId == null ? null : Scenarios.byId(scenarioId.value);
 
   /// 当前激活联系人档案（UI 经 [applyContact] 喂进来）。null = 没有激活，
   /// 每一处组 ctx / 算关系 / 算预览的路径都回到改前的原样（逐字节一致）。
@@ -738,11 +762,14 @@ class CaptureSession {
       var ranked = const <RankedReply>[];
       if (analysis.error == null) {
         // 新快照一律从头起草（avoid 只在「换一组」的当次请求里生效）。
+        // fix(#11 P0-N)：场景随 notifier 当前值进起草路（判断路不消费场景，
+        // judge 调用不动）——resolveScenario 为 null 时与接入前逐字节一致。
         ranked = await jev.draftAndRank(
           snapshot,
           relationshipText,
           judgment: analysis,
           ctx: ctx,
+          scenario: resolveScenario(scenarioId),
         );
         if (round != _round) return;
         // F1：best_action 对应的策略候选提前（仅显示顺序，概率不变）。
@@ -814,6 +841,9 @@ class CaptureSession {
         judgment: judgment,
         avoid: avoid,
         ctx: ctx,
+        // fix(#11 P0-N)：「换一组」同样按当前场景起草——用户改了场景再点
+        // 换一组，缓存键换掉，不会命中旧场景的候选。
+        scenario: resolveScenario(scenarioId),
       );
       if (round != _round) return;
       final ordered = applyStrategyOrder(ranked, judgment);

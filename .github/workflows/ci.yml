@@ -44,6 +44,25 @@ jobs:
         working-directory: app
         run: flutter build apk --debug
 
+      # fix(#11 P0-2) 回归防线：release 合并 APK 必须含 INTERNET。debug 清单
+      # （app/android/app/src/debug）自带 INTERNET，查 debug 包永远绿、挡不住
+      # 主清单缺失——主清单漏权限的现场就是 release。release 无上传密钥时回退
+      # debug 签名（见 app/android/app/build.gradle.kts），干净机器可构建；
+      # --target-platform android-arm64 只出单 ABI，清单与 ABI 无关，为省 CI 时间。
+      - name: Build Android APK (release, for manifest check)
+        working-directory: app
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Check merged APK declares INTERNET (fix #11 P0-2)
+        working-directory: app
+        run: |
+          # build-tools 35.0.0 与 app/android/app/build.gradle.kts 的
+          # buildToolsVersion 一致：上面的构建成功就说明它已就位。
+          AAPT2="$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk
+          "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk \
+            | grep -q "android.permission.INTERNET"
+
   windows:
     runs-on: windows-latest
     steps:

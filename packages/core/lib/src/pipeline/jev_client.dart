@@ -4,6 +4,7 @@ import '../jev_client/http_scope.dart';
 import '../models/models.dart';
 import '../persona_kb/kb_models.dart';
 import '../persona_kb/style_source.dart';
+import '../scenarios/scenario.dart';
 import 'ai_flavor_linter.dart';
 import 'intensity.dart';
 import 'judge_client.dart';
@@ -140,6 +141,16 @@ class JevClient {
   /// 逐条检测，命中特征 ≥ [AiFlavorLinter.rewriteThreshold] 的候选自动走润色
   /// 路由重写（见 [_applyFlavorLint]）。经参数传入而不是读配置——
   /// 配置字段归 app 层与 JevConfig 的所有方接线，core 不反依赖 app。
+  ///
+  /// [scenario] 是场景模板（fix(#11 P0-N)）：非默认场景时附加段进起草双提示词
+  /// （ReplyPrompt 的既有注入点），并作为新分量进回复缓存键——场景变了缓存
+  /// 必须作废（ReplyCacheKey.reply 的 `scenarioId` 分量）。null = 无场景，
+  /// 请求与缓存键都和接入前同构（键多一个空分量，内容为空串）。
+  ///
+  /// 判断路由刻意不收场景参数：[ScenarioTemplate] 只声明起草侧的两段附加段
+  /// （systemAddendum / userAddendum），判断提示词（JevQuestions）没有场景
+  /// 钩子——收了也是死参数，还会误导调用方以为判断会随场景变化。判断缓存
+  /// 键因此也不含场景。排序轮（[_judgeClient.rank]）同理不消费场景。
   Future<List<RankedReply>> draftAndRank(
     ChatSnapshot snapshot,
     String relationship, {
@@ -149,11 +160,12 @@ class JevClient {
     Analysis? judgment,
     Intensity intensity = Intensity.auto,
     bool aiFlavorLintEnabled = true,
+    ScenarioTemplate? scenario,
     HttpScope? scope,
   }) async {
     final key = _cacheKey(
         snapshot, relationship, ctx, count, avoid, judgment, intensity,
-        aiFlavorLintEnabled: aiFlavorLintEnabled);
+        aiFlavorLintEnabled: aiFlavorLintEnabled, scenario: scenario);
     final hit = _cached(key);
     if (hit != null) {
       _stats?.recordCacheHit(UsageRoute.reply);
@@ -171,6 +183,7 @@ class JevClient {
         judgment: judgment,
         style: _config.style,
         intensity: intensity,
+        scenario: scenario,
         scope: scope,
       ),
     );
@@ -222,6 +235,9 @@ class JevClient {
   /// [judgment] 是这一轮已经到手的判断结果：首轮起草现在等判断（见采集层的
   /// DraftTrigger），带着它写，模型才知道这一场是吵架、玩笑还是角色扮演；
   /// 判断路由超时才盲写（null）。
+  ///
+  /// [scenario] 同 [draftAndRank]（fix(#11 P0-N)）：本方法不走缓存（调用方
+  /// 有「换一组」式的显式重跑语义），场景只透传给起草请求。
   Future<List<RankedReply>> draftOnly(
     ChatSnapshot snapshot,
     String relationship, {
@@ -230,6 +246,7 @@ class JevClient {
     List<String> avoid = const [],
     Analysis? judgment,
     Intensity intensity = Intensity.auto,
+    ScenarioTemplate? scenario,
     HttpScope? scope,
   }) =>
       _tracked(
@@ -243,6 +260,7 @@ class JevClient {
           judgment: judgment,
           style: _config.style,
           intensity: intensity,
+          scenario: scenario,
           scope: scope,
         ),
       );
@@ -484,6 +502,9 @@ class JevClient {
   /// [draftOnly] as the fallback when a server does not speak SSE.
   ///
   /// [judgment] 同 [draftOnly]：判断先行时的流式轮也带着判断写。
+  ///
+  /// [scenario] 同 [draftAndRank]（fix(#11 P0-N)）：流式与缓冲共用
+  /// ReplyClient._draftAsk，场景附加段随双提示词一起出门。
   Future<List<RankedReply>> draftStream(
     ChatSnapshot snapshot,
     String relationship, {
@@ -492,6 +513,7 @@ class JevClient {
     List<String> avoid = const [],
     Analysis? judgment,
     Intensity intensity = Intensity.auto,
+    ScenarioTemplate? scenario,
     required void Function(String) onVisible,
     HttpScope? scope,
   }) async {
@@ -506,6 +528,7 @@ class JevClient {
         judgment: judgment,
         style: _config.style,
         intensity: intensity,
+        scenario: scenario,
         onVisible: onVisible,
         scope: scope,
       ),
@@ -580,6 +603,7 @@ class JevClient {
     Analysis? judgment,
     Intensity intensity, {
     bool aiFlavorLintEnabled = true,
+    ScenarioTemplate? scenario,
   }) {
     // 键里的 style 必须是**真正进提示词**的那段：联系人写了专用人设时它压过
     // 全局 style，只锁全局 style 的话，改联系人专用人设会同键命中旧人设的
@@ -595,6 +619,9 @@ class JevClient {
     final judgmentKey = _judgmentKey(judgment);
     // A2 的 linter 开关也在 params 里：它决定终榜后要不要改写候选。漏了的话，
     // 关掉 linter 的一次调用会命中开着时缓存的改写结果（与 reviewEnabled 同理）。
+    // fix(#11 P0-N)：场景 id 作为独立分量进键（ReplyCacheKey.reply 的
+    // scenarioId）——场景附加段进起草提示词，场景变了缓存必须作废。无场景
+    // 时传空串，键内容除多一个空分量外与接入前一致。
     return ReplyCacheKey.reply(
       title: snapshot.title ?? '',
       signature: snapshot.signature(),
@@ -608,6 +635,7 @@ class JevClient {
       judgmentKey: judgmentKey,
       intensity: intensity.name,
       params: '${_replyParams()}|lint:$aiFlavorLintEnabled',
+      scenarioId: scenario?.id ?? '',
     );
   }
 

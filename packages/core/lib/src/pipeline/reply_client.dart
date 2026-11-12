@@ -12,6 +12,7 @@ import '../persona_kb/ledger.dart';
 import '../persona_kb/persona_card.dart';
 import '../persona_kb/style_source.dart';
 import '../safety/safety_gate.dart';
+import '../scenarios/scenario.dart';
 import 'intensity.dart';
 import 'reply_prompt.dart';
 import 'reply_review.dart';
@@ -38,6 +39,10 @@ class ReplyClient {
   /// @param style the user's own tone/persona note.
   /// @param scope when given, the request is registered there so an abandoned
   ///        round closes its socket instead of waiting out the read timeout.
+  /// @param scenario 场景模板（fix(#11 P0-N)）：非默认场景时
+  ///        [ScenarioTemplate.systemAddendum] / [userAddendum] 进起草双提示词
+  ///        （ReplyPrompt 的既有注入规则）。null = 无场景，提示词与没有场景
+  ///        功能时逐字节一致（兼容锁）。
   Future<List<RankedReply>> draft(
     ChatSnapshot snapshot,
     String relationship, {
@@ -47,10 +52,12 @@ class ReplyClient {
     Analysis? judgment,
     String style = '',
     Intensity intensity = Intensity.auto,
+    ScenarioTemplate? scenario,
     HttpScope? scope,
   }) async {
-    final ask = _draftAsk(
-        snapshot, relationship, ctx, count, avoid, judgment, style, intensity);
+    final ask = _draftAsk(snapshot, relationship, ctx, count, avoid, judgment,
+        style, intensity,
+        scenario: scenario);
     final content = await _chat(
       ask.system,
       ask.user,
@@ -70,6 +77,9 @@ class ReplyClient {
   ///
   /// No retry: a half-delivered stream that restarts would repeat itself. The
   /// caller falls back to [draft] when this throws.
+  ///
+  /// [scenario] 同 [draft]（fix(#11 P0-N)）：流式与缓冲两条路共用 [_draftAsk]，
+  /// 场景附加段不可能只长在一条路上。
   Future<List<RankedReply>> draftStream(
     ChatSnapshot snapshot,
     String relationship, {
@@ -79,11 +89,13 @@ class ReplyClient {
     Analysis? judgment,
     String style = '',
     Intensity intensity = Intensity.auto,
+    ScenarioTemplate? scenario,
     required void Function(String) onVisible,
     HttpScope? scope,
   }) async {
-    final ask = _draftAsk(
-        snapshot, relationship, ctx, count, avoid, judgment, style, intensity);
+    final ask = _draftAsk(snapshot, relationship, ctx, count, avoid, judgment,
+        style, intensity,
+        scenario: scenario);
     final url = _config.replyEndpoint();
     final raw = StringBuffer();
     var lastShown = '';
@@ -117,6 +129,9 @@ class ReplyClient {
   }
 
   /// Draft candidates without waiting for Jev judgment.
+  ///
+  /// [scenario] 同 [draft]（fix(#11 P0-N)）：本方法只是 [draft] 的未排序包装，
+  /// 场景参数必须原样落到起草请求上，否则经这里起草的轮次会静默丢场景。
   Future<List<RankedReply>> draftOnly(
     ChatSnapshot snapshot,
     String relationship, {
@@ -126,6 +141,7 @@ class ReplyClient {
     Analysis? judgment,
     String style = '',
     Intensity intensity = Intensity.auto,
+    ScenarioTemplate? scenario,
     HttpScope? scope,
   }) async {
     final out = await draft(
@@ -137,6 +153,7 @@ class ReplyClient {
       judgment: judgment,
       style: style,
       intensity: intensity,
+      scenario: scenario,
       scope: scope,
     );
     return [
@@ -380,6 +397,10 @@ class ReplyClient {
           frequencyPenalty: frequencyPenalty, presencePenalty: presencePenalty);
 
   /// The prompt pair a draft sends, built once and used by both draft paths.
+  ///
+  /// [scenario] 是场景模板（fix(#11 P0-N)）：null = 无场景，两半提示词与没有
+  /// 场景功能之前逐字节一致（ReplyPrompt 的兼容锁规则：null 或 chat_copilot
+  /// 都不加附加段）。流式与缓冲共用本方法，场景注入只此一处。
   _Ask _draftAsk(
     ChatSnapshot snapshot,
     String relationship,
@@ -388,8 +409,9 @@ class ReplyClient {
     List<String> avoid,
     Analysis? judgment,
     String style,
-    Intensity intensity,
-  ) {
+    Intensity intensity, {
+    ScenarioTemplate? scenario,
+  }) {
     final n = count.clamp(1, 3);
     final convo = convoLines(snapshot.messages);
     // The persona note may be a key/value card (PersonaCard). Free text parses to
@@ -424,6 +446,9 @@ class ReplyClient {
       avoid,
       n,
       intensity: intensity,
+      // fix(#11 P0-N)：场景附加段走 ReplyPrompt 的既有注入点（#4 留好的接口）。
+      // null（未选/未知 id）时输出与接入前逐字节一致。
+      scenario: scenario,
     );
     // 档位解析一次、两处共用：system 的策略契约和 user 的档位块必须拿到
     // 同一个结果，否则会出现「必须推进」和「不要推进」同场。
@@ -435,6 +460,8 @@ class ReplyClient {
         _config.replyLength,
         card,
         intensity: resolvedIntensity,
+        // fix(#11 P0-N)：system 侧的场景附加段与 user 侧同源（同一个模板）。
+        scenario: scenario,
         // A1 正向示范开关（p0-plan A1）从配置透传：默认 false 时输出与该
         // 参数存在之前逐字节一致（A1 兼容锁测试钉住的就是这条默认路径）。
         usePositiveExamples: _config.usePositiveExamples,

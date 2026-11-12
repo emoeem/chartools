@@ -27,9 +27,23 @@ export 'src/jev_client/judge_retry.dart';
 export 'src/jev_client/routes.dart';
 export 'src/jev_client/stream_text.dart';
 export 'src/models/models.dart';
+// 文档导入两件套按 barrel 头部规则挂载（独立复核补挂：导入丢弃计数要让
+// app 预览层能如实告知「丢了什么」，见 DocImportOutcome）。
+export 'src/persona_kb/doc_import/doc_importer.dart';
+export 'src/persona_kb/doc_import/doc_parsers.dart';
 export 'src/persona_kb/domain_brief.dart';
+// #6/#12 同一先例（最小越界，已在交付 notes 声明）：专家库三件套按 barrel
+// 头部规则「新增文件必须挂进这里」挂载，否则 app 层看不到专家目录/资产包/套用。
+export 'src/persona_kb/expert_apply.dart';
+export 'src/persona_kb/expert_catalog.dart';
+export 'src/persona_kb/expert_pack.dart';
 export 'src/persona_kb/kb_models.dart';
+// #12（W4 知识库页写手的最小越界，已在交付 notes 声明）：W1 新增的 KbStore
+// 必须挂进 barrel，否则 app 层看不到 —— 与下方 #6 的先例同一处理。
+export 'src/persona_kb/kb_store.dart';
 export 'src/persona_kb/ledger.dart';
+// #12（W4 最小越界）：W1 新增的 LexicalSearch 挂 barrel，理由同上。
+export 'src/persona_kb/lexical_search.dart';
 export 'src/persona_kb/persona_card.dart';
 // #6（交互写手的最小越界，已在交付 notes 声明）：C 的新文件按 barrel 头部
 // 规则「新增文件必须挂进这里」挂载，否则 app 层看不到 PreferenceProfile。

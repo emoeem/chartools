@@ -85,4 +85,54 @@ void main() {
       expect(reply, isNull);
     });
   });
+
+  // fix(#11 P0-1)：服务未连接时 openAccessibilitySettings / isRunning 的兜底契约。
+  // 原生侧 CaptureAndroidPlugin.onAttachedToEngine 在 capture_android/control 上
+  // 挂插件级兜底 handler：openAccessibilitySettings（直接跳系统无障碍设置页）、
+  // isRunning（回 false）、configure（缓存进 ServiceConfig）三方法服务未连接也
+  // 有应答，其余 notImplemented；服务连接后 attachEngineChannels 的服务级
+  // handler（handleControl）后注册覆盖兜底，整体接管。原生侧行为 JVM 单测够
+  // 不着（要真引擎），Dart 侧能钳的是「无 handler → 有兜底」的转变两端：
+  // 修复前整条通道无 handler = MissingPluginException（本测试先在真 messenger
+  // 上原样复现这个失败模式，钉住兜底存在的理由），兜底应答下两调用必须正常
+  // 完成、isRunning 得 false——UI 才不再静默吞。
+  //
+  // binding 在 test 体内初始化（非加载期）：本文件头注释记录过加载期初始化
+  // binding 曾随 runner 套件派生偶发「Connection closed before test suite
+  // loaded」，其余测试保持纯 Dart 不动。
+  test('服务未连接：openAccessibilitySettings/isRunning 由插件级兜底应答（fix #11 P0-1）',
+      () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final capture = CaptureAndroid();
+
+    // 无 handler（修复前的失败模式）：invokeMethod 打到真 messenger，测试环境
+    // 没有任何插件 → MissingPluginException。兜底 handler 的存在正是为了消除它。
+    await expectLater(
+        capture.isRunning(), throwsA(isA<MissingPluginException>()));
+    await expectLater(capture.openAccessibilitySettings(),
+        throwsA(isA<MissingPluginException>()));
+
+    // 有插件级兜底（mock 按原生契约模拟）：isRunning → false；
+    // openAccessibilitySettings → true（已跳系统页，门面丢弃返回值）。
+    const control = MethodChannel('capture_android/control');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(control, (call) async {
+      switch (call.method) {
+        case 'isRunning':
+          return false;
+        case 'openAccessibilitySettings':
+          return true;
+        default:
+          // 兜底只接三方法，其余 notImplemented（原生侧 result.notImplemented）。
+          // PlatformException 构造非 const，不能加 const 前缀。
+          throw PlatformException(code: 'notImplemented');
+      }
+    });
+    addTearDown(() => TestDefaultBinaryMessengerBinding
+        .instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(control, null));
+
+    expect(await capture.isRunning(), isFalse);
+    await capture.openAccessibilitySettings(); // 完成即通过，不再 MissingPluginException
+  });
 }

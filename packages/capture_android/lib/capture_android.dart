@@ -184,6 +184,12 @@ class CaptureAndroid {
   /// 后 FLAG_SECURE 不再静默丢失。载荷契约：`{packages, ocrFallback, blocked,
   /// secure}`；`secure` 键在旧调用方/旧载荷缺省时按 false 处理（Kotlin 侧缺省
   /// 语义，向后兼容）。configure 是幂等重放：同一载荷重复下发无副作用。
+  ///
+  /// fix(#11 P0-1)：服务未连接时本方法不再抛 MissingPluginException——control
+  /// 通道上有插件级兜底 handler（CaptureAndroidPlugin.onAttachedToEngine 注册），
+  /// 把载荷缓存进 CaptureService.ServiceConfig 静态字段，服务连接时自动生效
+  /// （secure 属 overlay 实例态不缓存，由服务连接后的 [onConfigureReplay] 重放
+  /// 补齐）；服务连接后由服务级 handler（CaptureService.handleControl）接管。
   Future<void> configure({
     required Set<String> packages,
     required bool ocrFallback,
@@ -198,10 +204,19 @@ class CaptureAndroid {
       });
 
   /// 采集服务是否已连接并可用。
+  ///
+  /// fix(#11 P0-1)：服务未连接时由 control 通道的插件级兜底 handler 应答
+  /// false（服务未连接 = 没在跑，与 Kotlin 侧 CapturePresence.live 语义一致），
+  /// 不再抛 MissingPluginException；服务连接后由服务级 handler 接管（回
+  /// CapturePresence.live）。
   Future<bool> isRunning() async =>
       await _control.invokeMethod<bool>('isRunning') ?? false;
 
   /// 跳转系统的无障碍设置页（用户在那里手动启用采集服务）。
+  ///
+  /// fix(#11 P0-1)：服务未连接时由 control 通道的插件级兜底 handler 直接
+  /// startActivity 跳系统页（不依赖服务实例），不再抛 MissingPluginException
+  /// 被 UI 静默吞；服务连接后由服务级 handler 接管（行为相同）。
   Future<void> openAccessibilitySettings() =>
       _control.invokeMethod<void>('openAccessibilitySettings');
 
@@ -214,6 +229,24 @@ class CaptureAndroid {
   /// 包名直达开关）。
   Future<void> openOverlaySettings() =>
       _plugin.invokeMethod<void>('openOverlaySettings');
+
+  /// fix(#11 P0-3)：通知权限（POST_NOTIFICATIONS）当前是否已开启。Android 13+
+  /// 是运行时授权：未授予时保活前台通知（KeepAliveService 的「唤出助手/重新
+  /// 生成」动作按钮）被系统整条隐藏——服务照跑，通知不可见；13 以下无运行时
+  /// 授权，恒为 true（原生 areNotificationsEnabled 的系统语义，原生侧不按
+  /// SDK 分叉）。通道不可用（Windows 调试 / 引擎未挂）时抛
+  /// MissingPluginException，由调用方兜底。
+  Future<bool> canRequestNotifications() async =>
+      await _plugin.invokeMethod<bool>('canRequestNotifications') ?? false;
+
+  /// fix(#11 P0-3)：请求开启通知权限。返回值 = 调用时刻通知是否已开启；未
+  /// 开启时原生侧跳系统「应用通知设置」页（ACTION_APP_NOTIFICATION_SETTINGS
+  /// ——不弹 13+ 运行时对话框：用户勾过「不再询问」后对话框静默不弹，设置
+  /// 页是唯一稳妥入口，与 [openOverlaySettings] 的引导模式一致）。授权回来
+  /// 后由采集页的 lifecycle resumed 刷新经 [canRequestNotifications] 重查。
+  /// 通道不可用时抛 MissingPluginException，由调用方兜底。
+  Future<bool> requestNotifications() async =>
+      await _plugin.invokeMethod<bool>('requestNotifications') ?? false;
 
   /// 弹出/更新悬浮窗候选（服务已连接才有效；窗口加不出——无悬浮窗权限——
   /// 返回 false）。[list] 的下标即候选序号，[OverlayAction.index] 按它回传。
@@ -258,9 +291,10 @@ class CaptureAndroid {
   /// 默认关），Dart 侧不缓存——重启后的恢复靠 [configure] 载荷里的 `secure`
   /// 随服务连接重放（fix(#9 K-2)），当前实际状态用 [isSecure] 回读。
   ///
-  /// control 通道由采集服务注册：服务未连接时这里抛 MissingPluginException
-  /// （通道在而分支未接时是 PlatformException(notImplemented)），由调用方
-  /// 兜底——采集页的开关保持原位并提示，不静默。
+  /// control 通道的服务级分支只在服务连接后注册。fix(#11 P0-1) 后服务未连接
+  /// 时插件级兜底接住但本方法不在三方法兜底集内 → notImplemented（抛
+  /// PlatformException，不再是修复前的 MissingPluginException——调用方按
+  /// 异常兜底，两种类型走同一条提示路径，行为不变）。
   Future<void> setSecure(bool secure) =>
       _control.invokeMethod<void>(setSecureMethod, secure);
 
@@ -274,8 +308,9 @@ class CaptureAndroid {
   /// Kotlin 侧 CaptureService.IS_SECURE_METHOD 同名同值，改任何一侧必须两侧
   /// 同步（Kotlin SetSecureContractTest 互钳）。
   ///
-  /// 与 [setSecure] 同一条 control 通道：服务未连接时抛 MissingPluginException，
-  /// 由调用方兜底。
+  /// 与 [setSecure] 同一条 control 通道：fix(#11 P0-1) 后服务未连接时经插件级
+  /// 兜底得 PlatformException(notImplemented)（不再是 MissingPluginException，
+  /// 调用方按异常兜底、行为不变）。
   Future<bool> isSecure() async =>
       await _control.invokeMethod<bool>(isSecureMethod) ?? false;
 
@@ -284,7 +319,9 @@ class CaptureAndroid {
   Future<bool> refill(String text) async =>
       await _control.invokeMethod<bool>('refill', {'text': text}) ?? false;
 
-  /// 强制走一次整屏 OCR，返回快照；服务未连接时抛 MissingPluginException。
+  /// 强制走一次整屏 OCR，返回快照；服务未连接时经插件级兜底（fix(#11 P0-1)，
+  /// 本方法不在三方法兜底集内）得 PlatformException(notImplemented)，由调用方
+  /// 兜底。
   Future<ChatSnapshot?> manualOcr() async =>
       _snapshotFromEvent(await _control.invokeMethod<Object?>('manualOcr'));
 

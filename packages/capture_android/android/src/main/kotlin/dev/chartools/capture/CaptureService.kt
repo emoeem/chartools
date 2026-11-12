@@ -17,6 +17,7 @@ import dev.chartools.capture.ocr.MlKitOcr
 import dev.chartools.capture.ocr.OcrGrouping
 import dev.chartools.capture.ocr.ScreenCapture
 import dev.chartools.capture.overlay.OverlayController
+import dev.chartools.capture_android.CaptureAndroidPlugin
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -57,6 +58,33 @@ class CaptureService : AccessibilityService() {
          *  manualOcr / showSuggestions / hideSuggestions / collapse / getCapabilities /
          *  setSecure / isSecure，以及服务 → Dart 方向的 [REQUEST_CONFIGURE_METHOD]。 */
         const val CONTROL_CHANNEL = "capture_android/control"
+
+        /**
+         * fix(#11 P0-1)：control 通道上「服务无关」的三个方法名——插件级兜底
+         * handler（CaptureAndroidPlugin.onAttachedToEngine 注册）接住的正是它们。
+         * 背景：control 通道只由 CaptureService（attachEngineChannels）注册，
+         * 首次运行（服务未启）时整条通道不存在，Dart 调 openAccessibilitySettings /
+         * isRunning 得 MissingPluginException 且被 UI 吞掉。兜底的三方法契约：
+         * - [CONFIGURE_METHOD]：载荷经 [applyConfigureStatics] 落 ServiceConfig
+         *   静态字段，服务连接时自动生效（#7 configure 重放的前置）；
+         * - [IS_RUNNING_METHOD]：回 false（服务未连接 = 没在跑，与
+         *   [CapturePresence.live] 一致）；
+         * - [OPEN_ACCESSIBILITY_SETTINGS_METHOD]：直接 startActivity 跳系统
+         *   无障碍设置页，不依赖服务实例。
+         * 其余方法在兜底一律 notImplemented——服务级 handler（handleControl，
+         * attachEngineChannels 注册）连接后整体接管：Flutter 引擎对同一通道名
+         * 后注册的 handler 覆盖先注册的，插件 attach 时兜底先挂、服务级后挂
+         * （或服务连接时 attachEngineChannels 后挂），优先级即注册顺序。
+         * fix(独立复核 2)：接管是双向的——服务销毁（onDestroy）时
+         * detachEngineChannels 摘掉服务级 handler，并由
+         * CaptureAndroidPlugin.reattachControlFallback 把兜底重新挂回
+         * （flutterMessenger 判空），「服务不在 = 兜底应答」对 连接→死亡 方向
+         * 同样成立；引擎先于服务退场时 flutterMessenger 已清空，无事可做。
+         * 常量供两侧同源引用，防止字面量漂移。
+         */
+        const val CONFIGURE_METHOD = "configure"
+        const val IS_RUNNING_METHOD = "isRunning"
+        const val OPEN_ACCESSIBILITY_SETTINGS_METHOD = "openAccessibilitySettings"
 
         /**
          * fix(kimi-review #2)：服务 → Dart 的配置重放请求（无参数，fire-and-forget）。
@@ -220,6 +248,27 @@ class CaptureService : AccessibilityService() {
         internal fun overlaySecureOf(arguments: Any?): Boolean =
             (arguments as? Map<*, *>)?.get("secure") as? Boolean ?: false
 
+        /**
+         * fix(#11 P0-1)：configure 载荷 → [ServiceConfig] 静态字段的落盘，插件级
+         * 兜底 handler 在服务未连接时用它接住 Dart 的 configure（见
+         * [CONFIGURE_METHOD] 注释）。解析语义与 handleControl 的 configure 分支
+         * **逐行一致**（改任何一侧必须同步）：packages 恒替换、blocked 键缺省
+         * 保留当前值不重置、ocrFallback 缺省 false。落的是 companion 静态——
+         * onAccessibilityEvent 的白名单门（`eventPkg !in configuredPackages`）与
+         * maybeCapture 的 ocrFallbackEnabled 都直接读静态，服务连接后无需再等
+         * Dart 重放就已生效（重放幂等，照旧覆盖）。secure 键**不**在这里落：
+         * 它属于 overlay 的实例态（窗口 FLAG_SECURE），兜底路径没有服务实例，
+         * 由服务连接后的 requestConfigure → Dart 重放（#7）补齐。
+         */
+        internal fun applyConfigureStatics(call: MethodCall) {
+            configuredPackages = call.argument<List<*>>("packages")
+                ?.filterIsInstance<String>()?.toSet() ?: emptySet()
+            call.argument<List<*>>("blocked")?.let { blocked ->
+                blockedPackages = blocked.filterIsInstance<String>().toSet()
+            }
+            ocrFallbackEnabled = call.argument<Boolean>("ocrFallback") ?: false
+        }
+
         /** On an app whose adapter has been reading bubbles, an empty read must
          *  persist this long before the OCR fallback may take a screenshot: a
          *  one-frame empty read (RecyclerView re-layout, IME animation) used to
@@ -281,23 +330,39 @@ class CaptureService : AccessibilityService() {
         handleControl(call, result)
     }
 
-    /** 引擎 attaching 后由插件回调注册/重注册通道（热重启会换 messenger）。 */
-    fun attachEngineChannels(messenger: BinaryMessenger) {
-        snapshotChannel?.setStreamHandler(null)
-        controlChannel?.setMethodCallHandler(null)
-        snapshotChannel = EventChannel(messenger, SNAPSHOT_CHANNEL)
-            .also { it.setStreamHandler(streamHandler) }
-        controlChannel = MethodChannel(messenger, CONTROL_CHANNEL)
-            .also {
-                it.setMethodCallHandler(controlHandler)
-                // fix(kimi-review #2)：这里是「服务已连接 + 引擎已挂接」两态同时
-                // 就绪的唯一汇聚点（onServiceConnected 里 messenger 已就绪时走到
-                // 这里；服务先连、引擎后到时由 CaptureAndroidPlugin 走到这里），
-                // 向 Dart 请求重放 configure。热重启换 messenger 后再请求一次，
-                // Dart 重放幂等。
-                requestConfigureOver(it)
-            }
-    }
+        /** 引擎 attaching 后由插件回调注册/重注册通道（热重启会换 messenger）。 */
+        fun attachEngineChannels(messenger: BinaryMessenger) {
+            snapshotChannel?.setStreamHandler(null)
+            controlChannel?.setMethodCallHandler(null)
+            snapshotChannel = EventChannel(messenger, SNAPSHOT_CHANNEL)
+                .also { it.setStreamHandler(streamHandler) }
+            controlChannel = MethodChannel(messenger, CONTROL_CHANNEL)
+                .also {
+                    it.setMethodCallHandler(controlHandler)
+                    // fix(kimi-review #2)：这里是「服务已连接 + 引擎已挂接」两态同时
+                    // 就绪的唯一汇聚点（onServiceConnected 里 messenger 已就绪时走到
+                    // 这里；服务先连、引擎后到时由 CaptureAndroidPlugin 走到这里），
+                    // 向 Dart 请求重放 configure。热重启换 messenger 后再请求一次，
+                    // Dart 重放幂等。
+                    requestConfigureOver(it)
+                }
+        }
+
+        /**
+         * fix(独立复核 2)：服务销毁时摘掉本实例注册的引擎通道 handler。
+         *
+         * attachEngineChannels 的服务级 handler 按「后注册覆盖先注册」顶掉了插件级
+         * 兜底；只摘不清（把 handler 置 null 而不重挂兜底）会让 Dart 得
+         * MissingPluginException 而不是兜底应答。摘除动作只清本实例的字段引用，
+         * 由调用方（onDestroy）随后经 CaptureAndroidPlugin.reattachControlFallback
+         * 把兜底挂回同一 messenger，「服务不在 = 兜底应答」双向成立。
+         */
+        fun detachEngineChannels() {
+            snapshotChannel?.setStreamHandler(null)
+            controlChannel?.setMethodCallHandler(null)
+            snapshotChannel = null
+            controlChannel = null
+        }
 
     // ---- 会话与去重状态（旧服务 CaptureConversationState 的采集子集） --------
 
@@ -948,7 +1013,9 @@ class CaptureService : AccessibilityService() {
 
     private fun handleControl(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "configure" -> {
+            // fix(#11 P0-1)：分支键换用常量（值不变），与插件级兜底 handler
+            // 同源——三方法的服务无关兜底契约见 [ServiceConfig.CONFIGURE_METHOD]。
+            CONFIGURE_METHOD -> {
                 val pkgs = call.argument<List<*>>("packages")
                     ?.filterIsInstance<String>()?.toSet() ?: emptySet()
                 ServiceConfig.configuredPackages = pkgs
@@ -975,8 +1042,8 @@ class CaptureService : AccessibilityService() {
                 )
                 result.success(true)
             }
-            "isRunning" -> result.success(CapturePresence.live)
-            "openAccessibilitySettings" -> {
+            IS_RUNNING_METHOD -> result.success(CapturePresence.live)
+            OPEN_ACCESSIBILITY_SETTINGS_METHOD -> {
                 val ok = runCatching {
                     startActivity(
                         Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -1147,6 +1214,20 @@ class CaptureService : AccessibilityService() {
         destroyed = true
         CapturePresence.live = false
         instance = null
+        // fix(独立复核 2)：连接→死亡方向的兜底回归。服务销毁而不摘服务级
+        // handler 的话，control 通道上活跃的仍是已销毁实例的 controlHandler：
+        // isRunning 恰好读静态 CapturePresence.live 回 false，openAccessibilitySettings
+        // 却走已销毁实例的 startActivity（runCatching 兜住回 false——本可用插件侧
+        // appContext 成功的跳转被报失败），refill/manualOcr/showSuggestions 等继续
+        // 打到销毁实例上（观察为失败而非崩溃）。摘掉服务级 handler 并把插件级
+        // 兜底重新挂回（flutterMessenger 判空：引擎已先 detach——关应用——时
+        // flutterMessenger 为 null，无引擎可应答，跳过），「服务不在 = 兜底应答」
+        // 的不变量对 连接→死亡 方向也成立。选 onDestroy 而不是 onUnbind：解绑后
+        // 实例可能仍在（onRebind 复用的窗口），那里换兜底会让仍活着的服务被
+        // notImplemented 应答；无障碍服务被系统关闭（用户在设置里关掉开关）走
+        // onUnbind → onDestroy，onDestroy 是「实例不复存在」的确定时刻。
+        detachEngineChannels()
+        flutterMessenger?.let { CaptureAndroidPlugin.reattachControlFallback(it) }
         eventSink = null
         // 服务可以单独被解绑停掉而进程不死：悬浮窗必须跟着服务一起下线。
         runCatching { overlay.hide() }

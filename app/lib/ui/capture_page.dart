@@ -1,5 +1,8 @@
 import 'package:capture_android/capture_android.dart';
 import 'package:chartools_core/chartools_core.dart';
+// MissingPluginException 只在 services 库导出（material/widgets 不转发它）；
+// fix(#11 P0-1 配套) 的错误分类要区分「插件未就绪」与一般错误。
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter/material.dart';
 
 import '../application/capture_session.dart';
@@ -17,6 +20,13 @@ import 'widgets/candidate_list.dart';
 ///
 /// 建议在页面上完整展示，同时（开关打开时）推到悬浮窗 OverlayController；
 /// 「回填」把候选填进聊天输入框，从不自动发送。
+///
+/// fix(#11 P0-3)：本页 State 同时挂了 WidgetsBindingObserver 与 RouteAware——
+/// 前者覆盖「跳系统设置授权后返回应用」（lifecycle paused→resumed），后者覆盖
+/// 「本页之上的应用内路由 pop 回来」。RouteAware 生效有一个前提：[routeObserver]
+/// 必须注册进 MaterialApp 的 navigatorObservers（main.dart 一行
+/// `navigatorObservers: [CapturePage.routeObserver]`）。未注册时订阅是惰性的
+/// （didPopNext 不会来，页面刷新退回 lifecycle 一条腿），不报错。
 class CapturePage extends StatefulWidget {
   const CapturePage({
     super.key,
@@ -24,6 +34,7 @@ class CapturePage extends StatefulWidget {
     required this.relationship,
     required this.overlayEnabled,
     this.displayMode,
+    this.scenarioId,
     this.blockedPackages,
     this.contactStore,
     this.preferences,
@@ -32,6 +43,14 @@ class CapturePage extends StatefulWidget {
     this.writeCheckpoint,
     this.sessionCheckpoint,
   });
+
+  /// fix(#11 P0-3)：本页 RouteAware 订阅的路由观察者（进程一份，静态持有）。
+  /// RouteObserver 必须由 MaterialApp 的 navigatorObservers 引用才会观测路由
+  /// 变化——观察者实例只能被接线方（main.dart）共享出来，本页自己够不着
+  /// MaterialApp。泛型取 `ModalRoute<void>`：MaterialPageRoute 与对话框/底部
+  /// 面板的 Route 都是其子类型，弹层关闭（didPopNext）也会触发刷新。
+  static final RouteObserver<ModalRoute<void>> routeObserver =
+      RouteObserver<ModalRoute<void>>();
 
   final ValueNotifier<JevConfig> config;
 
@@ -48,6 +67,14 @@ class CapturePage extends StatefulWidget {
   /// all = 全部平铺。可选注入——main.dart 传入 store.displayMode；未传时按
   /// 产品默认（displayModePrimary）渲染。
   final ValueNotifier<String>? displayMode;
+
+  /// 场景选择（fix(#11 P0-N) 独立复核补接）：与设置页/桌面流共享同一份
+  /// [SettingsStore.scenarioId]——引导页「选场景」写入的那份 notifier，本页
+  /// 只读。透传给 [CaptureSession.scenarioId]，每轮起草经
+  /// [CaptureSession.resolveScenario] 现查场景模板，客服坐席/外语陪练/社交
+  /// 辅助（无障碍）等非默认场景的附加段随采集流的起草请求出网。未传（旧
+  /// 构造方/工具页测试）时全部轮次无场景，请求与缓存键和接入前同构。
+  final ValueNotifier<String>? scenarioId;
 
   /// 采集应用黑名单（p0-plan ⑦，隐私底线清单）：可选注入——main.dart 传入
   /// [SettingsStore.blockedPackages]，与设置页共享同一份（单一事实来源）。
@@ -89,7 +116,10 @@ class CapturePage extends StatefulWidget {
   State<CapturePage> createState() => _CapturePageState();
 }
 
-class _CapturePageState extends State<CapturePage> {
+/// fix(#11 P0-3)：挂 WidgetsBindingObserver（应用进出前台）与 RouteAware
+/// （应用内路由往返），两条腿都汇进 [_refreshAfterPermissionRoundTrip]。
+class _CapturePageState extends State<CapturePage>
+    with WidgetsBindingObserver, RouteAware {
   late final CaptureSession _session;
   late final TextEditingController _relationship;
 
@@ -98,6 +128,11 @@ class _CapturePageState extends State<CapturePage> {
 
   bool _serviceRunning = false;
   bool _ocrFallback = true;
+
+  /// fix(#11 P0-3)：通知权限（POST_NOTIFICATIONS，Android 13+ 运行时授权）
+  /// 的当前状态。null = 未知（通道不可用 / 还没查到，与引导页的权限行同一
+  /// 口径）；false = 未开启——13+ 上保活前台通知会被系统整条隐藏。
+  bool? _notificationsOn;
 
   /// #11 悬浮窗防截屏（FLAG_SECURE）开关，默认关。页面本地状态（不落盘），
   /// 是服务连接期间原生开关的「期望值」单一事实来源：原生状态存服务进程内存，
@@ -127,6 +162,7 @@ class _CapturePageState extends State<CapturePage> {
 
   /// ⑦ 黑名单增删的唯一写入口：写回（notifier 或本地兜底）→ 重绘 → 立即
   /// 重推 configure（黑名单优先于白名单由 Kotlin 侧保证，改完即生效）。
+  /// fix(#11 P0-1 配套)：用户动作，下发失败要可见（reportFailure）。
   void _commitBlocked(Set<String> next) {
     final notifier = widget.blockedPackages;
     if (notifier != null) {
@@ -135,7 +171,7 @@ class _CapturePageState extends State<CapturePage> {
       _localBlocked = next;
     }
     setState(() {});
-    _pushConfigure();
+    _pushConfigure(reportFailure: true);
   }
 
   /// ⑦ 「添加包名」：trim 后入黑名单；空串与重复项直接忽略，输入框清空。
@@ -182,12 +218,19 @@ class _CapturePageState extends State<CapturePage> {
   @override
   void initState() {
     super.initState();
+    // fix(#11 P0-3)：应用生命周期观察——从系统设置（无障碍/通知/悬浮窗）授权
+    // 回来时 didChangeAppLifecycleState(resumed) 触发刷新。
+    WidgetsBinding.instance.addObserver(this);
     _session = CaptureSession(
       config: widget.config,
       relationship: widget.relationship,
       overlayEnabled: widget.overlayEnabled,
       // B8：展示模式跟随设置页同一份 notifier，推悬浮窗时透传给原生侧。
       displayMode: widget.displayMode,
+      // fix(#11 P0-N) 独立复核补接：场景 notifier 透传给会话——采集流此前
+      // 漏接（resolveScenario 每轮拿到 null，引导页选的场景对 Android 采集
+      // 零效果）。同一份 notifier 每轮现读，场景切换下一轮起草立即生效。
+      scenarioId: widget.scenarioId,
       // C10：检查点经闸门句柄写入（见 [_gatedWriteCheckpoint]——恢复提示未决
       // 期间拦下，防止进页期的空写入覆盖存档里的上次会话）。
       writeCheckpoint: _gatedWriteCheckpoint,
@@ -222,6 +265,8 @@ class _CapturePageState extends State<CapturePage> {
     // C10：恢复提示要等首帧之后再弹（对话框需要 Overlay 上下文）。
     WidgetsBinding.instance.addPostFrameCallback((_) => _offerSessionRestore());
     _refreshServiceStatus();
+    // fix(#11 P0-3)：通知权限现状进页查一次（resumed/didPopNext 再刷新）。
+    _refreshNotificationStatus();
     // fix(kimi-review #2)：本页 initState 的 _pushConfigure 在服务未连时打空
     // （通道在而服务侧 handler 未挂，MissingPluginException 被 catch 吞掉）。
     // 「先开采集页、后启无障碍」是最常见启用路径——服务晚连后原生经 control
@@ -229,6 +274,49 @@ class _CapturePageState extends State<CapturePage> {
     // 重发当前配置。回调为页级：退出页清空，避免悬引用到已 dispose 的状态；
     // 页面不在时请求被丢弃，下次进页 initState 重新下发。
     CaptureAndroid.onConfigureReplay = _pushConfigure;
+    _pushConfigure();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // fix(#11 P0-3)：RouteAware 订阅。本页由 main.dart 以 MaterialPageRoute
+    // 推入，ModalRoute.of 不会为 null；直接 pump 本页（无路由壳）时是 null，
+    // 此时跳过订阅——刷新退回 lifecycle 一条腿，不崩。observer 未注册进
+    // navigatorObservers 时订阅同样惰性无害（见 [CapturePage.routeObserver]）。
+    final route = ModalRoute.of<void>(context);
+    if (route != null) {
+      CapturePage.routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // fix(#11 P0-3)：从系统设置授完权回来（无障碍/悬浮窗/通知，都是跳系统
+    // 页面的往返）应用 paused→resumed，此时服务可能刚连上、权限刚授予——
+    // 立即刷新状态并幂等重放 configure。与引导页（onboarding_page.dart）的
+    // resumed 刷新同一模式。
+    if (state == AppLifecycleState.resumed) {
+      _refreshAfterPermissionRoundTrip();
+    }
+  }
+
+  @override
+  void didPopNext() {
+    // fix(#11 P0-3)：本页之上的应用内路由（对话框/底部面板/页面）pop 回来时
+    // 刷新。前提是 [CapturePage.routeObserver] 注册进了 MaterialApp 的
+    // navigatorObservers；未注册时本方法不会被调用（订阅惰性，无副作用）。
+    _refreshAfterPermissionRoundTrip();
+  }
+
+  /// fix(#11 P0-3)：授权往返后的统一刷新——先查服务现状（isRunning → 状态卡
+  /// 重绘）与通知权限现状（POST_NOTIFICATIONS → 状态行重绘），再幂等重放
+  /// configure（服务刚连接时把采集范围/黑名单/防截屏期望值补齐，即
+  /// onConfigureReplay 同款的重放语义）。三个动作都幂等：resumed 与
+  /// didPopNext 在极端时序下先后各触发一次，重放无副作用。
+  void _refreshAfterPermissionRoundTrip() {
+    _refreshServiceStatus();
+    _refreshNotificationStatus();
     _pushConfigure();
   }
 
@@ -344,9 +432,19 @@ class _CapturePageState extends State<CapturePage> {
         action: SnackBarAction(
           label: '去设置',
           onPressed: () async {
+            // fix(#11 P0-1 配套)：跳系统悬浮窗设置失败不再静默——失败时上一条
+            // 「权限丢失」提示已消失，无反馈会把用户晾在原地。
+            final actionMessenger = ScaffoldMessenger.of(context);
             try {
               await CaptureAndroid().openOverlaySettings();
-            } catch (_) {}
+            } catch (e) {
+              if (!mounted) return;
+              actionMessenger
+                ..hideCurrentSnackBar()
+                ..showSnackBar(SnackBar(
+                  content: Text(_channelFailureText('打开悬浮窗设置', e)),
+                ));
+            }
           },
         ),
       ));
@@ -359,6 +457,10 @@ class _CapturePageState extends State<CapturePage> {
     if (CaptureAndroid.onConfigureReplay == _pushConfigure) {
       CaptureAndroid.onConfigureReplay = null;
     }
+    // fix(#11 P0-3)：生命周期与路由观察随页销毁（防悬引用到已 dispose 的
+    // State——RouteObserver 的订阅表不随路由 dispose 清空）。
+    WidgetsBinding.instance.removeObserver(this);
+    CapturePage.routeObserver.unsubscribe(this);
     _session.state.removeListener(_onStateChanged);
     _session.refiningCards.removeListener(_onStateChanged);
     _session.overlayPermissionLost.removeListener(_onOverlayPermissionLost);
@@ -381,7 +483,36 @@ class _CapturePageState extends State<CapturePage> {
     }
   }
 
-  Future<void> _pushConfigure() async {
+  /// fix(#11 P0-3)：查通知权限现状（POST_NOTIFICATIONS）。通道不可用落
+  /// 「未知」（null），与引导页 `_refreshPermissionStatus` 的容错同一口径，
+  /// 不拦页面其余功能。
+  Future<void> _refreshNotificationStatus() async {
+    try {
+      final enabled = await CaptureAndroid().canRequestNotifications();
+      if (mounted) setState(() => _notificationsOn = enabled);
+    } catch (_) {
+      if (mounted) setState(() => _notificationsOn = null);
+    }
+  }
+
+  /// fix(#11 P0-1 配套)：通道调用失败的用户可见文案。MissingPluginException =
+  /// 通道无实现（Windows 调试 / 引擎未挂接 / 采集服务未连接且无插件级兜底
+  /// handler）——口径统一为「采集插件未就绪」；其余错误原样展示
+  /// （PlatformException 的 code/message 是排查关键），不给失败套外壳。
+  String _channelFailureText(String action, Object error) {
+    if (error is MissingPluginException) {
+      return '$action失败：采集插件未就绪（平台通道不存在），请重装/重启应用后重试。';
+    }
+    return '$action失败：$error';
+  }
+
+  /// [reportFailure] = 用户动作触发的下发（OCR 兜底开关 / 芯片勾选 / 黑名单
+  /// 增删，见调用点）在失败时给 SnackBar，首次运行不再无反馈。进页
+  /// initState 与 onConfigureReplay 重放两条保持静默：「先开采集页、后启
+  /// 无障碍」时服务未连是预期路径、由重放机制补齐（见 initState 注释），
+  /// 报告会把最常见的首启路径变成每次进页的噪音——服务现状由状态卡以
+  /// isRunning 回显，失败场景用户看得见。
+  Future<void> _pushConfigure({bool reportFailure = false}) async {
     try {
       await CaptureAndroid().configure(
         packages: _packages,
@@ -392,8 +523,16 @@ class _CapturePageState extends State<CapturePage> {
         // 幂等重发自动恢复，不再依赖用户重进页面/重拨开关。
         secure: _overlaySecure,
       );
-    } catch (_) {
-      // 同上：无引擎通道时静默，状态行会显示「未连接」。
+    } catch (e) {
+      // fix(#11 P0-1 配套)：用户动作的下发失败不再静默——状态行之外补一条
+      // 明确原因（区分插件未就绪与其他错误）。
+      if (!reportFailure || !mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(_channelFailureText('采集配置下发', e)),
+        ));
     }
   }
 
@@ -427,13 +566,32 @@ class _CapturePageState extends State<CapturePage> {
       var granted = false;
       try {
         granted = await CaptureAndroid().canDrawOverlays();
-      } catch (_) {
-        // 通道不可用（Windows 调试 / 引擎未挂）：按未授权处理，走引导分支。
+      } catch (e) {
+        // fix(#11 P0-1 配套)：查不到授权状态就无从引导（旧实现把通道错误当
+        // 「未授权」继续走系统设置分支，真实失败被吞）——明说失败原因，开关
+        // 保持关。
+        if (!mounted) return;
+        messenger
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
+            content: Text(_channelFailureText('悬浮窗权限检查', e)),
+          ));
+        return;
       }
       if (!granted) {
         try {
           await CaptureAndroid().openOverlaySettings();
-        } catch (_) {}
+        } catch (e) {
+          // fix(#11 P0-1 配套)：跳设置页失败不再静默（旧实现吞掉后仍弹
+          // 「请在系统设置里允许…」，但页面根本没跳——用户白跑一趟）。
+          if (!mounted) return;
+          messenger
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text(_channelFailureText('打开悬浮窗设置', e)),
+            ));
+          return;
+        }
         if (!mounted) return;
         messenger
           ..hideCurrentSnackBar()
@@ -448,6 +606,64 @@ class _CapturePageState extends State<CapturePage> {
     widget.overlayEnabled.value = v;
     setState(() {});
   }
+
+  /// fix(#11 P0-3)：通知权限请求入口。未开启时原生侧跳系统「应用通知设置」
+  /// 页；授权回来（应用 paused→resumed）由 [_refreshAfterPermissionRoundTrip]
+  /// 重查并更新状态行——与悬浮窗权限的引导模式一致。返回 true = 已开启
+  /// （无需跳转，多见于其他入口刚授完的竞态），就地更新状态行。
+  Future<void> _openNotificationSettings() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final enabled = await CaptureAndroid().requestNotifications();
+      if (!mounted) return;
+      if (enabled) {
+        setState(() => _notificationsOn = true);
+        return;
+      }
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+          content: Text('请在系统设置里允许本应用的通知；保活通知（含快捷动作）'
+              '在 Android 13+ 未授权时会被系统隐藏。返回后自动刷新状态。'),
+        ));
+    } catch (e) {
+      // fix(#11 P0-1 配套)：跳转失败不再静默（与同页其他权限入口同一口径）。
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(_channelFailureText('打开通知设置', e)),
+        ));
+    }
+  }
+
+  /// fix(#11 P0-3)：通知权限状态行（Android 13+ POST_NOTIFICATIONS 运行时
+  /// 授权）。保活前台通知（KeepAliveService 的「唤出助手/重新生成」动作按钮）
+  /// 在 13+ 未授权时被系统整条隐藏——服务照跑，用户失去快捷动作，所以单独
+  /// 给一行状态与请求入口。null（通道不可用）显示「未知」，不给请求入口
+  /// （不知道现状就没有可请求的目标）；已开启同样只读不设按钮。
+  Widget _notificationCard(ColorScheme scheme) => Card(
+        child: ListTile(
+          leading: Icon(
+            _notificationsOn == false
+                ? Icons.notifications_off
+                : Icons.notifications,
+            color: _notificationsOn == false ? scheme.error : scheme.primary,
+          ),
+          title: const Text('通知'),
+          subtitle: Text(_notificationsOn == null
+              ? '权限状态未知（通道不可用）。Android 13+ 未授权通知时，保活通知会被系统隐藏。'
+              : _notificationsOn == true
+                  ? '已开启——保活通知（含快捷动作）正常显示。'
+                  : '未开启——Android 13+ 上保活通知会被系统整条隐藏。'),
+          trailing: _notificationsOn == false
+              ? TextButton(
+                  onPressed: _openNotificationSettings,
+                  child: const Text('去开启'),
+                )
+              : null,
+        ),
+      );
 
   Widget _overlayCard() => Card(
         child: SwitchListTile(
@@ -553,6 +769,10 @@ class _CapturePageState extends State<CapturePage> {
           // #11 防截屏开关：跟在悬浮窗开关后面，管理的就是悬浮窗这扇窗。
           _overlaySecureCard(),
           const SizedBox(height: 8),
+          // fix(#11 P0-3)：通知权限状态行（Android 13+ 运行时授权）——保活
+          // 前台通知未授权时被系统隐藏，给状态与请求入口。
+          _notificationCard(scheme),
+          const SizedBox(height: 8),
           _scopeCard(),
           const SizedBox(height: 8),
           // #6 联系人入口：选择/新建联系人；卡上把「进提示词的正文」与
@@ -618,9 +838,19 @@ class _CapturePageState extends State<CapturePage> {
           subtitle: const Text('需要无障碍权限读取聊天窗口内容；不会自动发送任何消息。'),
           trailing: TextButton(
             onPressed: () async {
+              // fix(#11 P0-1 配套)：跳系统设置失败不再静默——首次运行用户点
+              // 「去启用」没反应，多半是这条 catch 吞的。
+              final messenger = ScaffoldMessenger.of(context);
               try {
                 await CaptureAndroid().openAccessibilitySettings();
-              } catch (_) {}
+              } catch (e) {
+                if (!mounted) return;
+                messenger
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(
+                    content: Text(_channelFailureText('打开无障碍设置', e)),
+                  ));
+              }
             },
             child: const Text('去启用'),
           ),
@@ -643,7 +873,8 @@ class _CapturePageState extends State<CapturePage> {
                     value: _ocrFallback,
                     onChanged: (v) {
                       setState(() => _ocrFallback = v);
-                      _pushConfigure();
+                      // fix(#11 P0-1 配套)：用户动作，下发失败要可见。
+                      _pushConfigure(reportFailure: true);
                     },
                   ),
                 ],
@@ -666,7 +897,8 @@ class _CapturePageState extends State<CapturePage> {
                             _packages.remove(entry.key);
                           }
                         });
-                        _pushConfigure();
+                        // fix(#11 P0-1 配套)：用户动作，下发失败要可见。
+                        _pushConfigure(reportFailure: true);
                       },
                     ),
                   for (final entry in _manualOcrOnlyApps.entries)

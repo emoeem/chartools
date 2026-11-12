@@ -28,6 +28,7 @@ class DesktopAssistantPage extends StatefulWidget {
     super.key,
     required this.config,
     this.displayMode,
+    this.scenarioId,
     this.contactStore,
     this.preferences,
     this.persistPreferences,
@@ -41,6 +42,15 @@ class DesktopAssistantPage extends StatefulWidget {
   /// all = 全部平铺。可选注入——main.dart 传入 store.displayMode；未传时按
   /// 产品默认（displayModePrimary）渲染。
   final ValueNotifier<String>? displayMode;
+
+  /// 场景选择（fix(#11 P0-N)）：与设置页共享同一份
+  /// [SettingsStore.scenarioId]（引导页「选场景」写入的那份 notifier）。
+  /// 分析时经 [CaptureSession.resolveScenario] 现查模板传给
+  /// JevClient.draftAndRank——采集流与桌面流共用同一个解析点，空串/未知 id
+  /// 一律落到「无场景」。可选注入——main.dart 传入 store.scenarioId；未传
+  /// （旧构造方/测试）时与没有场景功能之前逐字节一致。每轮分析现读，改场景
+  /// 下一轮生效（桌面页没有常驻会话，无监听必要）。
+  final ValueNotifier<String>? scenarioId;
 
   /// #6 联系人档案（A 的 ContactStore）：可选注入——main.dart 传入共享实例。
   /// 未注入时联系人区不渲染，粘贴分析不带联系人上下文（与基线一致）。
@@ -280,8 +290,13 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       final analysis = await jev.judge(snapshot, relationshipText, ctx: ctx);
       var ranked = const <RankedReply>[];
       if (analysis.error == null) {
+        // fix(#11 P0-N)：场景随 store.scenarioId 进起草路，与采集流同一份
+        // 解析（CaptureSession.resolveScenario）；null 时与接入前逐字节一致。
+        // 判断路不消费场景（ScenarioTemplate 只有起草侧附加段），judge 不传。
         ranked = await jev.draftAndRank(snapshot, relationshipText,
-            judgment: analysis, ctx: ctx);
+            judgment: analysis,
+            ctx: ctx,
+            scenario: CaptureSession.resolveScenario(widget.scenarioId));
         // F1：best_action 对应的策略候选提前——与采集会话同一份静态实现。
         ranked = CaptureSession.applyStrategyOrder(ranked, analysis);
       }

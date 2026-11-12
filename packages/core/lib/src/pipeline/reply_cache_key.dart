@@ -20,7 +20,7 @@ abstract final class ReplyCacheKey {
   /// 列表项分隔（`avoid` 是多条候选文本）。
   static const String _item = '\u001f';
 
-  /// 回复缓存键。**十四个分量，缺一个就会串味**：
+  /// 回复缓存键。**十五个分量，缺一个就会串味**：
   ///
   /// - `title` 会话标题（两个无 KB 会话的末几条消息可能逐字相同，没有它就串台）
   /// - `signature` 聊天快照指纹（消息本身变了，候选就作废）
@@ -35,6 +35,10 @@ abstract final class ReplyCacheKey {
   /// - `judgmentKey` 这次判断的选项（含置信度与「可不急回」——都改提示词）
   /// - `intensity` 力度档
   /// - `params` 采样与开关：语言 / 长度 / 温度 / 两个惩罚 / 证据复查 + 复查模型
+  /// - `scenarioId` 场景 id（fix(#11 P0-N)：场景附加段进起草提示词，场景变了
+  ///   缓存里的旧场景候选必须作废）。空串 = 没有场景（默认行为），与接入前
+  ///   相比键只是多了一个空分量；`chat_copilot` 与空串是两个键但提示词相同
+  ///   （附加段为空串）——命中哪个都不串味，只是多占一格缓存。
   static String reply({
     required String title,
     required String signature,
@@ -48,6 +52,7 @@ abstract final class ReplyCacheKey {
     required String judgmentKey,
     required String intensity,
     required String params,
+    required String scenarioId,
   }) =>
       [
         title,
@@ -62,6 +67,7 @@ abstract final class ReplyCacheKey {
         judgmentKey,
         intensity,
         params,
+        scenarioId,
       ].join(_field);
 
   /// `avoid` 逐条带上长度。
