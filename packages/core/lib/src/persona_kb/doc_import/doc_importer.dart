@@ -338,7 +338,18 @@ class DocImporter {
   /// 把一个超长段落切成 ≤ [maxChars] 的片：优先句末（最后一个「句末符」落在
   /// 窗口后 1/4 处就断在那），其次空格（不切断英文单词），都没有就硬切。
   /// 策略原样移植 legacy DocChunker.kt:50-80。
+  ///
+  /// [maxChars] <= 0 直接抛 [ArgumentError]（与 [importBlocks] 的 config 校验
+  /// 同款）：0/负数会让 `end == start`、`start` 永不前进——这是解析层公开
+  /// API，一个坏 config 不能变成同步死循环挂死宿主（#12 复核 low 实证）。
   static List<String> hardSplit(String paragraph, int maxChars) {
+    if (maxChars <= 0) {
+      throw ArgumentError.value(
+        maxChars,
+        'maxChars',
+        '必须 > 0，否则 hardSplit 无法前进',
+      );
+    }
     final out = <String>[];
     var start = 0;
     while (start < paragraph.length) {

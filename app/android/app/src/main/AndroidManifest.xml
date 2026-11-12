@@ -6,7 +6,7 @@
          permissions 检查 release 合并 APK。 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="chartools_app"
+        android:label="Chatools"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

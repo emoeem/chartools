@@ -159,8 +159,10 @@ class CaptureAndroidPlugin :
             // fix(#11 P0-3)：通知权限（POST_NOTIFICATIONS）的查/求。Android 13+
             // 起 POST_NOTIFICATIONS 是运行时授权：未授予时 KeepAliveService 的
             // 前台通知（含「唤出助手/重新生成」动作按钮）被系统整条隐藏——服务
-            // 照跑，通知不可见。13 以下没有运行时授权，areNotificationsEnabled()
-            // 恒回 true，两个分支无需按 SDK 分叉。挂本插件通道（capture_android，
+            // 照跑，通知不可见。13 以下无运行时授权，正常装机下
+            // areNotificationsEnabled() 为 true；用户手动关掉应用通知开关时同样
+            // 为 false——「未授权」与「被关」两种来源走同一个去开启引导，
+            // 无需按 SDK 分叉。挂本插件通道（capture_android，
             // 引擎 attach 即注册），与 canDrawOverlays/openOverlaySettings 同址：
             // 读系统设置、跳系统页面，与采集服务是否连接无关。
             "canRequestNotifications" -> {

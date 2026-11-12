@@ -55,3 +55,6 @@ app.*.map.json
 # 测试覆盖率
 coverage/
 .zcode/
+
+# Kotlin 2.x Gradle daemon 会话产物（KGP 2.1+ 写在项目 .kotlin/，非源码）
+.kotlin/

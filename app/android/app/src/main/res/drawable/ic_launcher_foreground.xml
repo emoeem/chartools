@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 前景 glyph：白色对话气泡 + 三个「输入中」圆点（teal 700）。
+     108dp 视口，glyph 位于 23..85（宽）/ 30..86（高），在 66dp 安全区内。
+     与 _branding/icon_full.html 的位图渲染同一路径数据，改动两处必须同步。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M37,30 H71 A14,14 0 0 1 85,44 V58 A14,14 0 0 1 71,72 H44 L34.5,83.5 C33.2,85.1 30.6,84.2 30.6,82.1 V72 L37,72 A14,14 0 0 1 23,58 V44 A14,14 0 0 1 37,30 Z"/>
+    <path
+        android:fillColor="#00695C"
+        android:pathData="M46.5,51 A5.5,5.5 0 1 0 35.5,51 A5.5,5.5 0 1 0 46.5,51 Z"/>
+    <path
+        android:fillColor="#00695C"
+        android:pathData="M59.5,51 A5.5,5.5 0 1 0 48.5,51 A5.5,5.5 0 1 0 59.5,51 Z"/>
+    <path
+        android:fillColor="#00695C"
+        android:pathData="M72.5,51 A5.5,5.5 0 1 0 61.5,51 A5.5,5.5 0 1 0 72.5,51 Z"/>
+</vector>

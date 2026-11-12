@@ -517,4 +517,23 @@ void main() {
       );
     });
   });
+
+  group('hardSplit 参数守卫（#12 复核 low）', () {
+    test('maxChars <= 0 抛 ArgumentError，不是同步死循环挂死宿主', () {
+      // 修复前：end == start、start 永不前进——公开 API 上一个坏 config
+      // 就能同步阻塞事件循环（复核实证 15s 强杀 exit=124）。
+      expect(
+        () => DocImporter.hardSplit('一二三四五六七八九十', 0),
+        throwsArgumentError,
+      );
+      expect(
+        () => DocImporter.hardSplit('一二三四五六七八九十', -3),
+        throwsArgumentError,
+      );
+    });
+
+    test('正常 maxChars 不受守卫影响（10 字 / 5 上限 → 两片硬切）', () {
+      expect(DocImporter.hardSplit('一二三四五六七八九十', 5), hasLength(2));
+    });
+  });
 }

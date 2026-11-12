@@ -236,5 +236,20 @@ void main() {
       // 只写避谈一行也算结构化卡（键认出来了）。
       expect(PersonaCard.parse('避谈：稳赚').structured, isTrue);
     });
+
+    test('同键多次出现取最后一次（#12 变更的哨兵，不许悄悄改回拼接）', () {
+      // persona_card.dart 的显式语义：后写覆盖先写。背景：CCV2 导入里
+      // persona 的「情境：…」行与 scenario 的「情境：…」键行并存时场景必须
+      // 是后者——拼接会把两段缝成一句不通的话。此用例就是防回头的哨兵：
+      // 若有人改回拼接，这里先红，并在改动前想清楚 PersonasController
+      // .importCcv2 的映射表还成不成立。
+      final card = PersonaCard.parse(
+          '称呼：先生\n'
+          '语气：克制，短句\n'
+          '语气：温柔，多哄\n');
+      expect(card.structured, isTrue);
+      expect(card.tone, '温柔，多哄');
+      expect(card.tone, isNot(contains('克制')));
+    });
   });
 }

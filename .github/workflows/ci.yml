@@ -56,9 +56,17 @@ jobs:
       - name: Check merged APK declares INTERNET (fix #11 P0-2)
         working-directory: app
         run: |
-          # build-tools 35.0.0 与 app/android/app/build.gradle.kts 的
-          # buildToolsVersion 一致：上面的构建成功就说明它已就位。
+          # 首选 build-tools 35.0.0（与 app/android/app/build.gradle.kts 的
+          # buildToolsVersion 一致，上面的构建成功就说明它已就位）；若 AGP
+          # 未来换 SDK 布局（如 build-tools 编号进版本目录），回退到
+          # $ANDROID_HOME 下版本号最大的 aapt2，检查步骤不因路径形态漂移而失效。
           AAPT2="$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          if [ ! -x "$AAPT2" ]; then
+            AAPT2="$(command -v aapt2 || true)"
+          fi
+          if [ -z "$AAPT2" ] || [ ! -x "$AAPT2" ]; then
+            AAPT2="$(ls "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)"
+          fi
           "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk
           "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk \
             | grep -q "android.permission.INTERNET"

@@ -216,4 +216,29 @@ void main() {
       expect(result.hits.single.id, 'd1');
     });
   });
+
+  group('k <= 0 的 legacy 契约（#12 复核 low）', () {
+    test('k 为负返回空结果不抛（legacy LexicalSearch.kt:111 的 k<=0 → emptyList）', () {
+      final docs = [doc('d1', '苹果很好吃'), doc('d2', '苹果汁也不错')];
+      // 修复前：评分块被 k>0 门挡住、hits 为空，但 removeRange(-1, …) 先炸。
+      final result = LexicalSearch.search('苹果', docs, k: -1);
+      expect(result.hits, isEmpty);
+      expect(result.eval, isNull);
+    });
+
+    test('k 为 0 同样返回空结果；评测钩子照常携带全 0', () {
+      final docs = [doc('d1', '苹果很好吃'), doc('d2', '苹果汁')];
+      final result = LexicalSearch.search(
+        '苹果',
+        docs,
+        k: 0,
+        relevantIds: {'d1'},
+      );
+      expect(result.hits, isEmpty);
+      expect(result.eval, isNotNull);
+      expect(result.eval!.precisionAtK, 0.0);
+      expect(result.eval!.recallAtK, 0.0);
+      expect(result.eval!.hitsReturned, 0);
+    });
+  });
 }

@@ -233,8 +233,9 @@ class CaptureAndroid {
   /// fix(#11 P0-3)：通知权限（POST_NOTIFICATIONS）当前是否已开启。Android 13+
   /// 是运行时授权：未授予时保活前台通知（KeepAliveService 的「唤出助手/重新
   /// 生成」动作按钮）被系统整条隐藏——服务照跑，通知不可见；13 以下无运行时
-  /// 授权，恒为 true（原生 areNotificationsEnabled 的系统语义，原生侧不按
-  /// SDK 分叉）。通道不可用（Windows 调试 / 引擎未挂）时抛
+  /// 授权，正常装机下为 true，用户手动关掉通知开关时为 false——两种来源
+  /// （未授权/被关）都走同一个去开启引导，原生侧不按 SDK 分叉。
+  /// 通道不可用（Windows 调试 / 引擎未挂）时抛
   /// MissingPluginException，由调用方兜底。
   Future<bool> canRequestNotifications() async =>
       await _plugin.invokeMethod<bool>('canRequestNotifications') ?? false;

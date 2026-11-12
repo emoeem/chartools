@@ -221,6 +221,19 @@ class LexicalSearch {
     Iterable<String>? anyType,
     Set<String>? relevantIds,
   }) {
+    // legacy 契约（LexicalSearch.kt:111）：k <= 0 返回空结果，不抛。k=0 意为
+    // 「一条都不要」，负数没有意义；两者都不该把 RangeError 炸到调用方
+    // （下方 removeRange(k, …) 对负 k 会先炸，#12 复核 low）。eval 照常携带
+    // （precision/recall 全 0）——评测钩子对 k<=0 的口径就是「没检索出东西」。
+    if (k <= 0) {
+      return LexSearchResult(
+        hits: const <ScoredDoc>[],
+        eval:
+            relevantIds == null
+                ? null
+                : _evaluate(const <ScoredDoc>[], k, relevantIds),
+      );
+    }
     final hits = <ScoredDoc>[];
 
     final Set<String> tagFilter;
