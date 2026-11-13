@@ -13,9 +13,16 @@ pluginManagement {
     repositories {
         // 国内镜像优先：dl.google.com / repo1.maven.org 本机直连超时（curl 000），
         // maven.aliyun.com 实测可达。原仓库保留为兜底。
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/public")
-        maven("https://maven.aliyun.com/repository/gradle-plugin")
+        // CI（GitHub 托管 runner 设 GITHUB_ACTIONS=true）**不走** aliyun：
+        // 美国节点拉国内镜像本就不稳，beta.7 的 CI 曾因 aliyun 502 连环失败
+        // （classpath 整体覆没）——与 ci.yml「严禁配国内镜像变量」的既有
+        // 裁定同源，扩展到 Maven 层。
+        val onCi = System.getenv("GITHUB_ACTIONS") == "true"
+        if (!onCi) {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/public")
+            maven("https://maven.aliyun.com/repository/gradle-plugin")
+        }
         google()
         mavenCentral()
         gradlePluginPortal()
