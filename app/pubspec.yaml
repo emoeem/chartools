@@ -40,6 +40,14 @@ dependencies:
   # win32 的配套：Arena/using（FindWindow 字符串的原生内存生命周期）与
   # String.toNativeUtf16。同为既有传递依赖升直依，零新增包。
   ffi: ^2.2.0
+  # 应用级 KbStore 的存档目录（独立复核补接线）：Android/Linux 桌面的存档
+  # 原落 TMPDIR/TEMP（进程 cache 目录，存储压力下系统可清——存档是用户数据
+  # 的唯一真源，档丢即数据丢），改走 path_provider 的应用支持目录
+  # （getApplicationSupportDirectory，应用私有且持久），main.dart 启动时对
+  # 旧位置做一次性迁移。本就是锁内传递依赖（flutter_secure_storage 通道）
+  # 升直依，零新增包；path_provider_android 由根 pubspec 钉在 2.2.23（无
+  # jni/CMake 构建链，见根 pubspec dependency_overrides 注释）。
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:

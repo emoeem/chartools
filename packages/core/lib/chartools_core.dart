@@ -26,6 +26,13 @@ export 'src/jev_client/judge_answers.dart';
 export 'src/jev_client/judge_retry.dart';
 export 'src/jev_client/routes.dart';
 export 'src/jev_client/stream_text.dart';
+// W6 迁移两件套挂载（barrel 所有者）：legacy_importer.dart 头注释留过话
+// 「barrel 不在原工作流的文件清单里，挂载由 barrel 所有者完成」——本次由
+// barrel 所有者补挂；migration_sink.dart 是配套的落盘实现（MigrationSink
+// 的 KbStoreSink，G8 确认后的唯一写库通路），按「新增文件必须挂进这里」
+// 的头部规则一并挂载，app 层从此只从这里 import，不碰 src/ 路径。
+export 'src/migration/legacy_importer.dart';
+export 'src/migration/migration_sink.dart';
 export 'src/models/models.dart';
 // 文档导入两件套按 barrel 头部规则挂载（独立复核补挂：导入丢弃计数要让
 // app 预览层能如实告知「丢了什么」，见 DocImportOutcome）。

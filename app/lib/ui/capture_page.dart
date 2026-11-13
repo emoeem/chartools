@@ -42,6 +42,7 @@ class CapturePage extends StatefulWidget {
     this.usage,
     this.writeCheckpoint,
     this.sessionCheckpoint,
+    this.knowledgeBase,
   });
 
   /// fix(#11 P0-3)：本页 RouteAware 订阅的路由观察者（进程一份，静态持有）。
@@ -111,6 +112,14 @@ class CapturePage extends StatefulWidget {
   /// 对话框（C10 硬约束：恢复必须过用户确认，不静默恢复）。确认后经
   /// [CaptureSession.restoreCheckpoint] 回填，再写 null 清档。
   final Map<String, dynamic>? sessionCheckpoint;
+
+  /// 知识检索注入（独立复核补接线，超越点）：main.dart 传应用级 [KbStore]
+  /// （与知识库页/迁移页同一份实例），原样透传给 [CaptureSession.knowledgeBase]
+  /// ——每轮起草用「最后一条对方消息」检索库内启用笔记，命中的以「知识参考
+  /// （来源：知识库笔记《标题》）」段随 ctx 进提示词。null = 未注入（旧构造
+  /// 方/工具页直开的测试场景），所有轮次与缓存键和未接线时逐字节一致
+  /// （[CaptureSession.knowledgeBase] 的契约）。
+  final KbStore? knowledgeBase;
 
   @override
   State<CapturePage> createState() => _CapturePageState();
@@ -238,6 +247,9 @@ class _CapturePageState extends State<CapturePage>
       stats: widget.usage,
       // G7：偏好档案注入——每轮把 styleAddendum 附言随 ctx 进写作路。
       preferences: widget.preferences,
+      // 知识检索注入（独立复核补接线）：应用级 KbStore 同一份实例，四个组
+      // ctx 入口每轮现查（capture_session.dart 的 knowledgeRefsOf）。
+      knowledgeBase: widget.knowledgeBase,
     );
     // 会话状态（快照/分析/忙碌/错误）与改写中的卡片集合变化时重绘：stream 回调
     // 不经过 setState，不监听的话「实时快照与建议」永远停在首次 build。

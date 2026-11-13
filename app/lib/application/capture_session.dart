@@ -155,6 +155,7 @@ class CaptureSession {
     this.writeCheckpoint,
     this.stats,
     this.preferences,
+    this.knowledgeBase,
   });
 
   /// C10 检查点的落盘句柄（可选注入；[CheckpointWriter] 的说明与接线方式见
@@ -172,6 +173,24 @@ class CaptureSession {
   /// **写作路**（不进判断路，见 [_preferenceNoteId]），G1 预览同步列出。
   /// null = 不注入（与没有记录时同样不发偏好内容）。
   final PreferenceProfile? preferences;
+
+  /// 知识检索注入（超越点，可选注入）：传入 [KbStore] 后每轮起草前用「最后
+  /// 一条对方消息」作 query 走 [KbStore.search]（top-k=[kbRefTopK]），命中的
+  /// **启用**笔记以「知识参考（来源：知识库笔记《标题》）」段随 ctx 进提示
+  /// 词——来源标注随段出门，候选引用了哪条笔记在提示词里可追溯。注入走
+  /// ctx.notes（type 默认 'note'），判断路的 background 与写作路的
+  /// knowledgeBlock 都会渲染这一段；S1 复查提示词当前不读 ctx.notes（
+  /// reply_review.dart 的既定形状，见 ReplyReview.user 参数表），要让复查也
+  /// 看到依据得改 core 复查装配，不属于本文件。
+  ///
+  /// 开关口径与 KnowledgeController 的启用开关同源：直接读 KbStore 的启用位
+  /// （[KbStore.search] 默认只搜未禁用笔记），**不引入新的设置键**。null =
+  /// 未注入（旧构造方/工具页直开的测试场景）：所有轮次的请求与缓存键和接入
+  /// 前逐字节一致。生产已接线（独立复核补接）：main.dart 把应用级 KbStore
+  /// 经 CapturePage 传入，与知识库页同一份实例。无命中/对方消息为空/检索
+  /// 异常一律静默跳过（[knowledgeRefsOf]）：search 是同步内存 BM25、k=3，
+  /// 个人库量级不构成起草路径的可见延迟。
+  final KbStore? knowledgeBase;
 
   /// 应用内存里的模型路由配置；改设置后下一轮立即生效（JevClient 每轮重建）。
   final ValueNotifier<JevConfig> config;
@@ -368,9 +387,70 @@ class CaptureSession {
   /// 显示词表时按它剥前缀。
   static const String _avoidNotePrefix = '不要使用这些词/说法：';
 
-  /// ③+A3+联系人：组装本轮进 judge/draftAndRank 的上下文。没有补充背景、
-  /// 没开风格学习、也没有带正文字段的激活联系人时返回 null——请求与旧版
-  /// 「不带 ctx」逐字节一致（载荷、缓存键都不动），任何一个来源有货才发。
+  /// 检索注入的 top-k：一轮最多注入 3 条知识参考。k 刻意小——个人库量级下
+  /// 检索本身便宜，但注入的每条都会占提示词预算，与风格样本一轮 ≤3 条的
+  /// 既有规则（style_profile.buildStyleSamples）同数量级。
+  static const int kbRefTopK = 3;
+
+  /// 检索注入笔记的 id 前缀：G1 预览用它把「知识参考」从普通知识笔记里认
+  /// 出来单独列行（同 [_extraNoteId]/[_preferenceNoteId] 的固定 id 手法，
+  /// 前缀 + 命中笔记 id 保证唯一）。
+  static const String kbRefIdPrefix = 'kb_ref_';
+
+  /// 检索注入（超越点）：最后一条对方消息 → [KbStore.search]（top-k=3）→
+  /// 命中的**启用**笔记变成随 ctx 出门的「知识参考」段。
+  ///
+  /// 静默契约：未注入 / 没有对方消息 / 无命中 / 检索抛异常 → 返回空表，
+  /// 绝不拖垮或拖慢起草路径（search 是同步内存 BM25，k 小；异常全吞为不
+  /// 注入）。评测日志刻意不写（logSearch: false）：注入检索是自动行为，
+  /// 写进去会污染检索评测数据（SearchLogEntry 的口径是「用户提交的查询」，
+  /// 见 KnowledgeController.retrieve 的分工注释）。
+  ///
+  /// 返回的笔记 id 带 [kbRefIdPrefix] 前缀（G1 预览识别用），标题即来源标注
+  /// 「知识参考（来源：知识库笔记《标题》）」；正文逐字搬运，不做改写。
+  static List<Note> knowledgeRefsOf(KbStore? store, ChatSnapshot snapshot) {
+    if (store == null) return const <Note>[];
+    // query = 最后一条对方消息（从最新往回找第一条 side == other）。快照里
+    // 只有我方消息（自己先开口的屏）或发言人不可知时没有可检索的线头，静默
+    // 跳过——拿我方消息检索会把「我想说的」当成「对方在说的」。
+    String query = '';
+    for (final m in snapshot.messages.reversed) {
+      if (m.side == 'other') {
+        query = m.text.trim();
+        break;
+      }
+    }
+    if (query.isEmpty) return const <Note>[];
+    try {
+      final result = store.search(query, k: kbRefTopK, logSearch: false);
+      final refs = <Note>[];
+      for (final hit in result.hits) {
+        final tracked = store.note(hit.id);
+        // 双保险：search 已按启用位过滤（includeDisabled 缺省 false，与
+        // KnowledgeController 的启用开关同口径），这里再核对存在与启用——
+        // 防「检索到、注入前」的窄窗里笔记被删/停用。空正文的笔记没有可
+        // 参考的内容，同样跳过。
+        if (tracked == null || !tracked.note.enabled) continue;
+        if (tracked.note.content.trim().isEmpty) continue;
+        final title = tracked.note.title.trim();
+        refs.add(Note(
+          id: '$kbRefIdPrefix${tracked.note.id}',
+          title:
+              '知识参考（来源：知识库笔记《${title.isEmpty ? '无标题' : title}》）',
+          content: tracked.note.content,
+        ));
+      }
+      return refs;
+    } catch (_) {
+      // 坏档/检索异常：不注入，绝不把它变成起草路径的故障。
+      return const <Note>[];
+    }
+  }
+
+  /// ③+A3+联系人+检索注入：组装本轮进 judge/draftAndRank 的上下文。没有补充
+  /// 背景、没开风格学习、没有带正文字段的激活联系人、也没有知识参考时返回
+  /// null——请求与旧版「不带 ctx」逐字节一致（载荷、缓存键都不动），任何
+  /// 一个来源有货才发。
   ///
   /// [myMessages] 是风格样本的原料；采集页传快照里我方消息（[myMessagesOf]），
   /// 桌面页传粘贴文本解析出的「我：」行。
@@ -389,12 +469,19 @@ class CaptureSession {
   /// 的附言作为一条 [_preferenceNoteId] 笔记进 ctx——只进写作路（笔记 type
   /// 决定 core 两侧的分流，见 [_preferenceNoteId] 的注释），G1 预览按同一份
   /// ctx 列出。无记录时与不注入逐字节一致。
+  ///
+  /// [knowledgeRefs] 是检索注入的知识参考（[CaptureSession.knowledgeRefsOf]
+  /// 产出，采集流四个组 ctx 的入口传同一份）：非空时作为「知识参考（来源：
+  /// 知识库笔记《标题》）」段进 ctx.notes——type 是默认 'note'，随
+  /// background() 进判断路与写作路两路，来源标注随段出门；为空时与不传
+  /// 逐字节一致（未注入 KbStore 的构造方行为不变）。
   static ChatContext? buildContext({
     String? extra,
     List<Msg> myMessages = const [],
     bool styleLearning = false,
     ContactProfile? contact,
     PreferenceProfile? preferences,
+    List<Note> knowledgeRefs = const [],
   }) {
     final extraText = extra?.trim() ?? '';
     final styleOn = styleLearning && myMessages.isNotEmpty;
@@ -405,7 +492,8 @@ class CaptureSession {
         !styleOn &&
         coreContact == null &&
         avoidNote == null &&
-        preferenceNote == null) {
+        preferenceNote == null &&
+        knowledgeRefs.isEmpty) {
       return null;
     }
     final notes = <Note>[];
@@ -418,6 +506,10 @@ class CaptureSession {
     if (extraText.isNotEmpty) {
       notes.add(Note(id: _extraNoteId, title: '用户补充', content: extraText));
     }
+    // 检索注入的知识参考放最后：它们是「对着最后一条对方消息」的会话级参考，
+    // 排在联系人/偏好/补充背景之后读起来最自然。空表时 addAll 是空操作，
+    // notes 与改前逐字节一致。
+    notes.addAll(knowledgeRefs);
     if (styleOn) {
       try {
         // A3 契约（core 的 style_profile.buildStyleSamples）：List<Msg> →
@@ -490,7 +582,9 @@ class CaptureSession {
   /// [buildContext] 的映射）时如实列出：关系行显示联系人关系并注明压过全局、
   /// avoidWords 单独一行、专用人设也算「联系人备注：有」（它经 StyleSource
   /// 压全局 style 出了门）。没有激活联系人时所有行与改前逐字节一致。
-  /// G7 偏好附言（[_preferenceNoteId] 笔记，与实际发送同源）列进写作路一列。
+  /// G7 偏好附言（[_preferenceNoteId] 笔记，与实际发送同源）列进写作路一列；
+  /// 检索注入的知识参考（[kbRefIdPrefix] 前缀笔记，判断/写作两路都渲染）
+  /// 按条列进公共一列。
   static SendPreview buildSendPreview({
     required ChatSnapshot snapshot,
     ChatContext? ctx,
@@ -503,6 +597,7 @@ class CaptureSession {
     var avoid = '';
     var preference = '';
     var kbNotes = 0;
+    var kbRefs = 0;
     var styleSamples = 0;
     for (final n in ctx?.notes ?? const <Note>[]) {
       if (n.id == _extraNoteId) {
@@ -516,6 +611,10 @@ class CaptureSession {
         // G7 偏好附言：与实际发送同源（同一份 ctx），列进写作路一列——它
         // 不进判断路（[_preferenceNoteId] 的注释），判断列里也不出现。
         preference = n.content.trim();
+      } else if (n.id.startsWith(kbRefIdPrefix)) {
+        // 检索注入的知识参考：进 ctx.notes → 判断/写作两路都渲染，common()
+        // 列行（写出去了什么就列什么）。来源标注在笔记标题里，随段出门。
+        kbRefs++;
       } else if (n.type == noteTypeStyleSample) {
         styleSamples++;
       } else {
@@ -552,6 +651,11 @@ class CaptureSession {
           if (avoid.isNotEmpty) '避免用词：「$avoid」（联系人档案）',
           if (hasContact) '联系人备注：有' else '联系人备注：无',
           '知识库笔记：$kbNotes 条',
+          // 检索注入的知识参考按条列出（判断/写作两路都带，所以列在 common）：
+          // 行文点明来源口径，用户能对上「知识库页里那条笔记出门了」。
+          if (kbRefs > 0)
+            '知识参考：$kbRefs 条'
+                '（来源：知识库笔记，按最后一条对方消息检索注入，含来源标注）',
           '更早历史：$historyCount 条',
         ];
 
@@ -694,6 +798,9 @@ class CaptureSession {
         styleLearning: styleLearning,
         contact: _activeContact,
         preferences: preferences,
+        // 检索注入：挂起态的预览也要如实列出知识参考——真正起轮时
+        // [_runRound] 按当时输入重算，两处同一份产出，预览与发送同源。
+        knowledgeRefs: knowledgeRefsOf(knowledgeBase, snapshot),
       );
       state.value = CaptureState(
         snapshot: snapshot,
@@ -738,6 +845,10 @@ class CaptureSession {
       styleLearning: styleLearning,
       contact: _activeContact,
       preferences: preferences,
+      // 检索注入（超越点）：最后一条对方消息 → KbStore.search → 知识参考段。
+      // 同步、k=3、异常全吞（[knowledgeRefsOf]），不拖慢起草路径；未注入
+      // KbStore 时恒为空表，ctx 与接入前逐字节一致。
+      knowledgeRefs: knowledgeRefsOf(knowledgeBase, snapshot),
     );
     final preview = buildSendPreview(
       snapshot: snapshot,
@@ -820,6 +931,9 @@ class CaptureSession {
       styleLearning: styleLearning,
       contact: _activeContact,
       preferences: preferences,
+      // 检索注入：「换一组」与首轮同一份知识参考口径——同快照同库，检索
+      // 结果相同，重新起草的候选站在同一批依据上。
+      knowledgeRefs: knowledgeRefsOf(knowledgeBase, snapshot),
     );
     final preview = buildSendPreview(
       snapshot: snapshot,
@@ -912,6 +1026,9 @@ class CaptureSession {
         styleLearning: styleLearning,
         contact: _activeContact,
         preferences: preferences,
+        // 检索注入：改写路同口径——改出来的候选与起草站在同一批知识依据上，
+        // 不会「改写后依据消失」。
+        knowledgeRefs: knowledgeRefsOf(knowledgeBase, snapshot),
       );
       final relationshipText = effectiveRelationship(
         ctx,

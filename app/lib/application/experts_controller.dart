@@ -1,30 +1,52 @@
-/// 专家库的应用层：目录（ExpertPack 资产包）+ 我的专家库 + 套用语义。
+/// 专家库的应用层 —— #13 收敛后的唯一实现：**一切包语义走 core 三件套**。
 ///
-/// 对应旧仓库 `core/kb/` 的四个纯 Kotlin 件的职责移植（legacy 是思路库，
-/// 不是逐行复刻——本层按「按需资产包」重新设计）：
-/// - `ExpertPack.kt` → [ExpertPack]：目录 JSON 的容错解析 + 资产包元信息
-///   （来源追踪，用户校准项）。
-/// - `ExpertCatalog.kt` → [ExpertCatalog]：分类/搜索/标签/排序的纯函数浏览层。
-/// - `ExpertShelf.kt` → [ExpertShelfItem]：目录样品与我的条目拼一张货架，
-///   同 presetKey 我的优先。
-/// - `ExpertApply.kt` → [ExpertsController.applyAsGlobalStyle] /
-///   [ExpertsController.applyToContact]：install → touch → 换正文的三步
-///   套用语义，要么全成、要么不留半截。
+/// 独立复核裁定（#12 复核 high，docs/expert-pack-format.md 头部）：app 自有的
+/// `ExpertPreset/ExpertPack/ExpertCatalog/ExpertSort/StyleSink` 与 core 三件套
+/// 平行不兼容——同一份远端包两套解析器必有一边全量跳过。本版按裁定收敛：
 ///
-/// 两条铁律（沿袭 legacy PersonaProfile 的设计约束）：
-/// 1. **浏览层 ≠ 提示词正文**：[ExpertPreset.description] / [tags] /
-///    [category] / [avatar] 只给人看；进提示词的只有 [ExpertShelfItem.body]，
-///    页面的 promptText 预览经 `PersonaCard.parse(body).promptText()` 现算。
-/// 2. **持久化只用 shared_preferences JSON**（p0-plan F2 的边界不变：只有
-///    API Key 走 secure storage）。专家/资产包都是非敏感字段，键为
-///    [_libraryKey] / [_packsKey]，与 ContactStore 的 `contacts` 键、
+/// ┌─────────────────── 数据流（收敛后） ───────────────────┐
+///  远端包 JSON → [_normalizePackJson]（条目级别名补齐，清单级结构不动）
+///             → kb.ExpertPackManager.install（core：清单级严格校验 / 版本
+///               仲裁 / 降级拒装 / builtin 保留 id，expert_pack.dart:313）
+///             → PrefsPackStore（新键 expert_packs_v2，KV 原文单键存储）
+///  货架        → kb.ExpertPackManager.installed（内置包 + 已装包合并）
+///             → kb.ExpertCatalog.filter/sort（浏览层纯函数，规则唯一出处）
+///  套用        → kb.ExpertApply（needsChoice / 覆盖 / 并存 / 回滚唯一判定处）
+///  持久化      → 旧键 experts / expert_packs **只读迁移**（别名互认，失败
+///               计数进 loadProblems，绝不静默丢）；新键 experts_v2 /
+///               expert_packs_v2 写 core 主拼写 promptText/domain，写永不回退旧键
+/// └──────────────────────────────────────────────────────┘
+///
+/// 两条铁律沿袭 legacy PersonaProfile / core Expert 文档，收敛后不变：
+/// 1. **浏览层 ≠ 提示词正文**：[ExpertShelfItem.description] / [tags] /
+///    [category]（core 的 domain）/ [avatar]（core 的 emoji）只给人看；进
+///    提示词的只有 [ExpertShelfItem.body]（core 的 promptText），页面的
+///    promptText 预览仍经 `PersonaCard.parse(body).promptText()` 现算。
+/// 2. **持久化只用 shared_preferences JSON**（p0-plan F2 边界不变：只有
+///    API Key 走 secure storage）。与 ContactStore 的 `contacts` 键、
 ///    SettingsStore 的 `settings` 键互不相干。
+///
+/// UI 能力清单（对照 #12 版本逐项核对，不许变浅）：
+/// - 领域分组/搜索/标签：领域 chips 走 core `ExpertCatalog.domains`（5 固定
+///   领域在前、自定义领域按名跟后、未分类殿后）；搜索命中名字/简介/标签/**正文**
+///   （core `ExpertCatalog.matches`）；标签行走 core `ExpertCatalog.tags`。
+///   旧版 25 条 categoryOrder 清单是展示层概念：5 条固定领域由 core 接管，
+///   其余 20 条本就只是「排后面」的顺序种子——现在由 core 的「自定义领域按名
+///   排后 + tags 行」组合承接；旧数据迁移时 category 原样映射进 domain，
+///   用户已有的分组 chip 一个都不会消失。
+/// - 我的库：改名 / 改正文走 [renameLibraryEntry] / [updateLibraryBody]
+///   （core Expert 不可变 → 造新实例，id 与来源不动）。
+/// - 排序：综合/最热两档直接交给 core `ExpertCatalog.sort`（usage 由本层注入
+///   ——core 不存使用计数，expert_catalog.dart:411 的评测钩子位）；**最新**
+///   档是 app 展示层概念（货架条目没有编辑时间），按我的条目 updatedAt、
+///   目录样品按所在包 importedAt 排，core 数据（来源 + 导入时间）支撑它。
 library;
 
 import 'dart:convert';
 
-import 'package:chartools_core/chartools_core.dart' show StyleSource, StyleSourceFrom;
+import 'package:chartools_core/chartools_core.dart' as kb;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'contact_store.dart';
@@ -34,573 +56,156 @@ import 'settings_store.dart';
 // 数据模型
 // ---------------------------------------------------------------------------
 
-/// 目录里的一位专家（资产包内的一条）。[body] 是唯一进提示词的字段；
-/// 其余全是浏览层（展示 / 检索 / 排序），一个字节都不进提示词。
-class ExpertPreset {
-  const ExpertPreset({
-    required this.key,
-    required this.name,
-    required this.body,
-    this.category = '',
-    this.tags = const [],
-    this.description = '',
-    this.avatar = '',
-    this.packName = '',
-  });
-
-  /// 包内稳定标识（用户改名不变；与 legacy PersonaPreset.key 同语义）。
-  final String key;
-  final String name;
-
-  /// 人设正文，逐字保存（不 trim、不规范化——「套用 → 保存 → 再套用」
-  /// 不允许悄悄变形，见 legacy StyleSource.kt:24 的注释）。
-  final String body;
-
-  /// 以下均为浏览层字段，**永不进提示词**。
-  final String category;
-  final List<String> tags;
-  final String description;
-
-  /// 一个 emoji；空串由 [ExpertShelfItem.avatar] 落回占位符。
-  final String avatar;
-
-  /// 来源包名（来源追踪）：种子包填种子包名，导入的资产包填其 meta.name。
-  final String packName;
-}
-
-/// 资产包元信息：**来源追踪**（用户校准项「知识库要有来源追踪」在专家侧
-/// 的落点）。每个安装进来的目录都要能回答「这些专家是谁、从哪来、哪个版本」。
-class ExpertPackMeta {
-  const ExpertPackMeta({
-    required this.name,
-    this.source = '',
-    this.commit = '',
-    this.hash = '',
-    this.expertCount = 0,
-    this.installedAt = 0,
-  });
-
-  /// 包名：展示用，也是与 [hash] 一起做「重复安装去重」的键。
-  final String name;
-
-  /// 出处（URL 或说明），页面照实显示，不参与逻辑。
-  final String source;
-  final String commit;
-
-  /// 内容指纹：同 name+hash 视为同一个包（重复安装=刷新而不是追加）。
-  final String hash;
-
-  /// 包内可用专家数（解析通过的那部分）。
-  final int expertCount;
-
-  /// 安装时间的毫秒时间戳；0 = 内置种子包（不持久化，每次启动重建）。
-  final int installedAt;
-
-  Map<String, dynamic> toJson() => <String, dynamic>{
-        'name': name,
-        'source': source,
-        'commit': commit,
-        'hash': hash,
-        'expertCount': expertCount,
-        'installedAt': installedAt,
-      };
-
-  /// 容错解析：缺字段落默认值（与 ContactProfile.fromJson 同一口径）。
-  factory ExpertPackMeta.fromJson(Map<String, dynamic> j) => ExpertPackMeta(
-        name: j['name'] is String ? j['name'] as String : '',
-        source: j['source'] is String ? j['source'] as String : '',
-        commit: j['commit'] is String ? j['commit'] as String : '',
-        hash: j['hash'] is String ? j['hash'] as String : '',
-        expertCount: j['expertCount'] is int ? j['expertCount'] as int : 0,
-        installedAt: j['installedAt'] is int ? j['installedAt'] as int : 0,
-      );
-}
-
-/// [ExpertPack.parse] 的结果：解析失败收敛成 [problem]，绝不外抛——
-/// 目录坏了只该退化成「没有货架」，不能把专家页带崩（legacy ExpertPack
-/// 的既定态度）。
-class ExpertPack {
-  const ExpertPack({
-    required this.meta,
-    this.presets = const [],
-    this.problem = '',
-  });
-
-  final ExpertPackMeta meta;
-  final List<ExpertPreset> presets;
-
-  /// 解析说明；空串 = 正常。逐条容错时这里给「跳过了几条」的汇总。
-  final String problem;
-
-  bool get ok => presets.isNotEmpty;
-
-  /// 解析资产包 JSON。任何异常都收敛成 [problem]；**逐条容错而不是整包
-  /// 放弃**——一条 body 写坏，不该让其余专家一起消失。
-  ///
-  /// 认的形状（宽松）：`{name?, source?, sourceCommit?, contentHash?,
-  /// experts: [{key, name, body, category?, tags?, description?, emoji?}]}`
-  /// ——与 legacy ExpertPack.kt:79 的字段名一致，外加可选的 `name` 包名。
-  ///
-  /// **字段别名互认**（统一包格式见 docs/expert-pack-format.md；core 严格
-  /// 路径认 `id`/`promptText`，这里是宽容路径，两套拼写都认，同一份远端包
-  /// 不至于在某一边全量跳过）：entry 级 `id`↔`key`、`promptText`↔`body`、
-  /// `domain`↔`category`；包级认 `format`（只容忍不校验，严格校验归 core
-  /// PackCodec）与 `pack` 对象（name/source/sourceCommit/contentHash 落不到
-  /// 包级时回退读它）。
-  static ExpertPack parse(String json, {int installedAt = 0}) {
-    if (json.trim().isEmpty) {
-      return ExpertPack(
-          meta: ExpertPackMeta(name: '', installedAt: installedAt),
-          problem: '资产包为空');
-    }
-    final Object? root;
-    try {
-      root = jsonDecode(json);
-    } on FormatException catch (e) {
-      return ExpertPack(
-          meta: ExpertPackMeta(name: '', installedAt: installedAt),
-          problem: '资产包不是合法 JSON：${e.message}');
-    }
-    if (root is! Map<String, dynamic>) {
-      return ExpertPack(
-          meta: ExpertPackMeta(name: '', installedAt: installedAt),
-          problem: '资产包根节点必须是对象');
-    }
-    String str(Object? v) => v is String ? v.trim() : '';
-    // 包级元数据回退：core 形状的元数据在 `pack` 对象里（id/version/...）。
-    final Map<String, dynamic> rootMap = root; // 闭包内不继承 is! 提升，落回本地
-    final packRaw = rootMap['pack'] is Map<String, dynamic>
-        ? rootMap['pack'] as Map<String, dynamic>
-        : const <String, dynamic>{};
-    String packField(String key, String fallback) {
-      final top = str(rootMap[key]);
-      if (top.isNotEmpty) return top;
-      final nested = str(packRaw[key]);
-      return nested.isNotEmpty ? nested : fallback;
-    }
-
-    final meta = ExpertPackMeta(
-      name: packField('name', str(packRaw['id'])),
-      source: packField('source', ''),
-      commit: packField('sourceCommit', ''),
-      hash: packField('contentHash', ''),
-      installedAt: installedAt,
-    );
-    final list = root['experts'];
-    if (list is! List) {
-      return ExpertPack(meta: meta, problem: '资产包缺少 experts 数组');
-    }
-    final out = <ExpertPreset>[];
-    var skipped = 0;
-    for (final e in list) {
-      if (e is! Map<String, dynamic>) {
-        skipped++;
-        continue;
-      }
-      // 别名互认：key↔id、body↔promptText、category↔domain（主拼写在前）。
-      final key = str(e['key']).isNotEmpty ? str(e['key']) : str(e['id']);
-      final name = str(e['name']).isEmpty ? key : str(e['name']);
-      final bodyRaw = e['body'] ?? e['promptText'];
-      final body = bodyRaw is String ? bodyRaw : '';
-      // key 与 body 是「这条专家能不能用」的下限：key 空则货架去重失灵，
-      // body 空则套用等于清空人设——都跳过（legacy ExpertPack.kt:98 同口径）。
-      if (key.isEmpty || body.trim().isEmpty) {
-        skipped++;
-        continue;
-      }
-      out.add(ExpertPreset(
-        key: key,
-        name: name,
-        body: body,
-        category: str(e['category']).isNotEmpty
-            ? str(e['category'])
-            : str(e['domain']),
-        tags: [
-          if (e['tags'] is List)
-            for (final t in e['tags'] as List)
-              if (t is String) t.trim()
-        ].where((t) => t.isNotEmpty).toList(),
-        description: str(e['description']),
-        avatar: str(e['emoji']),
-        packName: meta.name,
-      ));
-    }
-    final problem = switch ((out.isEmpty, skipped > 0)) {
-      (true, _) => '资产包里没有可用专家（跳过 $skipped 条）',
-      (false, true) => '资产包有解析失败的条目，跳过 $skipped 条',
-      (false, false) => '',
-    };
-    return ExpertPack(
-      meta: ExpertPackMeta(
-        name: meta.name,
-        source: meta.source,
-        commit: meta.commit,
-        hash: meta.hash,
-        expertCount: out.length,
-        installedAt: installedAt,
-      ),
-      presets: out,
-      problem: problem,
-    );
-  }
-}
-
-/// 「我的专家库」里的一条：装进来的目录专家（可改名改正文）或用户自建的。
-/// 与 legacy PersonaProfile.kt 同构：body 行为层，其余浏览层。
-class ExpertProfile {
-  const ExpertProfile({
-    required this.id,
-    required this.name,
-    required this.body,
-    this.builtin = false,
-    this.avatar = '',
-    this.description = '',
-    this.tags = const [],
-    this.category = '',
+/// 「我的专家库」条目的 app 侧元数据。**条目本体是 core `kb.Expert`**（收敛后
+/// 不再有 app 自有 ExpertProfile）；这里只存 core 模型装不下的三样东西：
+/// 套用计数（最热/综合排序数据源）、最近编辑时间（最新档展示排序数据源）、
+/// 来源展示串（旧存档 sourceRef 原样保留——迁移数据在 UI 上一个字都不变）。
+class ExpertEntryMeta {
+  const ExpertEntryMeta({
     this.usedCount = 0,
-    this.presetKey = '',
-    this.sourceRef = '',
     this.updatedAt = 0,
+    this.sourceRef = '',
   });
-
-  final String id;
-  final String name;
-  final String body;
-  final bool builtin;
-
-  // —— 以下浏览层，永不进提示词 ——
-  final String avatar;
-  final String description;
-  final List<String> tags;
-  final String category;
 
   /// 被套用次数（「最热」排序与综合分的数据源）。
   final int usedCount;
 
-  /// 目录来源的稳定标识（`daily.friend` 一类）；自建/复制为空串。
-  final String presetKey;
-
-  /// **来源追踪**：这条专家从哪来（`pack:<包名>` / `seed:<包名>` / `mine`）。
-  final String sourceRef;
+  /// 最近一次修改的毫秒时间戳（「最新」档展示排序的数据源）。
   final int updatedAt;
 
-  ExpertProfile copyWith({
-    String? id,
-    String? name,
-    String? body,
-    bool? builtin,
-    String? avatar,
-    String? description,
-    List<String>? tags,
-    String? category,
-    int? usedCount,
-    String? presetKey,
-    String? sourceRef,
-    int? updatedAt,
-  }) =>
-      ExpertProfile(
-        id: id ?? this.id,
-        name: name ?? this.name,
-        body: body ?? this.body,
-        builtin: builtin ?? this.builtin,
-        avatar: avatar ?? this.avatar,
-        description: description ?? this.description,
-        tags: tags ?? this.tags,
-        category: category ?? this.category,
+  /// **来源追踪**：这条专家从哪来。旧键迁移时原样保留（`pack:<包名>` /
+  /// `seed:<包名>` / `mine`），新入库条目按 core 来源现算。
+  final String sourceRef;
+
+  ExpertEntryMeta copyWith({int? usedCount, int? updatedAt, String? sourceRef}) =>
+      ExpertEntryMeta(
         usedCount: usedCount ?? this.usedCount,
-        presetKey: presetKey ?? this.presetKey,
-        sourceRef: sourceRef ?? this.sourceRef,
         updatedAt: updatedAt ?? this.updatedAt,
+        sourceRef: sourceRef ?? this.sourceRef,
       );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'id': id,
-        'name': name,
-        'body': body,
-        'builtin': builtin,
-        'avatar': avatar,
-        'description': description,
-        'tags': List<String>.of(tags),
-        'category': category,
         'usedCount': usedCount,
-        'presetKey': presetKey,
-        'sourceRef': sourceRef,
         'updatedAt': updatedAt,
+        'sourceRef': sourceRef,
       };
 
   /// 容错解析：类型不对的项落默认值，绝不抛（坏存档不挡启动）。
-  factory ExpertProfile.fromJson(Map<String, dynamic> j) => ExpertProfile(
-        id: j['id'] is String ? j['id'] as String : '',
-        name: j['name'] is String ? j['name'] as String : '',
-        body: j['body'] is String ? j['body'] as String : '',
-        builtin: j['builtin'] is bool ? j['builtin'] as bool : false,
-        avatar: j['avatar'] is String ? j['avatar'] as String : '',
-        description:
-            j['description'] is String ? j['description'] as String : '',
-        tags: _stringListOf(j['tags']),
-        category: j['category'] is String ? j['category'] as String : '',
+  factory ExpertEntryMeta.fromJson(Map<String, dynamic> j) => ExpertEntryMeta(
         usedCount: j['usedCount'] is int ? j['usedCount'] as int : 0,
-        presetKey: j['presetKey'] is String ? j['presetKey'] as String : '',
-        sourceRef: j['sourceRef'] is String ? j['sourceRef'] as String : '',
         updatedAt: j['updatedAt'] is int ? j['updatedAt'] as int : 0,
+        sourceRef: j['sourceRef'] is String ? j['sourceRef'] as String : '',
       );
-
-  static List<String> _stringListOf(Object? raw) => [
-        if (raw is List)
-          for (final v in raw)
-            if (v is String) v,
-      ];
 }
 
-/// 货架上的一条：**我的条目优先**（同 presetKey 或同名时目录样品让位）。
-/// legacy ExpertShelf.kt:162 的对应物——目录是货架上的样品，用户改过的
-/// 那份才是他的东西；拼的时候丢掉用户改过的内容是这类功能最隐蔽的错。
+/// 货架上的一条：**我的条目优先**（同 id 或同名时目录样品让位——legacy
+/// ExpertShelf.kt 的双重判断，收敛后语义不变）。包装的是 core `kb.Expert`；
+/// [body]/[category] 等页面字段名保持 #12 版本的词汇，页面只换数据来源不换话。
 class ExpertShelfItem {
-  const ExpertShelfItem.mine(this.profile) : preset = null;
-  const ExpertShelfItem.ghost(this.preset) : profile = null;
+  const ExpertShelfItem.mine(this.expert, this.meta) : inLibrary = true;
 
-  final ExpertProfile? profile;
-  final ExpertPreset? preset;
+  const ExpertShelfItem.ghost(this.expert)
+      : meta = null,
+        inLibrary = false;
+
+  final kb.Expert expert;
+
+  /// 我的库元数据；目录样品为 null。
+  final ExpertEntryMeta? meta;
 
   /// 我的库里已有这一条。
-  bool get inLibrary => profile != null;
+  final bool inLibrary;
 
-  /// 目录样品的稳定 id（`pack:<key>`，与库内自增 id 形状不同，无歧义）。
-  String get id => profile?.id ?? 'pack:${preset?.key ?? ''}';
+  /// 全局稳定 id（`pack:<packId>/<key>`；自建条目是 `x_` 开头的旧形状）。
+  String get id => expert.id;
 
-  String get name => profile?.name ?? preset?.name ?? '';
-  String get body => profile?.body ?? preset?.body ?? '';
-  String get category => (profile?.category ?? preset?.category ?? '').trim();
-  List<String> get tags => profile?.tags ?? preset?.tags ?? const [];
-  String get description => profile?.description ?? preset?.description ?? '';
-  int get usedCount => profile?.usedCount ?? 0;
-  bool get builtin => profile?.builtin ?? true;
-  String get presetKey => profile?.presetKey ?? preset?.key ?? '';
+  String get name => expert.name;
 
-  /// 来源追踪：样品显示包名；已入库的显示落库时记下的 sourceRef。
-  String get sourceRef =>
-      profile?.sourceRef ?? 'pack:${preset?.packName ?? ''}';
+  /// 唯一进提示词的正文（core Expert.promptText）。
+  String get body => expert.promptText;
 
-  /// 头像：没设时落占位 emoji（legacy ExpertCard.kt:35 的 FALLBACK_AVATAR）。
-  String get avatar {
-    final a = (profile?.avatar ?? preset?.avatar ?? '').trim();
-    return a.isEmpty ? '🧩' : a;
+  /// 浏览层领域（core 主拼写 domain；旧页面叫「分类」，字段名保留）。
+  String get category => expert.domain;
+  List<String> get tags => expert.tags;
+  String get description => expert.description;
+
+  /// 浏览层 emoji（core 默认占位 🧩）。
+  String get avatar => expert.emoji;
+  int get usedCount => meta?.usedCount ?? 0;
+  bool get builtin => expert.isBuiltin;
+
+  /// 包内稳定键（旧 presetKey 的对应物）。
+  String get presetKey => expert.key;
+
+  /// 来源追踪展示串：已入库的显示落库时记下的 sourceRef；样品按 core 来源
+  /// 现算（内置包 `seed:<id>`、远端包 `pack:<id>`、自建 `mine`）。
+  String get sourceRef {
+    final sr = meta?.sourceRef ?? '';
+    return sr.isEmpty ? _sourceRefOf(expert) : sr;
+  }
+
+  static String _sourceRefOf(kb.Expert e) {
+    final packId = e.source.packId;
+    if (packId.isEmpty) return 'mine';
+    return e.isBuiltin ? 'seed:$packId' : 'pack:$packId';
   }
 }
 
-// ---------------------------------------------------------------------------
-// 浏览层（纯函数）
-// ---------------------------------------------------------------------------
-
-/// 排序方式：综合 / 最热 / 最新（legacy ExpertCatalog.kt:9 的三个 tab）。
+/// 展示层排序：综合/最热两档直接交给 core `ExpertCatalog.sort`（规则唯一
+/// 出处）；[newest] 是 app 展示层概念（core ExpertSort 没有也不该有——货架
+/// 条目没有编辑时间），由控制器按 meta.updatedAt / 包 importedAt 排。
 enum ExpertSort {
-  /// 综合分排序：`usedCount * 3 + (builtin ? 2 : 0)`。
   comprehensive('综合'),
-
-  /// 只看套用次数。
   hottest('最热'),
-
-  /// 只看最近编辑时间。
   newest('最新');
 
   const ExpertSort(this.label);
+
+  /// 界面 tab 的字面量，改它等于改 UI 契约。
   final String label;
 }
 
-/// 专家浏览的纯函数层：分类、搜索、标签、排序。全部不改入参、返回新列表，
-/// 让「综合排序凭什么这个顺序」「搜『稳赚』能不能搜到销售跟进」这类问题
-/// 能被单测钉死（与 legacy ExpertCatalog.kt:26 同一理由）。
-abstract final class ExpertCatalog {
-  /// 内置分类的固定顺序（分组 chips 的顺序）；不在表里的自定义分类按名字
-  /// 排在后面。沿用 legacy ExpertPack.kt:46 的清单，保证老用户换过来时
-  /// 分组顺序的眼熟感。
-  static const List<String> categoryOrder = <String>[
-    '情感',
-    '销售',
-    '职场',
-    '客服',
-    '日常',
-    '学术研究',
-    '企业战略',
-    '设计',
-    '技术工程',
-    '金融财务',
-    '游戏开发',
-    '地理信息',
-    '医疗健康',
-    '人力组织',
-    '法务合规',
-    '市场营销',
-    '投放广告',
-    '产品',
-    '项目管理',
-    '研究',
-    '安全',
-    '空间计算',
-    '垂直专业',
-    '供应链',
-    '质量测试',
-  ];
-
-  /// 没有分类的条目归到这里（只在真有这种条目时出现）。
-  static const String uncategorized = '未分类';
-
-  /// 「全部」不是分类，是「不筛」。
-  static const String all = '全部';
-
-  /// 当前货架真实存在的分类，按 [categoryOrder] 排；自定义分类按名字跟在
-  /// 后面；有未分类条目时最后追加 [uncategorized]。刻意不返回空分类。
-  static List<String> categories(List<ExpertShelfItem> items) {
-    final present = {
-      for (final i in items)
-        if (i.category.isNotEmpty) i.category
-    };
-    final out = <String>[
-      for (final c in categoryOrder)
-        if (present.contains(c)) c,
-      ...present.where((c) => !categoryOrder.contains(c)).toList()..sort(),
-    ];
-    if (items.any((i) => i.category.isEmpty)) out.add(uncategorized);
-    return out;
-  }
-
-  /// 综合分（规则写死在这里，是为了能被断言）：一次套用值 3 分，内置目录
-  /// 条目额外 2 分——「用了一次的自建专家」和「没被用过的目录条目」打平，
-  /// 再用一次就反超（legacy ExpertCatalog.kt:111 的规则原样保留）。
-  /// （int.clamp 返回 num，手动钳负值保持 int 返回类型。）
-  static int score(ExpertShelfItem item) {
-    final used = item.usedCount < 0 ? 0 : item.usedCount;
-    return used * 3 + (item.builtin ? 2 : 0);
-  }
-
-  /// 单条是否命中关键词：名字、简介、标签、正文（正文也算——用户往往记得
-  /// 的是「那张写着某句话的卡」，legacy ExpertCatalog.kt:77 同口径）。
-  static bool matches(ExpertShelfItem item, String query) {
-    final q = query.trim().toLowerCase();
-    if (q.isEmpty) return true;
-    if (item.name.toLowerCase().contains(q)) return true;
-    if (item.description.toLowerCase().contains(q)) return true;
-    if (item.tags.any((t) => t.toLowerCase().contains(q))) return true;
-    return item.body.toLowerCase().contains(q);
-  }
-
-  /// 按分类 + 标签 + 关键词筛。[category] 传 null / [all] 都表示不筛；
-  /// [uncategorized] 筛没有分类的条目；[tag] 空串 = 不筛。
-  static List<ExpertShelfItem> filter(
-    List<ExpertShelfItem> items, {
-    String? category,
-    String tag = '',
-    String query = '',
-  }) {
-    final cat = (category ?? '').trim();
-    final t = tag.trim();
-    return items.where((i) {
-      final catOk = switch (cat) {
-        '' || all => true,
-        uncategorized => i.category.isEmpty,
-        _ => i.category.toLowerCase() == cat.toLowerCase(),
-      };
-      final tagOk = t.isEmpty || i.tags.contains(t);
-      return catOk && tagOk && matches(i, query);
-    }).toList();
-  }
-
-  /// 排序。三种模式的主键不同，副键统一（最近编辑 → 名字），保证结果确定
-  /// 可比（legacy ExpertCatalog.kt:114 同口径）。
-  static List<ExpertShelfItem> sort(
-    List<ExpertShelfItem> items, {
-    ExpertSort mode = ExpertSort.comprehensive,
-  }) {
-    int byRecent(ExpertShelfItem i) => i.profile?.updatedAt ?? 0;
-    int byUsage(ExpertShelfItem i) => i.usedCount;
-    final list = [...items];
-    list.sort((a, b) {
-      switch (mode) {
-        case ExpertSort.comprehensive:
-          final s = score(b).compareTo(score(a));
-          if (s != 0) return s;
-        case ExpertSort.hottest:
-          final s = byUsage(b).compareTo(byUsage(a));
-          if (s != 0) return s;
-        case ExpertSort.newest:
-          final s = byRecent(b).compareTo(byRecent(a));
-          if (s != 0) return s;
-      }
-      final r = byRecent(b).compareTo(byRecent(a));
-      if (r != 0) return r;
-      return a.name.compareTo(b.name);
-    });
-    return list;
-  }
-
-  /// 界面用的组合动作：先筛后排（顺序固定，分开调两次没有意义）。
-  static List<ExpertShelfItem> browse(
-    List<ExpertShelfItem> items, {
-    String? category,
-    String tag = '',
-    String query = '',
-    ExpertSort mode = ExpertSort.comprehensive,
-  }) =>
-      sort(
-        filter(items, category: category, tag: tag, query: query),
-        mode: mode,
-      );
-}
-
 // ---------------------------------------------------------------------------
-// 套用语义
+// 套用通道（sink 适配）
 // ---------------------------------------------------------------------------
 
-/// 一次套用的结果。[ok=false] 时 [profile] 也可能非空——落库成功但换正文
-/// 失败时，库里那条要保留（legacy ExpertApply.kt:39 的「负向的第 3 步失败」）。
-class ExpertApplyResult {
-  const ExpertApplyResult({
-    required this.ok,
-    this.profile,
-    this.warning = '',
-    this.problem = '',
-  });
-
-  final bool ok;
-  final ExpertProfile? profile;
-
-  /// 降级说明（热度没记上一类），不影响使用。
-  final String warning;
-
-  /// 失败原因，给界面直接显示。
-  final String problem;
+/// 全局风格写入口（app 侧端口）。core 的 StyleSink（expert_apply.dart:44）是
+/// **同步**接口——ExpertApply 的「写失败回滚」在同步 setter 上判定；盘上的
+/// 成败由 [flush] 上交，控制器在套用成功后 await 它并兜底回滚（内存+盘一起
+/// 要么成、要么还原），保证「要么全成、要么不留半截」覆盖到落盘。
+abstract class StyleSinkPort implements kb.StyleSink {
+  /// 把内存态落盘；失败抛出（调用方负责回滚与报错）。
+  Future<void> flush();
 }
 
-/// 全局风格正文的写入口。接口而不是直接依赖 SettingsStore，理由与 legacy
-/// ExpertApply.kt:13（StyleSink）一致：保持套用语义可在纯 Dart 单测里逼出
-/// 失败路径。接线时用 [SettingsStyleSink]。
-abstract class StyleSink {
-  String get style;
-  Future<void> setStyle(String value);
-}
-
-/// [StyleSink] 的 SettingsStore 适配器：写 `config.style` 并整包落盘。
-/// settings_store.dart 不由本工作流改动，只 import 消费（页面的接线留 #13）。
-class SettingsStyleSink implements StyleSink {
+/// [StyleSinkPort] 的 SettingsStore 适配器：同步改内存 `config.style`，
+/// 异步整包落盘。settings_store.dart 不由本工作流改动，只 import 消费。
+class SettingsStyleSink implements StyleSinkPort {
   SettingsStyleSink(this.store);
 
   final SettingsStore store;
+
+  /// 最近一次 setter 触发的落盘任务；flush 等的就是它（连写多次取最后一次）。
+  Future<void>? _pending;
 
   @override
   String get style => store.config.value.style;
 
   @override
-  Future<void> setStyle(String value) async {
+  set style(String value) {
     store.config.value = store.config.value.copyWith(style: value);
-    await store.save();
+    _pending = store.save();
   }
+
+  @override
+  Future<void> flush() => _pending ?? Future<void>.value();
 }
 
-/// 联系人档案对套用动作暴露的最小面：选目标 + 覆写专用人设。与 [StyleSink]
-/// 同一思路——接口隔离，测试用内存实现，接线用 [ContactStorePersonaSink]。
+/// 联系人档案对套用动作暴露的最小面：目标快照 + 覆写专用人设。接口隔离，
+/// 测试用内存实现，接线用 [ContactStorePersonaSink]。
 abstract class ContactPersonaSink {
-  /// 当前全部联系人（页面选套用目标用；[ContactTarget.persona] 供页面判断
-  /// 「已有专用人设 → 弹确认」的 StyleSource 优先级提示）。
+  /// 当前全部联系人（页面选套用目标用；[ContactTarget.persona] 供页面标注
+  /// 「已有专用人设」——判定走 [ExpertsController.contactHasPersona]）。
   List<ContactTarget> get targets;
 
   /// 覆写联系人的专用人设正文。目标不存在时抛 StateError（与
@@ -622,7 +227,7 @@ class ContactTarget {
 }
 
 /// [ContactPersonaSink] 的 ContactStore 适配器（contact_store.dart 只读不写，
-/// 本工作流不碰它；接线留 #13）。
+/// 本工作流不碰它）。
 class ContactStorePersonaSink implements ContactPersonaSink {
   ContactStorePersonaSink(this.store);
 
@@ -646,136 +251,188 @@ class ContactStorePersonaSink implements ContactPersonaSink {
   }
 }
 
+/// 一次套用的结果。[needsChoice] 为 true 时**什么都没写**——core
+/// ExpertApply 检测到「专用人设压全局」的冲突，等界面问完用户（覆盖/并存）
+/// 再带 `kb.ConflictChoice` 调一次。[profile] 非空表示库里那条已就位（失败
+/// 路径也保留——它是完整的合法条目，删才是二次破坏）。
+class ExpertApplyResult {
+  const ExpertApplyResult({
+    required this.ok,
+    this.needsChoice = false,
+    this.profile,
+    this.warning = '',
+    this.problem = '',
+    this.note = '',
+  });
+
+  final bool ok;
+  final bool needsChoice;
+  final kb.Expert? profile;
+
+  /// 降级说明（热度没记上一类），不影响使用。
+  final String warning;
+
+  /// 失败原因，给界面直接显示。
+  final String problem;
+
+  /// core 的冲突/优先级提示文案（needsChoice 与并存路径都有，界面照实念）。
+  final String note;
+}
+
 // ---------------------------------------------------------------------------
-// 内置种子目录
+// 包持久化（PackStore 的 SharedPreferences 实现）
 // ---------------------------------------------------------------------------
 
-/// 内置种子资产包：随代码内置的一小批示范专家（**思路源自 legacy
-/// PersonaPresets.kt，内容按本仓库场景重写**——它是「长成什么样才对」的
-/// 示范，不是唯一选项）。走 [ExpertPack.parse] 同一条解析路径，保证种子与
-/// 外部资产包的解析行为一致。正文一律写 PersonaCard 的**键**而不是散文
-/// ——键才会被拆进提示词/闸门/语域开关（legacy PersonaPresets.kt:38 的教训）。
-const String seedPackJson = '''
-{
-  "name": "内置种子目录",
-  "source": "chartools-next 内置（思路源自 legacy PersonaPresets，内容重写）",
-  "contentHash": "seed-v1",
-  "experts": [
-    {
-      "key": "daily.friend",
-      "name": "日常闲聊",
-      "category": "日常",
-      "tags": ["朋友", "口语", "松弛"],
-      "description": "日常闲聊：用平时的叫法，口语松弛，不端着",
-      "emoji": "🌿",
-      "body": "称呼：用平时的叫法\\n关系：朋友\\n语气：口语、松弛，不端着\\n情境：日常闲聊\\n硬边界：借钱、隐私\\n避谈：鸡汤\\n示例：\\n我：在干嘛\\n对方：刚吃完饭，瘫着\\n我：出来走走？"
-    },
-    {
-      "key": "emotion.companion",
-      "name": "情绪陪伴",
-      "category": "情感",
-      "tags": ["深夜", "倾听", "不建议"],
-      "description": "亲密朋友的深夜聊天：先接情绪，给陪伴不给说教",
-      "emoji": "🌙",
-      "body": "称呼：用平时的昵称\\n关系：亲密朋友\\n语气：温和、接住情绪，不急着给建议\\n主题：情绪陪伴\\n情境：深夜私聊\\n硬边界：评判、说教\\n避谈：想开点、多喝热水\\n安全词：暂停\\n示例：\\n我：今天好累\\n对方：那就先歇着，我陪你待会儿"
-    },
-    {
-      "key": "sales.followup",
-      "name": "销售跟进",
-      "category": "销售",
-      "tags": ["跟进", "克制", "不夸大"],
-      "description": "客户跟进：先回应再推进，不替产品许诺",
-      "emoji": "🤝",
-      "body": "称呼：称对方「您」\\n关系：销售与客户，跟进阶段\\n语气：热情但克制，短句，先回应再推进\\n主题：产品跟进\\n情境：微信文字沟通\\n硬边界：虚假承诺、贬低竞品\\n避谈：稳赚、保证收益、最低价\\n示例：\\n我：上次说的方案您看了吗\\n对方：还没细看\\n我：不急，需要我挑两页重点发您吗"
-    },
-    {
-      "key": "workplace.report",
-      "name": "职场汇报",
-      "category": "职场",
-      "tags": ["汇报", "结论先行", "结构化"],
-      "description": "对上级汇报：先结论后细节，不甩锅不越级",
-      "emoji": "📋",
-      "body": "称呼：称职务或「老师」\\n关系：下属向直属上级汇报\\n语气：结构化、先结论后细节，不用感叹号\\n情境：周会与周报\\n硬边界：甩锅、越级\\n避谈：大概、可能吧\\n示例：\\n我：本周进展两个：A 已上线，B 卡在审批\\n我：B 需要您帮忙推一下审批"
-    },
-    {
-      "key": "service.complaint",
-      "name": "客诉安抚",
-      "category": "客服",
-      "tags": ["客诉", "先接情绪", "不辩解"],
-      "description": "客诉处理：先接情绪再处理问题，不辩解不推诿",
-      "emoji": "🎧",
-      "body": "称呼：称「您」\\n关系：客服与不满中的用户\\n语气：先接情绪再处理，短句，不辩解\\n主题：客诉处理\\n硬边界：推诿、私自承诺赔偿\\n避谈：这是规定\\n示例：\\n我：非常抱歉让您跑了三趟\\n我：这次我来跟进到底，处理完第一时间告诉您"
-    },
-    {
-      "key": "research.literature",
-      "name": "文献速读",
-      "category": "研究",
-      "tags": ["文献", "来源", "不编造"],
-      "description": "文献梳理：给结论先给来源，不编造不脑补",
-      "emoji": "📚",
-      "body": "称呼：直呼「你」\\n关系：研究助理与研究者\\n语气：精确、克制，先给来源再给结论\\n主题：文献梳理\\n硬边界：编造文献、伪造数据\\n避谈：众所周知\\n示例：\\n我：这个问题有三条线：Chen 2021、Dupont 2022、以及综述里的一句带过"
-    },
-    {
-      "key": "tech.code-review",
-      "name": "代码评审",
-      "category": "技术工程",
-      "tags": ["评审", "就事论事"],
-      "description": "同事代码评审：就事论事，先结论再理由，附改法",
-      "emoji": "🛠",
-      "body": "称呼：直接用 ID\\n关系：同事之间的代码评审\\n语气：就事论事，先结论再理由，附修改建议\\n情境：PR 评论\\n硬边界：人身评价\\n避谈：重构一切\\n示例：\\n我：这里先别缓存：键没含租户 ID，会串数据；改成传参就行"
-    },
-    {
-      "key": "product.prd",
-      "name": "需求梳理",
-      "category": "产品",
-      "tags": ["需求", "用户故事"],
-      "description": "产品与研发对齐需求：用户故事先行，边界写清楚",
-      "emoji": "🧭",
-      "body": "称呼：称「你」\\n关系：产品与研发对齐需求\\n语气：结构化，用户故事先行\\n主题：需求评审\\n硬边界：拍脑袋排期\\n避谈：对标大厂\\n示例：\\n我：这个故事是：运营在活动前能自己改文案，不用找研发"
+/// `kb.PackStore` 的 SharedPreferences 实现。**单键存整包映射**：packId 只作
+/// JSON 键（纯数据），绝不拼平台键名/文件路径——core 对 packId 只拦 `/`，
+/// `..\`、控制字符等由实现方拒绝；KV 原文存储是 expert_pack.dart:156 建议
+/// 的最稳做法（与 MemoryPackStore 同款思路）。存的是「收到的原文 + 条目级
+/// 别名补齐主拼写」的归一化形（见 [ExpertsController._normalizePackJson]：
+/// format/pack/experts 结构与语义不动）。
+class PrefsPackStore implements kb.PackStore {
+  /// 新键：packId → 包清单原文（JSON map 单键存储）。
+  static const String storageKey = 'expert_packs_v2';
+
+  final Map<String, String> _mem = <String, String>{};
+
+  /// 读盘灌内存。返回 true = 新键在盘上且可解析（迁移已完成，不重走旧键）；
+  /// false = 新键缺席/损坏 → 调用方走旧键迁移。平台通道不可用时也返回 true
+  /// （走内存模式，别再触发迁移写盘）。
+  Future<bool> hydrate(List<String> problems) async {
+    _mem.clear();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(storageKey);
+      if (raw == null) return false; // 没迁移过
+      if (raw.isEmpty) return true;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        decoded.forEach((k, v) {
+          if (v is String && v.isNotEmpty) _mem[k as String] = v;
+        });
+        return true;
+      }
+      problems.add('资产包存档（$storageKey）形状不对，按旧键重新迁移');
+      return false;
+    } on FormatException {
+      problems.add('资产包存档（$storageKey）不是合法 JSON，按旧键重新迁移');
+      return false;
+    } catch (e) {
+      problems.add('资产包存档读取失败（$e），本次会话改动不会持久化');
+      return true;
     }
-  ]
+  }
+
+  @override
+  Map<String, String> loadAll() => Map.of(_mem);
+
+  @override
+  void save(String packId, String rawJson) => _mem[packId] = rawJson;
+
+  @override
+  void remove(String packId) => _mem.remove(packId);
+
+  /// 安装/卸载落盘失败时的回滚：整包映射还原成进来时的快照。
+  void restoreSnapshot(Map<String, String> snapshot) {
+    _mem
+      ..clear()
+      ..addAll(snapshot);
+  }
+
+  /// 内存态写盘。失败原样上抛——调用方（控制器）负责回滚与报错。
+  Future<void> flush() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(storageKey, jsonEncode(_mem));
+  }
 }
-''';
 
 // ---------------------------------------------------------------------------
 // Controller
 // ---------------------------------------------------------------------------
 
-/// 专家库控制器：持目录（[ExpertPack] 列表）+ 我的库（[ExpertProfile] 列表）
-/// 与本地持久化；套用动作实现 legacy ExpertApply 的三步语义。
+/// 专家库控制器：内置包 + 已装资产包（core ExpertPackManager）+ 我的库
+/// （core Expert + 本层元数据）+ 套用（core ExpertApply）。
 ///
 /// 页面接线留 **#13**：main.dart 不由本工作流改动；接线时构造
 /// `ExpertsController(styleSink: SettingsStyleSink(settings), contactSink:
 /// ContactStorePersonaSink(contacts))` 并调 [load]。
 class ExpertsController {
-  ExpertsController({StyleSink? styleSink, ContactPersonaSink? contactSink})
-      : _styleSink = styleSink,
-        _contactSink = contactSink {
-    // 种子包不持久化：每次启动重建（内容随代码走，不该被旧盘上的快照钉死）。
-    _packs.value = [ExpertPack.parse(seedPackJson)];
+  ExpertsController({
+    StyleSinkPort? styleSink,
+    ContactPersonaSink? contactSink,
+    PrefsPackStore? packStore,
+  })  : _styleSink = styleSink,
+        _contactSink = contactSink,
+        _packStore = packStore ?? PrefsPackStore() {
+    // 内置包：构造期先做一次**同步磁盘探测**（VM / 测试 / 桌面开发路径能直接
+    // 找到 packages/core/assets/experts/catalog.json）——页面在 load() 之前也
+    // 有货架可看；load() 会用 rootBundle/磁盘/内嵌镜像三层的最终结果重建。
+    _manager = kb.ExpertPackManager(
+        _packStore, builtinJson: kb.readBuiltinCatalogJson());
+    _apply = kb.ExpertApply(sink: _styleSink);
+    _refreshPacks();
   }
 
-  /// shared_preferences 键：我的专家库整包 JSON。
-  static const String _libraryKey = 'experts';
+  /// 旧 shared_preferences 键（**只读兼容**；写永不回退到这两个键）：
+  /// - `$legacyLibraryKey`：旧 ExpertProfile 整包（body/presetKey/sourceRef…）；
+  /// - `$legacyPacksKey`：旧 ExpertPack 原文列表（无 format、无 pack 对象）。
+  static const String legacyLibraryKey = 'experts';
+  static const String legacyPacksKey = 'expert_packs';
 
-  /// shared_preferences 键：已安装资产包的原始 JSON 列表（重装/去重的依据）。
-  static const String _packsKey = 'expert_packs';
+  /// 新键：我的库整包（条目 + 元数据 + 包导入时间），写 core 主拼写
+  /// promptText/domain（读取时仍按别名互认，docs/expert-pack-format.md §2）。
+  static const String libraryKeyV2 = 'experts_v2';
 
-  final StyleSink? _styleSink;
+  /// 内置包保留 id（core ExpertPackManager.builtinPackId 的透传）——页面据此
+  /// 隐藏内置包的卸载按钮（core 也会拒绝，双保险）。
+  static const String builtinPackId = kb.ExpertPackManager.builtinPackId;
+
+  final StyleSinkPort? _styleSink;
   final ContactPersonaSink? _contactSink;
+  final PrefsPackStore _packStore;
+
+  late kb.ExpertPackManager _manager;
+  late kb.ExpertApply _apply;
 
   /// 我的专家库（存档顺序即展示顺序；写回永远换新 List，ValueNotifier 按
   /// identical 判定——与 ContactStore.contacts 同一纪律）。
-  final ValueNotifier<List<ExpertProfile>> installed =
-      ValueNotifier(const <ExpertProfile>[]);
+  final ValueNotifier<List<kb.Expert>> installed =
+      ValueNotifier(const <kb.Expert>[]);
 
-  /// 已装载的资产包：第 0 位恒为种子包，其后是安装进来的。
-  final ValueNotifier<List<ExpertPack>> _packs = ValueNotifier(<ExpertPack>[]);
+  /// 已装载的资产包：第 0 位恒为内置包，其余按 pack.id 字典序（core 快照语义）。
+  final ValueNotifier<List<kb.ExpertPackData>> _packs =
+      ValueNotifier(const <kb.ExpertPackData>[]);
+
+  /// 已装包快照里的坏包消息（core：坏包被忽略而不是被删除，照实说）。
+  final ValueNotifier<List<String>> packProblems =
+      ValueNotifier(const <String>[]);
+
+  final List<kb.Expert> _library = <kb.Expert>[];
+  final Map<String, ExpertEntryMeta> _meta = <String, ExpertEntryMeta>{};
+
+  /// packId → 导入时间（「最新」档对目录样品的数据源；挂在我的库存档里持久化）。
+  final Map<String, int> _packImportedAt = <String, int>{};
+
+  List<String> _loadProblems = const <String>[];
+  List<String> _loadNotes = const <String>[];
+  int _lastStamp = 0;
+
+  /// dispose 之后的 notifier 写入守卫。#13 接线（main.dart 的 _PageHost）是
+  /// 「push 构造 + ..load()、pop 即 dispose」——load 的续体在
+  /// shared_preferences 返回后才走，用户在那一刻之前 pop 掉页面，续体就会
+  /// 往已 dispose 的 ValueNotifier 写值（debug 断言崩）。守卫让这些续体变成
+  /// 静默 no-op：盘上状态已由 persist 落好，内存态随实例一起销毁，无须补救。
+  bool _disposed = false;
 
   /// 只读视图（页面监听用）。
   Listenable get packsListenable => _packs;
+  List<kb.ExpertPackData> get packs => _packs.value;
 
-  List<ExpertPack> get packs => _packs.value;
+  /// load() 之后的迁移/读取问题清单（失败计数，非空即有东西被跳过）。
+  List<String> get loadProblems => _loadProblems;
+
+  /// load() 之后的迁移说明（成功计数、去重说明等信息级消息）。
+  List<String> get loadNotes => _loadNotes;
 
   /// 全局风格写入口是否已接线（未接线时页面禁用「套用为全局风格」并提示）。
   bool get hasStyleSink => _styleSink != null;
@@ -787,52 +444,40 @@ class ExpertsController {
   List<ContactTarget> get contactTargets => _contactSink?.targets ?? const [];
 
   /// 「这位联系人是否写了专用人设」的**唯一判定处**：复用 core
-  /// [StyleSource.resolve]（style_source.dart:27——专用人设压全局的既定
-  /// 优先级）。独立复核要求：优先级规则将来若改，判定只改这一处，页面与
-  /// 提示不得各自手写 trim 判空漂移。
+  /// StyleSource.resolve（style_source.dart:29——专用人设压全局的既定优先级）。
+  /// 独立复核要求：优先级规则将来若改，判定只改这一处，页面与提示不得各自
+  /// 手写 trim 判空漂移。
   static bool contactHasPersona(ContactTarget target) =>
-      StyleSource.resolve('', target.persona).from == StyleSourceFrom.contact;
+      kb.StyleSource.resolve('', target.persona).from ==
+      kb.StyleSourceFrom.contact;
 
   /// 是否存在写了专用人设的联系人（套用为全局风格时的 StyleSource 提示条件）。
-  bool get anyContactHasPersona =>
-      contactTargets.any((t) => contactHasPersona(t));
+  bool get anyContactHasPersona => contactTargets.any(contactHasPersona);
 
   // ------------------------------------------------------------------ 货架
 
-  /// 货架：我的条目在前 + 尚未入库的目录样品（legacy ExpertShelf.merge 的
-  /// 语义），再按浏览条件筛排。
-  List<ExpertShelfItem> shelf({
-    String? category,
-    String tag = '',
-    String query = '',
-    ExpertSort sort = ExpertSort.comprehensive,
-  }) =>
-      ExpertCatalog.browse(shelfUnfiltered,
-          category: category, tag: tag, query: query, mode: sort);
-
-  /// 未筛排的整张货架（详情页按 id 反查用）。
+  /// 货架：我的条目在前 + 尚未入库的目录样品（同 id 或同名让位——legacy
+  /// ExpertShelf.kt:179 的双重判断：用户改过名的条目也是「他的东西」）。
   List<ExpertShelfItem> get shelfUnfiltered {
-    final mine = <ExpertShelfItem>[
-      for (final p in installed.value) ExpertShelfItem.mine(p),
-    ];
-    final mineKeys = {
-      for (final p in installed.value)
-        if (p.presetKey.isNotEmpty) p.presetKey,
-    };
-    final mineNames = {for (final p in installed.value) p.name};
-    final ghosts = <ExpertShelfItem>[];
-    for (final pack in _packs.value) {
-      for (final preset in pack.presets) {
-        // 同 presetKey **或同名**都让位：目录里的 key 是稳定标识，但用户
-        // 完全可能把改名后的条目当「自己的」——两种都算已入库（legacy
-        // ExpertShelf.kt:179 的双重判断）。
-        if (mineKeys.contains(preset.key) || mineNames.contains(preset.name)) {
-          continue;
-        }
-        ghosts.add(ExpertShelfItem.ghost(preset));
-      }
+    final items = <ExpertShelfItem>[];
+    final mineIds = <String>{};
+    final mineNames = <String>{};
+    for (final e in _library) {
+      items.add(ExpertShelfItem.mine(
+        e,
+        _meta[e.id] ??
+            ExpertEntryMeta(sourceRef: ExpertShelfItem._sourceRefOf(e)),
+      ));
+      mineIds.add(e.id);
+      mineNames.add(e.name);
     }
-    return [...mine, ...ghosts];
+    // core 口径：allExperts() 已经把所有已装包（含内置）的专家合并成一张
+    // List<Expert>（expert_pack.dart:286-287）——直接逐个过筛即可。
+    for (final e in _manager.allExperts()) {
+      if (mineIds.contains(e.id) || mineNames.contains(e.name)) continue;
+      items.add(ExpertShelfItem.ghost(e));
+    }
+    return items;
   }
 
   /// 按 id 找货架条目（详情页返回列表项后重查最新状态用）。
@@ -843,332 +488,1138 @@ class ExpertsController {
     return null;
   }
 
-  /// 货架上真实存在的分类（页面分组 chips）。
-  List<String> categories() => ExpertCatalog.categories(shelfUnfiltered);
+  /// 货架上真实存在的领域（页面分组 chips）：core 5 固定领域在前（只列在场
+  /// 的），自定义领域按名排后，未分类殿后——25 条旧分类清单的承接见文件头注释。
+  List<String> categories() => kb.ExpertCatalog.domains(_shelfExperts);
 
   /// 货架上的标签按出现次数降序（页面标签筛选行），最多 [limit] 个。
-  List<String> topTags({int limit = 24}) {
-    final count = <String, int>{};
-    for (final i in shelfUnfiltered) {
-      for (final t in i.tags) {
-        if (t.trim().isEmpty) continue;
-        count[t] = (count[t] ?? 0) + 1;
-      }
-    }
-    final tags = count.keys.toList()
-      ..sort((a, b) => (count[b] ?? 0).compareTo(count[a] ?? 0));
-    return tags.take(limit).toList();
+  List<String> topTags({int limit = 24}) =>
+      kb.ExpertCatalog.tags(_shelfExperts).take(limit).toList();
+
+  List<kb.Expert> get _shelfExperts => <kb.Expert>[
+        for (final i in shelfUnfiltered) i.expert,
+      ];
+
+  /// 界面用的组合动作：先筛（core ExpertCatalog.filter：领域+标签+关键词，
+  /// 关键词命中名字/简介/标签/正文）后排。
+  List<ExpertShelfItem> shelf({
+    String? category,
+    String tag = '',
+    String query = '',
+    ExpertSort sort = ExpertSort.comprehensive,
+  }) {
+    final items = shelfUnfiltered;
+    final experts = <kb.Expert>[for (final i in items) i.expert];
+    final keep = kb.ExpertCatalog
+        .filter(experts, domain: category, tag: tag, query: query)
+        .map((e) => e.id)
+        .toSet();
+    final filtered = <ExpertShelfItem>[
+      for (final i in items)
+        if (keep.contains(i.id)) i,
+    ];
+    return _sortItems(filtered, sort);
   }
+
+  /// 展示层排序（见 [ExpertSort] 文档）：综合/最热委托 core，最新本层排。
+  List<ExpertShelfItem> _sortItems(
+      List<ExpertShelfItem> items, ExpertSort mode) {
+    switch (mode) {
+      case ExpertSort.comprehensive:
+      case ExpertSort.hottest:
+        final experts = <kb.Expert>[for (final i in items) i.expert];
+        final ordered = kb.ExpertCatalog.sort(
+          experts,
+          mode: mode == ExpertSort.hottest
+              ? kb.ExpertSort.hottest
+              : kb.ExpertSort.comprehensive,
+          usage: _usageMap(),
+        );
+        // 条目与专家是同一批实例（Expert 按 id 判等，货架内 id 无重复）。
+        final byExpert = Map<kb.Expert, ExpertShelfItem>.fromIterables(
+            experts, items);
+        return <ExpertShelfItem>[for (final e in ordered) byExpert[e]!];
+      case ExpertSort.newest:
+        // 我的条目看 updatedAt；目录样品看所在包的 importedAt（没装过的
+        // 内置包为 0，沉底——样品不是用户动过的东西）。
+        int recency(ExpertShelfItem i) =>
+            i.meta?.updatedAt ?? _packImportedAt[i.expert.source.packId] ?? 0;
+        final list = [...items]..sort((a, b) {
+            final r = recency(b).compareTo(recency(a));
+            if (r != 0) return r;
+            return a.name.compareTo(b.name);
+          });
+        return list;
+    }
+  }
+
+  /// core 排序的 usage 注入（core 不存使用计数——命中/使用评测的钩子位）。
+  Map<String, int> _usageMap() => <String, int>{
+        for (final e in _meta.entries) e.key: e.value.usedCount,
+      };
 
   // ------------------------------------------------------------------ 套用
 
-  /// 「套用为全局风格」：install → touch → 换 `config.style`，要么全成、
-  /// 要么不留半截（legacy ExpertApply.kt:47 的语义移植）。
-  ///
-  /// 1. 落库失败 → 立刻返回，style 一个字节不动；
-  /// 2. 记热度失败 → 降级 [ExpertApplyResult.warning]，不阻塞；
-  /// 3. 换 style 失败 → 回滚到进来时的那句；库里那条**不删**（它是完整的
-  ///    合法条目，删才是二次破坏）。
-  ///
-  /// StyleSource 优先级（style_source.dart:27 的既定事实）：联系人专用人设
-  /// 压过全局风格——「已有专用人设时弹确认」的判断在页面层用
-  /// [anyContactHasPersona] 做，本方法只管写。
+  /// 「套用为全局风格」。判定与落笔唯一出处是 core ExpertApply.applyToGlobal
+  /// （expert_apply.dart:231）：正文空拒绝、写失败回滚、shadowed 提示都在那。
+  /// 本层保留三件事：接线检查（#13）、**空正文预检 + 先落库再套用**（第 1 步
+  /// 失败目标一个字节不动）、异步落盘 flush 的成败兜底（core 的 sink 是同步
+  /// 接口，盘上成败由 StyleSinkPort.flush 上交，失败在这里回滚内存并如实报错）。
   Future<ExpertApplyResult> applyAsGlobalStyle(ExpertShelfItem item) async {
     final sink = _styleSink;
     if (sink == null) {
-      return const ExpertApplyResult(ok: false, problem: '全局风格未接线（#13），暂时不能套用');
-    }
-    return _apply(item, (name) async {
-      // 进来时的那句：第 3 步失败要原样退回去。
-      final before = sink.style;
-      try {
-        await sink.setStyle(item.body);
-      } catch (e) {
-        try {
-          await sink.setStyle(before);
-        } catch (_) {
-          // 回滚也失败：只能如实上报，不能假装成功。
-        }
-        return '设置里那句人设没写成（$e），已经还原成原来那句；'
-            '「$name」还在我的专家库里';
-      }
-      return null;
-    });
-  }
-
-  /// 「套用为联系人人设」：install → touch → 覆写该联系人的 persona，三步
-  /// 语义与 [applyAsGlobalStyle] 相同。目标联系人的 persona 非空时页面先弹
-  /// 确认（StyleSource 优先级：专用人设一旦写入就会压过全局风格）。
-  Future<ExpertApplyResult> applyToContact(
-    ExpertShelfItem item,
-    ContactTarget target,
-  ) async {
-    final sink = _contactSink;
-    if (sink == null) {
       return const ExpertApplyResult(
-          ok: false, problem: '联系人档案未接线（#13），暂时不能套用');
+          ok: false, problem: '全局风格未接线（#13），暂时不能套用');
     }
-    return _apply(item, (_) async {
-      try {
-        await sink.writePersona(target.id, item.body);
-      } catch (e) {
-        return '「${target.displayName}」的专用人设没写成（$e），原句未改动；'
-            '「${item.name}」还在我的专家库里';
-      }
-      return null;
-    });
-  }
-
-  /// 三步套用的公共骨架：0 校验正文 → 1 落库 → 2 记热度 → 3 换目标正文
-  /// （[swap] 返回非 null = 第 3 步失败的 problem 文案）。
-  Future<ExpertApplyResult> _apply(
-    ExpertShelfItem item,
-    Future<String?> Function(String name) swap,
-  ) async {
-    final name = item.name;
-    // 0) 正文是唯一进提示词的东西；空正文套上去等于把人设清空。
-    if (item.body.trim().isEmpty) {
-      return ExpertApplyResult(ok: false, problem: '「$name」没有正文，没套用');
+    // 0) 正文是唯一进提示词的东西；空正文套上去等于把人设清空（与 core 同一
+    //    判定，提前在这里拦是为了别把空条目先落了库）。
+    if (item.expert.promptText.trim().isEmpty) {
+      return ExpertApplyResult(
+          ok: false, problem: '「${item.name}」没有正文，没套用');
     }
-
     // 1) 落库。失败 → 目标正文一个字节都不动（本类最要紧的一条不变量）。
-    ExpertProfile? entry;
+    kb.Expert entry;
     try {
-      entry = await _installShelfItem(item);
+      entry = await _installIntoLibrary(item.expert);
     } catch (e) {
       return ExpertApplyResult(
-          ok: false, problem: '没能把「$name」存进我的专家库（$e），目标未改动');
+          ok: false,
+          problem: '没能把「${item.name}」存进我的专家库（$e），目标未改动');
     }
-
-    // 2) 记热度。失败降级成 warning，不阻塞套用。
+    // 3) core 落笔（写失败 core 自己回滚并给 problem）。
+    final previous = sink.style; // flush 失败要原样退回去
+    final r = _apply.applyToGlobal(item.expert, contacts: _coreContacts());
+    if (!r.ok) {
+      return ExpertApplyResult(ok: false, problem: r.problem, profile: entry);
+    }
+    // 4) 落盘兜底：内存已成、盘上没成 → 整体按失败处理并还原。
+    try {
+      await sink.flush();
+    } catch (e) {
+      sink.style = previous;
+      try {
+        await sink.flush();
+      } catch (_) {
+        // 回滚也失败：problem 里照实说，不假装成功。
+      }
+      return ExpertApplyResult(
+        ok: false,
+        problem: '设置里那句人设没写成（$e），已经还原成原来那句；'
+            '「${item.name}」还在我的专家库里',
+        profile: entry,
+      );
+    }
+    // 5) 记热度。失败降级成 warning，不阻塞套用。
     var warning = '';
     try {
       entry = await _touch(entry.id);
     } catch (_) {
       warning = '热度没记上，不影响使用';
     }
-
-    // 3) 换目标正文。失败不回滚第 1 步（库里那条保留），如实报 problem。
-    final problem = await swap(name);
-    if (problem != null) {
-      return ExpertApplyResult(
-          ok: false, profile: entry, warning: warning, problem: problem);
-    }
-    return ExpertApplyResult(ok: true, profile: entry, warning: warning);
+    return ExpertApplyResult(
+        ok: true, profile: entry, warning: warning, note: r.note);
   }
 
-  /// 目录条目落库（幂等）：同 presetKey 或同名的已有条目原样返回（保住用户
-  /// 的改名改文），没有才新建——builtin=true、sourceRef 记来源包。
-  Future<ExpertProfile> _installShelfItem(ExpertShelfItem item) async {
-    final existing = installed.value
-        .where((p) =>
-            (item.presetKey.isNotEmpty && p.presetKey == item.presetKey) ||
-            p.name == item.name)
-        .toList();
-    if (existing.isNotEmpty) return existing.first;
-    final profile = ExpertProfile(
-      id: 'x_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
-      name: item.name,
-      body: item.body,
-      builtin: true,
-      avatar: item.avatar == '🧩' ? '' : item.avatar,
-      description: item.description,
-      tags: List<String>.of(item.tags),
-      category: item.category,
-      presetKey: item.presetKey,
-      // 来源追踪：从哪个包装进来的（样品路径）
-      sourceRef: item.sourceRef,
-      updatedAt: DateTime.now().millisecondsSinceEpoch,
+  /// 「套用为联系人人设」。冲突判定（专用人设压全局）唯一出处是 core
+  /// StyleSource.resolve——[kb.ExpertApply.applyToContact] 检测到冲突时返回
+  /// needsChoice 且**两个目标都不动**，界面问完用户（覆盖/并存）带
+  /// [kb.ConflictChoice] 再调一次。并存路径 core 写全局 sink、盘上成败由
+  /// flush 兜底；覆盖路径 core 返回新 persona，联系人落盘走 ContactPersonaSink。
+  Future<ExpertApplyResult> applyToContact(
+    ExpertShelfItem item,
+    ContactTarget target, {
+    kb.ConflictChoice? choice,
+  }) async {
+    final contactSink = _contactSink;
+    if (contactSink == null) {
+      return const ExpertApplyResult(
+          ok: false, problem: '联系人档案未接线（#13），暂时不能套用');
+    }
+    if (item.expert.promptText.trim().isEmpty) {
+      return ExpertApplyResult(
+          ok: false, problem: '「${item.name}」没有正文，没套用');
+    }
+    kb.Expert entry;
+    try {
+      entry = await _installIntoLibrary(item.expert);
+    } catch (e) {
+      return ExpertApplyResult(
+          ok: false,
+          problem: '没能把「${item.name}」存进我的专家库（$e），目标未改动');
+    }
+    final styleBefore = _styleSink?.style ?? ''; // 并存要写全局，失败得还原
+    final r = _apply.applyToContact(
+        item.expert, _coreContactOf(target), choice: choice);
+    // 冲突待裁决：core 保证两个目标都没写——界面弹「覆盖/并存」后再调。
+    if (r.needsChoice) {
+      return ExpertApplyResult(
+          ok: false, needsChoice: true, note: r.note, profile: entry);
+    }
+    if (!r.ok) {
+      return ExpertApplyResult(ok: false, problem: r.problem, profile: entry);
+    }
+    if (r.wroteGlobalStyle) {
+      // 并存：专家正文已由 core 写进全局 sink，联系人专用人设没动。
+      final sink = _styleSink;
+      if (sink == null) {
+        // entry 是运行期对象，不能进 const 构造——去掉 const（invalid_constant）。
+        return ExpertApplyResult(
+            ok: false,
+            problem: '并存需要全局风格通道：控制器未接线 styleSink',
+            profile: entry);
+      }
+      try {
+        await sink.flush();
+      } catch (e) {
+        sink.style = styleBefore;
+        try {
+          await sink.flush();
+        } catch (_) {
+          // 回滚也失败：problem 里照实说。
+        }
+        return ExpertApplyResult(
+          ok: false,
+          problem: '全局风格没写成（$e），已经还原；'
+              '「${target.displayName}」的专用人设没动',
+          profile: entry,
+        );
+      }
+      final touched = await _touchOrWarn(entry.id);
+      return ExpertApplyResult(
+          ok: true, profile: touched.entry, warning: touched.warning, note: r.note);
+    }
+    // 覆盖/直写：把 core 给的 persona 落到联系人档案（app 层落盘）。写失败
+    // 不回滚第 1 步（库里那条保留），如实报 problem。
+    try {
+      await contactSink.writePersona(target.id, r.appliedText);
+    } catch (e) {
+      return ExpertApplyResult(
+        ok: false,
+        problem: '「${target.displayName}」的专用人设没写成（$e），原句未改动；'
+            '「${item.name}」还在我的专家库里',
+        profile: entry,
+      );
+    }
+    final touched = await _touchOrWarn(entry.id);
+    return ExpertApplyResult(
+        ok: true, profile: touched.entry, warning: touched.warning, note: r.note);
+  }
+
+  kb.Contact _coreContactOf(ContactTarget t) =>
+      kb.Contact(id: t.id, name: t.displayName, persona: t.persona);
+
+  List<kb.Contact> _coreContacts() => <kb.Contact>[
+        for (final t in contactTargets) _coreContactOf(t),
+      ];
+
+  // ---------------------------------------------------------- 我的库管理
+
+  /// 我的库条目改名（core Expert 不可变 → 造新实例；id/key/正文/来源都不动，
+  /// updatedAt 前进——「最新」档随之浮上来）。名字空白拒绝；条目不存在抛
+  /// StateError。失败回滚内存（写盘失败不产生半截改名）。
+  Future<kb.Expert> renameLibraryEntry(String id, String newName) async {
+    final name = newName.trim();
+    if (name.isEmpty) throw ArgumentError('新名字不能为空');
+    final idx = _library.indexWhere((e) => e.id == id);
+    if (idx < 0) {
+      throw StateError('ExpertsController.renameLibraryEntry: 条目不存在（$id）');
+    }
+    final prev = _library[idx];
+    final prevMeta =
+        _meta[id] ?? ExpertEntryMeta(sourceRef: ExpertShelfItem._sourceRefOf(prev));
+    final next = kb.Expert(
+      id: prev.id,
+      key: prev.key,
+      name: name,
+      domain: prev.domain,
+      promptText: prev.promptText,
+      tags: List.of(prev.tags),
+      description: prev.description,
+      emoji: prev.emoji,
+      source: prev.source,
     );
-    installed.value = [...installed.value, profile];
+    final nextMeta = prevMeta.copyWith(updatedAt: _nextStamp());
+    _library[idx] = next;
+    _meta[id] = nextMeta;
+    _notifyLibrary();
     try {
       await _persistLibrary();
     } catch (_) {
-      // 落库是「要么全成要么不留半截」的第 1 步：写盘失败就回滚内存，
-      // 让第 1 步整体失败（上层会返回 problem 且不动目标正文）。
-      installed.value = [
-        for (final p in installed.value)
-          if (p.id != profile.id) p,
-      ];
+      _library[idx] = prev;
+      _meta[id] = prevMeta;
+      _notifyLibrary();
       rethrow;
     }
-    return profile;
+    return next;
+  }
+
+  /// 我的库条目改正文（promptText 逐字保存，不 trim）。空正文拒绝——套用空
+  /// 正文等于清空人设；超 64KiB 拒绝——与包条目同一尺寸护栏
+  /// （kb.expertPromptTextMaxBytes）。条目不存在抛 StateError。
+  Future<kb.Expert> updateLibraryBody(String id, String promptText) async {
+    if (promptText.trim().isEmpty) {
+      throw ArgumentError('正文不能为空（套用空正文等于清空人设）');
+    }
+    if (utf8.encode(promptText).length > kb.expertPromptTextMaxBytes) {
+      throw ArgumentError(
+          '正文超过 ${kb.expertPromptTextMaxBytes} 字节上限');
+    }
+    final idx = _library.indexWhere((e) => e.id == id);
+    if (idx < 0) {
+      throw StateError('ExpertsController.updateLibraryBody: 条目不存在（$id）');
+    }
+    final prev = _library[idx];
+    final prevMeta =
+        _meta[id] ?? ExpertEntryMeta(sourceRef: ExpertShelfItem._sourceRefOf(prev));
+    final next = kb.Expert(
+      id: prev.id,
+      key: prev.key,
+      name: prev.name,
+      domain: prev.domain,
+      promptText: promptText,
+      tags: List.of(prev.tags),
+      description: prev.description,
+      emoji: prev.emoji,
+      source: prev.source,
+    );
+    final nextMeta = prevMeta.copyWith(updatedAt: _nextStamp());
+    _library[idx] = next;
+    _meta[id] = nextMeta;
+    _notifyLibrary();
+    try {
+      await _persistLibrary();
+    } catch (_) {
+      _library[idx] = prev;
+      _meta[id] = prevMeta;
+      _notifyLibrary();
+      rethrow;
+    }
+    return next;
+  }
+
+  /// 从我的库移除一条（幂等）。目录样品不受影响——它本来就不在库里；失败
+  /// 回滚内存。
+  Future<void> removeFromLibrary(String id) async {
+    final idx = _library.indexWhere((e) => e.id == id);
+    if (idx < 0) return;
+    final prevExpert = _library[idx];
+    final prevMeta = _meta[id];
+    _library.removeAt(idx);
+    _meta.remove(id);
+    _notifyLibrary();
+    try {
+      await _persistLibrary();
+    } catch (_) {
+      _library.insert(idx, prevExpert);
+      if (prevMeta != null) _meta[id] = prevMeta;
+      _notifyLibrary();
+      rethrow;
+    }
+  }
+
+  /// 目录条目落库（幂等：同 id 已有原样返回，保住用户的改名改文），来源串
+  /// 按 core 来源现算。写盘失败回滚内存并上抛（调用方转为 problem）。
+  Future<kb.Expert> _installIntoLibrary(kb.Expert expert) async {
+    for (final e in _library) {
+      if (e.id == expert.id) return e;
+    }
+    final meta = ExpertEntryMeta(
+      usedCount: 0,
+      updatedAt: _nextStamp(),
+      sourceRef: ExpertShelfItem._sourceRefOf(expert),
+    );
+    _library.add(expert);
+    _meta[expert.id] = meta;
+    _notifyLibrary();
+    try {
+      await _persistLibrary();
+    } catch (e) {
+      // 落库是「要么全成要么不留半截」的第 1 步：写盘失败回滚内存，让第 1 步
+      // 整体失败（上层会返回 problem 且不动目标正文）。
+      _library.remove(expert);
+      _meta.remove(expert.id);
+      _notifyLibrary();
+      rethrow;
+    }
+    return expert;
   }
 
   /// 记热度：usedCount+1 并落盘；失败上抛（调用方降级成 warning）。
-  Future<ExpertProfile> _touch(String id) async {
-    final prev = installed.value.where((p) => p.id == id).toList();
-    if (prev.isEmpty) {
+  Future<kb.Expert> _touch(String id) async {
+    final prev = _meta[id];
+    if (prev == null || !_library.any((e) => e.id == id)) {
       throw StateError('ExpertsController._touch: 条目不存在（$id）');
     }
-    final updated = prev.first.copyWith(usedCount: prev.first.usedCount + 1);
-    installed.value = [
-      for (final p in installed.value)
-        if (p.id == id) updated else p,
-    ];
+    final updated = prev.copyWith(
+        usedCount: prev.usedCount + 1, updatedAt: _nextStamp());
+    _meta[id] = updated;
+    _notifyLibrary();
     try {
       await _persistLibrary();
     } catch (_) {
       // 热度是计数器：落盘失败就把内存也退回去，保持「盘上没有 = 没发生」。
-      installed.value = [
-        for (final p in installed.value)
-          if (p.id == id) prev.first else p,
-      ];
+      _meta[id] = prev;
+      _notifyLibrary();
       rethrow;
     }
-    return updated;
+    return _library.firstWhere((e) => e.id == id);
   }
 
-  // ------------------------------------------------------------ 我的库管理
-
-  /// 从我的库移除一条（幂等）。目录样品不受影响——它本来就不在库里。
-  Future<void> removeFromLibrary(String id) async {
-    final next = <ExpertProfile>[
-      for (final p in installed.value)
-        if (p.id != id) p,
-    ];
-    if (next.length == installed.value.length) return;
-    final prev = installed.value;
-    installed.value = next;
+  /// 套用成功后的记热度：失败降级成 warning（热度是观测数据，不该让一次
+  /// 计数写盘失败把「已生效」报成失败）。
+  Future<({kb.Expert entry, String warning})> _touchOrWarn(String id) async {
     try {
-      await _persistLibrary();
-    } catch (e) {
-      installed.value = prev;
-      rethrow;
+      return (entry: await _touch(id), warning: '');
+    } catch (_) {
+      final e = _library.firstWhere((x) => x.id == id);
+      return (entry: e, warning: '热度没记上，不影响使用');
     }
   }
 
   // ---------------------------------------------------------- 资产包管理
 
-  /// 安装一个资产包（页面「安装入口」的后端；文件选择器接线留 #13，当前
-  /// 以粘贴 JSON 的方式进来）。同 name+hash 视为同一个包：替换而不是追加
-  /// （重复安装=刷新）。解析失败（pack.ok=false）抛 FormatException，problem
-  /// 在异常消息里——页面据此提示，不产生半装的包。
-  Future<ExpertPack> installPackJson(String json) async {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final pack = ExpertPack.parse(json, installedAt: now);
-    if (!pack.ok) {
-      throw FormatException(pack.problem.isEmpty ? '资产包解析失败' : pack.problem);
+  /// 安装一份资产包清单。清单级校验/版本仲裁/降级拒装全在 core
+  /// （ExpertPackManager.install：未装新装、同版本幂等、低版本拒装、高版本
+  /// 升级替换、坏包重装即修复）。入口先做**条目级**别名补齐
+  /// （[_normalizePackJson]：key/body/category → id/promptText/domain，
+  /// docs/expert-pack-format.md §2；清单级 format/pack 结构不碰——严格校验
+  /// 归 core PackCodec，app 形状的历史包必须自带 format+pack 才能走安装路径）。
+  /// 校验拒绝抛 FormatException（problem 在消息里）；落盘失败抛 StateError
+  /// 并回滚内存。
+  Future<kb.InstallResult> installPackJson(String json) async {
+    final before = _packStore.loadAll();
+    final beforeImported = Map.of(_packImportedAt);
+    final normalized = _normalizePackJson(json);
+    final r = _manager.install(normalized);
+    if (!r.ok) {
+      throw FormatException(r.problem.isEmpty ? '资产包安装失败' : r.problem);
     }
-    final prev = _packs.value;
-    final dedup = prev.indexWhere((p) =>
-        p.meta.name == pack.meta.name &&
-        p.meta.hash == pack.meta.hash &&
-        p.meta.installedAt != 0);
-    _packs.value = [
-      if (dedup >= 0) ...[
-        for (var i = 0; i < prev.length; i++)
-          if (i == dedup) pack else prev[i],
-      ] else
-        ...prev,
-      if (dedup < 0) pack,
-    ];
+    if (r.pack != null && r.action != kb.InstallAction.alreadyCurrent) {
+      _packImportedAt[r.pack!.meta.id] = _nextStamp();
+    }
     try {
-      await _persistPacks();
+      await _packStore.flush();
+      await _persistLibrary(); // packImportedAt 挂在我的库存档里持久化
     } catch (e) {
-      _packs.value = prev;
+      _packStore.restoreSnapshot(before);
+      _packImportedAt
+        ..clear()
+        ..addAll(beforeImported);
+      try {
+        await _packStore.flush();
+      } catch (_) {
+        // 回滚也失败：异常照抛，不假装成功。
+      }
+      _refreshPacks();
       throw StateError('资产包落盘失败（$e），本次没有安装');
     }
-    return pack;
+    _refreshPacks();
+    return r;
+  }
+
+  /// 卸载一个资产包（走 core ExpertPackManager.uninstall：内置包不可卸载、
+  /// 没装过报「没有安装过」、坏包也允许卸——显式清理路径）。落盘失败还原并
+  /// 返回 ok=false（不抛，卸载的结果直接给界面展示）。
+  Future<kb.UninstallResult> uninstallPack(String packId) async {
+    final before = _packStore.loadAll();
+    final beforeImported = Map.of(_packImportedAt);
+    final r = _manager.uninstall(packId);
+    if (!r.ok) return r;
+    _packImportedAt.remove(packId);
+    try {
+      await _packStore.flush();
+      await _persistLibrary();
+    } catch (e) {
+      _packStore.restoreSnapshot(before);
+      _packImportedAt
+        ..clear()
+        ..addAll(beforeImported);
+      try {
+        await _packStore.flush();
+      } catch (_) {
+        // 回滚也失败：结果里照实说。
+      }
+      _refreshPacks();
+      return kb.UninstallResult(ok: false, problem: '卸载没写盘成功（$e），已还原');
+    }
+    _refreshPacks();
+    return r;
+  }
+
+  /// 条目级别名互认（docs/expert-pack-format.md §2）：`key`→`id`、`body`→
+  /// `promptText`、`category`→`domain` **只补不删**——原文与别名都保留，
+  /// 清单级 format/pack/experts 结构不动（严格校验归 core PackCodec）。core
+  /// decodeExpertEntry 对 domain 别名不回落 category（expert_catalog.dart:248
+  /// 只读 `domain`），这步补齐保证 legacy 形状条目不丢分组。非 JSON/非对象
+  /// 原样返回（交给 PackCodec 拒）。
+  static String _normalizePackJson(String raw) {
+    Object? root;
+    try {
+      root = jsonDecode(raw);
+    } catch (_) {
+      return raw;
+    }
+    if (root is! Map) return raw;
+    final list = root['experts'];
+    if (list is! List) return raw;
+    var changed = false;
+    String? str(Object? v) {
+      final s = v?.toString().trim() ?? '';
+      return s.isEmpty ? null : s;
+    }
+
+    final out = <Object?>[];
+    for (final e in list) {
+      if (e is! Map) {
+        out.add(e);
+        continue;
+      }
+      final m = Map<String, dynamic>.from(e);
+      final id = str(m['id']);
+      final key = str(m['key']);
+      if (id == null && key != null) {
+        m['id'] = key;
+        changed = true;
+      }
+      if (m['promptText'] == null && m['body'] != null) {
+        m['promptText'] = m['body'];
+        changed = true;
+      }
+      final domain = str(m['domain']);
+      final category = str(m['category']);
+      if (domain == null && category != null) {
+        m['domain'] = category;
+        changed = true;
+      }
+      out.add(m);
+    }
+    if (!changed) return raw;
+    root['experts'] = out;
+    try {
+      return jsonEncode(root);
+    } catch (_) {
+      return raw;
+    }
   }
 
   // ------------------------------------------------------------------ 存取
 
-  /// 启动时调用：读我的库与已安装资产包。坏存档/平台通道不可用按空清单
-  /// 继续（与 ContactStore.load / SettingsStore.load 同一口径）。
+  /// 启动时调用：读内置清单 + 新键存档 + 旧键迁移（别名互认；失败计数进
+  /// [loadProblems]，绝不静默丢）。可重复调用（以盘上为准重建内存态）。
   Future<void> load() async {
-    final seed = ExpertPack.parse(seedPackJson);
-    final packs = <ExpertPack>[seed];
+    final problems = <String>[];
+    final notes = <String>[];
+
+    // 内置清单三层兜底（见 [_resolveBuiltinJson] 注释）。
+    final builtin = await _resolveBuiltinJson();
+    if (builtin != null) {
+      _manager = kb.ExpertPackManager(_packStore, builtinJson: builtin);
+    } else {
+      problems.add('读不到内置目录 JSON（rootBundle/磁盘/内嵌镜像都失败）——内置货架为空');
+    }
+
+    final v2Packs = await _packStore.hydrate(problems);
+
+    // 内存态重建前的旧值清理。clear 必须在 [_migrateLegacyPacks] **之前**：
+    // 迁移会往 _packImportedAt 写刚迁包的导入时间（「最新」档的排序数据源），
+    // 若像旧顺序那样先迁移再 clear，时间戳当场被吃掉——迁移包的目录样品在
+    // 「最新」档恒按 0 沉底，导入时间也落不了盘（独立复核发现）。
+    _packImportedAt.clear();
+    _library.clear();
+    _meta.clear();
+    final v2Lib = await _loadLibraryV2(problems);
+    if (!v2Lib) await _migrateLegacyLibrary(problems, notes);
+    // 包迁移挪到我的库读入之后：迁移完要把导入时间经 [_persistLibrary] 并进
+    // experts_v2 存档，而 persist 写的是「当前整库」——库还没读入就 persist
+    // 会把既有 entries 用空库覆盖。
+    if (!v2Packs) await _migrateLegacyPacks(problems, notes);
+
+    _notifyLibrary();
+    _refreshPacks();
+    _loadProblems = List.unmodifiable(problems);
+    _loadNotes = List.unmodifiable(notes);
+  }
+
+  /// 内置包清单原文的三层兜底：
+  /// 1. rootBundle 读 `packages/chartools_core/<builtinCatalogAssetPath>`
+  ///    （资产键，若未来 pubspec 声明了 core assets 即自动生效）；
+  /// 2. core 的磁盘探测（VM / 测试 / 桌面开发路径——测试读的是真文件，杜绝
+  ///    镜像漂移）；
+  /// 3. 内嵌镜像 [_builtinCatalogMirror]（发布包兜底——beta.6 的 core pubspec
+  ///    没有 flutter assets 段，rootBundle 读不到，磁盘上也找不到）。
+  Future<String?> _resolveBuiltinJson() async {
+    try {
+      return await rootBundle
+          .loadString('packages/chartools_core/${kb.builtinCatalogAssetPath}');
+    } catch (_) {
+      // 资产未随包声明（beta.6）→ 下一层。
+    }
+    final disk = kb.readBuiltinCatalogJson();
+    if (disk != null) return disk;
+    return _builtinCatalogMirror;
+  }
+
+  /// 旧键资产包迁移：legacy 形状（无 format / 无 pack 对象）包装升级到
+  /// `jev-expert-pack/1` 后经 core 校验安装（docs/expert-pack-format.md §2：
+  /// app 形状的历史包走 core 安装路径必须补 format 与 pack{id,version}）。
+  /// 失败逐条计数进 [problems]，不静默丢。
+  Future<void> _migrateLegacyPacks(
+      List<String> problems, List<String> notes) async {
+    final String raw;
     try {
       final prefs = await SharedPreferences.getInstance();
-
-      final libRaw = prefs.getString(_libraryKey);
-      if (libRaw != null && libRaw.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(libRaw);
-          if (decoded is Map<String, dynamic> && decoded['experts'] is List) {
-            installed.value = <ExpertProfile>[
-              for (final e in decoded['experts'] as List)
-                if (e is Map<String, dynamic>) ExpertProfile.fromJson(e),
-            ];
-          }
-        } on FormatException {
-          // 整包 JSON 损坏：按没存过处理。
-        }
-      }
-
-      final packsRaw = prefs.getString(_packsKey);
-      if (packsRaw != null && packsRaw.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(packsRaw);
-          if (decoded is Map<String, dynamic> && decoded['packs'] is List) {
-            for (final raw in decoded['packs'] as List) {
-              if (raw is! String || raw.isEmpty) continue;
-              final pack = ExpertPack.parse(raw);
-              // 种子包不落盘也不认盘上的同名快照：内容随代码走。
-              if (pack.ok && pack.meta.name != seed.meta.name) {
-                packs.add(pack);
-              }
-            }
-          }
-        } on FormatException {
-          // 资产包存档损坏：丢弃，种子包仍在。
-        }
-      }
-    } catch (_) {
-      // shared_preferences 不可用（平台通道缺失等）：保持内存空清单。
+      final r = prefs.getString(legacyPacksKey);
+      if (r == null || r.isEmpty) return;
+      raw = r;
+    } catch (e) {
+      problems.add('旧资产包存档（$legacyPacksKey）读取失败（$e），按没存过处理');
+      return;
     }
-    _packs.value = packs;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      problems.add('旧资产包存档（$legacyPacksKey）不是合法 JSON，按没存过处理');
+      return;
+    }
+    if (decoded is! Map || decoded['packs'] is! List) {
+      problems.add('旧资产包存档（$legacyPacksKey）形状不对，按没存过处理');
+      return;
+    }
+    final packs = decoded['packs'] as List;
+    final usedIds = <String, String>{};
+    var migrated = 0;
+    var failed = 0;
+    for (var i = 0; i < packs.length; i++) {
+      final rawPack = packs[i];
+      if (rawPack is! String || rawPack.isEmpty) {
+        failed++;
+        problems.add('旧资产包第 ${i + 1} 条不是字符串清单，已跳过');
+        continue;
+      }
+      final (wrapped, id, why) = _wrapLegacyPack(rawPack, usedIds);
+      if (wrapped == null) {
+        failed++;
+        problems.add('旧资产包「$id」迁移失败：$why');
+        continue;
+      }
+      final r = _manager.install(wrapped);
+      if (!r.ok) {
+        failed++;
+        problems.add('旧资产包「$id」迁移被 core 校验拒绝：${r.problem}');
+        continue;
+      }
+      if (r.action == kb.InstallAction.alreadyCurrent) {
+        notes.add('旧资产包「$id」与已装包同 id 同版本，按去重跳过');
+        continue;
+      }
+      _packImportedAt[id] = _nextStamp();
+      migrated++;
+    }
+    if (migrated > 0) {
+      notes.add('已从旧键 $legacyPacksKey 迁移 $migrated 个资产包到新键 '
+          '${PrefsPackStore.storageKey}（旧键只读不写）');
+      // 导入时间挂在我的库存档（experts_v2 的 packImportedAt）里持久化——
+      // 只 flush 包键不够：重启后 v2 包键已在盘、迁移不再重走，时间戳就永久
+      // 丢了（迁移包的目录样品在「最新」档沉底）。此刻我的库已读入（load
+      // 的顺序保证），persist 写整库不会覆盖既有 entries。
+      try {
+        await _persistLibrary();
+      } catch (e) {
+        problems.add('迁移包的导入时间没写成（$e）：本次会话内存有效，'
+            '下次迁移重走时自动补');
+      }
+    }
+    if (failed > 0) {
+      notes.add('旧资产包迁移失败 $failed 个（明细见 loadProblems，未静默丢弃）');
+    }
+    try {
+      await _packStore.flush();
+    } catch (e) {
+      problems.add('迁移后的资产包没写成（$e）：本次会话内存有效，下次启动自动重试迁移');
+    }
   }
+
+  /// 一份 legacy 包原文 → 包装升级后的 core 形状 JSON。返回
+  /// (包装 JSON, 包 id, 失败原因)。id 取自旧包 name（`/` 换 `_`、撞内置保留
+  /// id 换 `imported_builtin`）；同名不同内容加 `-2` 后缀防覆盖，同名同内容
+  /// 按去重跳过。条目按别名互认归一成主拼写（key/body/category →
+  /// id/promptText/domain），坏条目跳过计数。
+  (String?, String, String?) _wrapLegacyPack(
+      String raw, Map<String, String> usedIds) {
+    Object? root;
+    try {
+      root = jsonDecode(raw);
+    } catch (_) {
+      return (null, '', '不是合法 JSON');
+    }
+    if (root is! Map) return (null, '', '顶层不是 JSON 对象');
+    String str(Object? v) {
+      final s = v?.toString().trim() ?? '';
+      return s;
+    }
+
+    final name = str(root['name']);
+    var id = name.replaceAll('/', '_');
+    if (id.isEmpty) id = 'imported';
+    if (id == kb.ExpertPackManager.builtinPackId) id = 'imported_builtin';
+    final list = root['experts'];
+    if (list is! List) return (null, id, '缺少 experts 数组');
+    var skipped = 0;
+    final entries = <Map<String, dynamic>>[];
+    for (final e in list) {
+      if (e is! Map) {
+        skipped++;
+        continue;
+      }
+      final m = Map<String, dynamic>.from(e);
+      final key = str(m['key']).isNotEmpty ? str(m['key']) : str(m['id']);
+      final bodyRaw = m['body'] ?? m['promptText'];
+      final body = bodyRaw?.toString() ?? '';
+      // key 与 body 是「这条专家能不能用」的下限（legacy ExpertPack.kt:98 同口径）。
+      if (key.isEmpty || body.trim().isEmpty) {
+        skipped++;
+        continue;
+      }
+      entries.add(<String, dynamic>{
+        'id': key,
+        'name': str(m['name']).isNotEmpty ? str(m['name']) : key,
+        'promptText': body, // 逐字保存，不 trim
+        'domain': str(m['category']).isNotEmpty
+            ? str(m['category'])
+            : str(m['domain']),
+        'tags': <String>[
+          if (m['tags'] is List)
+            for (final t in (m['tags'] as List))
+              if (t is String && t.trim().isNotEmpty) t.trim(),
+        ],
+        'description': str(m['description']),
+        'emoji': str(m['emoji']),
+      });
+    }
+    if (entries.isEmpty) {
+      return (null, id, '没有可用专家（跳过 $skipped 条）');
+    }
+    // 同名不同内容 → id 加后缀防覆盖（不静默丢第二个包）；同名同内容 → 去重。
+    final marker = '${str(root['contentHash'])}:${entries.length}';
+    var candidate = id;
+    var suffix = 2;
+    while (usedIds.containsKey(candidate)) {
+      if (usedIds[candidate] == marker) {
+        return (null, candidate, '与已迁移包同名同内容，按去重跳过');
+      }
+      candidate = '$id-${suffix++}';
+    }
+    id = candidate;
+    usedIds[id] = marker;
+    final wrapped = jsonEncode(<String, dynamic>{
+      'format': kb.PackCodec.format,
+      'pack': <String, dynamic>{
+        'id': id,
+        'version': '0.0.0', // 旧包没有版本：置最低，任何正式版本都可升级
+        if (name.isNotEmpty) 'name': name,
+        'origin': kb.ExpertOrigin.remote.wire,
+        if (str(root['source']).isNotEmpty) 'source': str(root['source']),
+        if (str(root['sourceCommit']).isNotEmpty)
+          'sourceCommit': str(root['sourceCommit']),
+        if (str(root['contentHash']).isNotEmpty)
+          'contentHash': str(root['contentHash']),
+      },
+      'experts': entries,
+    });
+    final check = kb.PackCodec.parse(wrapped);
+    if (!check.ok) {
+      return (null, id, '补 format 后仍被 core 校验拒绝：${check.problem}');
+    }
+    return (wrapped, id, null);
+  }
+
+  /// 新键（experts_v2）读入我的库。返回 true = 新键在盘上（含空库）；false =
+  /// 缺席/损坏 → 调用方走旧键迁移。逐条容错 + 别名互认，失败计数进 problems。
+  Future<bool> _loadLibraryV2(List<String> problems) async {
+    final String? raw;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      raw = prefs.getString(libraryKeyV2);
+    } catch (e) {
+      problems.add('我的库存档（$libraryKeyV2）读取失败（$e），本次会话改动不会持久化');
+      return true; // 平台通道问题：走内存模式，不触发迁移写盘
+    }
+    if (raw == null) return false; // 没迁移过
+    if (raw.isEmpty) return true;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      problems.add('我的库存档（$libraryKeyV2）不是合法 JSON，按旧键重新迁移');
+      return false;
+    }
+    if (decoded is! Map) {
+      problems.add('我的库存档（$libraryKeyV2）形状不对，按旧键重新迁移');
+      return false;
+    }
+    final imported = decoded['packImportedAt'];
+    if (imported is Map) {
+      imported.forEach((k, v) {
+        if (v is int) _packImportedAt[k as String] = v;
+      });
+    }
+    final entries = decoded['entries'];
+    if (entries is! List) return true; // 空库存
+    var failed = 0;
+    for (var i = 0; i < entries.length; i++) {
+      final e = entries[i];
+      if (e is! Map) {
+        failed++;
+        problems.add('我的库第 ${i + 1} 条不是对象，已跳过');
+        continue;
+      }
+      final expertRaw = e['expert'];
+      if (expertRaw is! Map) {
+        failed++;
+        problems.add('我的库第 ${i + 1} 条缺 expert 对象，已跳过');
+        continue;
+      }
+      final (expert, why) =
+          _expertFromWire(Map<String, dynamic>.from(expertRaw));
+      if (expert == null) {
+        failed++;
+        problems.add('我的库第 ${i + 1} 条读取失败：$why');
+        continue;
+      }
+      final metaRaw = e['meta'];
+      var meta = metaRaw is Map
+          ? ExpertEntryMeta.fromJson(Map<String, dynamic>.from(metaRaw))
+          : const ExpertEntryMeta();
+      if (meta.sourceRef.isEmpty) {
+        meta = ExpertEntryMeta(
+          usedCount: meta.usedCount,
+          updatedAt: meta.updatedAt,
+          sourceRef: ExpertShelfItem._sourceRefOf(expert),
+        );
+      }
+      _library.add(expert);
+      _meta[expert.id] = meta;
+    }
+    if (failed > 0) {
+      problems.add('我的库有 $failed 条读取失败（明细见上，未静默丢弃）');
+    }
+    return true;
+  }
+
+  /// 旧键（experts）迁移我的库：旧 ExpertProfile 存档 → (core Expert, 元数据,
+  /// 失败原因)。别名互认：body|promptText → promptText、category|domain →
+  /// domain、avatar|emoji → emoji、presetKey → key；builtin 标记 / `seed:`
+  /// 前缀 → origin builtin（综合分 +2 的口径与旧版一致）；sourceRef 原样保留。
+  (kb.Expert?, ExpertEntryMeta?, String?) _legacyLibraryEntry(
+      Map<String, dynamic> j) {
+    String str(Object? v) {
+      final s = v?.toString().trim() ?? '';
+      return s;
+    }
+
+    final presetKey = str(j['presetKey']);
+    var id = str(j['id']);
+    if (id.isEmpty) id = presetKey; // 旧存档总有 id；这里兜底
+    if (id.isEmpty) return (null, null, '缺 id（且无 presetKey 可推导）');
+    final ptRaw = j['body'] ?? j['promptText'];
+    final promptText = ptRaw?.toString() ?? '';
+    if (promptText.trim().isEmpty) {
+      return (null, null, '「$id」正文为空（body/promptText 都没有可用内容）');
+    }
+    if (utf8.encode(promptText).length > kb.expertPromptTextMaxBytes) {
+      return (null, null, '「$id」正文超过 64KiB 上限');
+    }
+    final domain =
+        str(j['category']).isNotEmpty ? str(j['category']) : str(j['domain']);
+    final emoji =
+        str(j['avatar']).isNotEmpty ? str(j['avatar']) : str(j['emoji']);
+    final sourceRef = str(j['sourceRef']);
+    final builtinFlag = j['builtin'] == true;
+    final origin = builtinFlag || sourceRef.startsWith('seed:')
+        ? kb.ExpertOrigin.builtin
+        : kb.ExpertOrigin.remote;
+    var packId = '';
+    for (final p in const ['seed:', 'pack:']) {
+      if (sourceRef.startsWith(p)) {
+        packId = sourceRef.substring(p.length);
+        break;
+      }
+    }
+    final key = presetKey.isNotEmpty
+        ? presetKey
+        : (id.contains('/') ? id.substring(id.lastIndexOf('/') + 1) : id);
+    final expert = kb.Expert(
+      id: id,
+      key: key,
+      name: str(j['name']).isEmpty ? key : str(j['name']),
+      domain: domain,
+      promptText: promptText,
+      tags: <String>[
+        if (j['tags'] is List)
+          for (final t in (j['tags'] as List))
+            if (t is String && t.trim().isNotEmpty) t.trim(),
+      ],
+      description: str(j['description']),
+      emoji: emoji.isEmpty ? '🧩' : emoji,
+      source: kb.ExpertSource(packId: packId, packVersion: '', origin: origin),
+    );
+    final meta = ExpertEntryMeta(
+      usedCount: j['usedCount'] is int ? j['usedCount'] as int : 0,
+      updatedAt: j['updatedAt'] is int ? j['updatedAt'] as int : 0,
+      sourceRef: sourceRef,
+    );
+    return (expert, meta, null);
+  }
+
+  Future<void> _migrateLegacyLibrary(
+      List<String> problems, List<String> notes) async {
+    final String raw;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final r = prefs.getString(legacyLibraryKey);
+      if (r == null || r.isEmpty) return;
+      raw = r;
+    } catch (e) {
+      problems.add('旧我的库存档（$legacyLibraryKey）读取失败（$e），按没存过处理');
+      return;
+    }
+    Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      problems.add('旧我的库存档（$legacyLibraryKey）不是合法 JSON，按没存过处理');
+      return;
+    }
+    if (decoded is! Map || decoded['experts'] is! List) {
+      problems.add('旧我的库存档（$legacyLibraryKey）形状不对，按没存过处理');
+      return;
+    }
+    final list = decoded['experts'] as List;
+    var converted = 0;
+    var failed = 0;
+    for (var i = 0; i < list.length; i++) {
+      final e = list[i];
+      if (e is! Map<String, dynamic>) {
+        failed++;
+        problems.add('旧我的库第 ${i + 1} 条不是对象，已跳过');
+        continue;
+      }
+      final (expert, meta, why) = _legacyLibraryEntry(e);
+      if (expert == null || meta == null) {
+        failed++;
+        problems.add('旧我的库第 ${i + 1} 条转换失败：$why（已计数，未静默丢弃）');
+        continue;
+      }
+      _library.add(expert);
+      _meta[expert.id] = meta;
+      converted++;
+    }
+    if (converted > 0) {
+      notes.add('已从旧键 $legacyLibraryKey 迁移 $converted 条到新键 '
+          '$libraryKeyV2（别名互认：body→promptText、category→domain；旧键只读不写）');
+    }
+    if (failed > 0) {
+      notes.add('旧我的库迁移失败 $failed 条（明细见 loadProblems）');
+    }
+    try {
+      await _persistLibrary();
+    } catch (e) {
+      problems.add('迁移后的我的库没写成（$e）：本次会话内存有效，下次启动自动重试迁移');
+    }
+  }
+
+  /// 新键条目解码：**别名互认**（promptText|body、domain|category、emoji|avatar）
+  /// + 逐条容错。id 必须可用、正文必须非空且 ≤64KiB（docs/expert-pack-format.md
+  /// §2/§3 的条目级护栏）——失败返回原因，由调用方计数。
+  (kb.Expert?, String?) _expertFromWire(Map<String, dynamic> m) {
+    String str(Object? v) {
+      final s = v?.toString().trim() ?? '';
+      return s;
+    }
+
+    var id = str(m['id']);
+    final keyWire = str(m['key']);
+    if (id.isEmpty) id = keyWire;
+    if (id.isEmpty) return (null, '缺 id/key');
+    final key = keyWire.isNotEmpty
+        ? keyWire
+        : (id.contains('/') ? id.substring(id.lastIndexOf('/') + 1) : id);
+    final ptRaw = m['promptText'] ?? m['body'];
+    final promptText = ptRaw?.toString() ?? '';
+    if (promptText.trim().isEmpty) return (null, '「$id」正文为空');
+    if (utf8.encode(promptText).length > kb.expertPromptTextMaxBytes) {
+      return (null, '「$id」正文超过 64KiB 上限');
+    }
+    final domain =
+        str(m['domain']).isNotEmpty ? str(m['domain']) : str(m['category']);
+    final emoji =
+        str(m['emoji']).isNotEmpty ? str(m['emoji']) : str(m['avatar']);
+    final sourceRaw = m['source'];
+    final source = sourceRaw is Map
+        ? kb.ExpertSource.fromJson(Map<String, dynamic>.from(sourceRaw))
+        : kb.ExpertSource(
+            packId: str(m['packId']),
+            packVersion: str(m['packVersion']),
+            origin: kb.ExpertOrigin.tryParse(str(m['origin'])),
+          );
+    return (
+      kb.Expert(
+        id: id,
+        key: key,
+        name: str(m['name']).isEmpty ? key : str(m['name']),
+        domain: domain,
+        promptText: promptText,
+        tags: <String>[
+          if (m['tags'] is List)
+            for (final t in (m['tags'] as List))
+              if (t is String && t.trim().isNotEmpty) t.trim(),
+        ],
+        description: str(m['description']),
+        emoji: emoji.isEmpty ? '🧩' : emoji,
+        source: source,
+      ),
+      null,
+    );
+  }
+
+  /// 新键条目序列化：写 core 主拼写（promptText/domain/emoji），source 走
+  /// core ExpertSource.toJson。
+  Map<String, dynamic> _expertToJson(kb.Expert e) => <String, dynamic>{
+        'id': e.id,
+        'key': e.key,
+        'name': e.name,
+        'domain': e.domain,
+        'promptText': e.promptText,
+        'tags': List<String>.of(e.tags),
+        'description': e.description,
+        'emoji': e.emoji,
+        'source': e.source.toJson(),
+      };
 
   Future<void> _persistLibrary() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
-      _libraryKey,
+      libraryKeyV2,
       jsonEncode(<String, dynamic>{
-        'version': 1,
-        'experts': <Map<String, dynamic>>[
-          for (final p in installed.value) p.toJson(),
+        'version': 2,
+        'entries': <Map<String, dynamic>>[
+          for (final e in _library)
+            <String, dynamic>{
+              'expert': _expertToJson(e),
+              'meta': (_meta[e.id] ?? const ExpertEntryMeta()).toJson(),
+            },
         ],
+        'packImportedAt': Map<String, int>.of(_packImportedAt),
       }),
     );
   }
 
-  Future<void> _persistPacks() async {
-    // 存原始 JSON 而不是元信息：重装/去重要靠原文重解析，元信息不够还原。
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _packsKey,
-      jsonEncode(<String, dynamic>{
-        'version': 1,
-        'packs': <String>[
-          for (final p in _packs.value)
-            if (p.meta.installedAt != 0)
-              jsonEncode(<String, dynamic>{
-                'name': p.meta.name,
-                'source': p.meta.source,
-                'sourceCommit': p.meta.commit,
-                'contentHash': p.meta.hash,
-                'experts': <Map<String, dynamic>>[
-                  for (final e in p.presets)
-                    <String, dynamic>{
-                      'key': e.key,
-                      'name': e.name,
-                      'body': e.body,
-                      'category': e.category,
-                      'tags': e.tags,
-                      'description': e.description,
-                      'emoji': e.avatar,
-                    },
-                ],
-              }),
-        ],
-      }),
-    );
+  void _notifyLibrary() {
+    if (_disposed) return; // 页面已退场：盘上状态已落好，内存态随实例销毁
+    installed.value = List.of(_library);
+  }
+
+  void _refreshPacks() {
+    if (_disposed) return; // 同 _notifyLibrary
+    final snap = _manager.installed();
+    _packs.value = snap.packs;
+    packProblems.value = List.unmodifiable(snap.problems);
+  }
+
+  /// 严格递增的毫秒时间戳（同一毫秒内连续两次变更也要能分先后，否则
+  /// ValueNotifier/排序都可能停在旧值上——与 ContactStore.update 同一教训）。
+  int _nextStamp() {
+    final n = DateTime.now().millisecondsSinceEpoch;
+    if (n > _lastStamp) {
+      _lastStamp = n;
+      return n;
+    }
+    _lastStamp += 1;
+    return _lastStamp;
   }
 
   void dispose() {
+    _disposed = true;
     installed.dispose();
     _packs.dispose();
+    packProblems.dispose();
   }
 }
+
+// ---------------------------------------------------------------------------
+// 内置清单的发布包兜底镜像
+// ---------------------------------------------------------------------------
+
+/// 内置目录 JSON 的**逐字镜像**（beta.6，git 652a78c 时的
+/// `packages/core/assets/experts/catalog.json`）。
+///
+/// 为什么 app 里要有这份拷贝：beta.6 的 `packages/core/pubspec.yaml` 没有
+/// `flutter:` assets 段（本会话已核对全文），core 包 assets 不是 Flutter 资产，
+/// rootBundle 在发布运行时读不到 `packages/chartools_core/assets/experts/
+/// catalog.json`；磁盘探测（[kb.readBuiltinCatalogJson]）在发布包里同样找不到
+/// 工作区文件。没有这层兜底，发布包的内置货架是空的——浏览能力直接变浅。
+/// 取用顺序见 [ExpertsController._resolveBuiltinJson]：rootBundle → 磁盘探测
+/// → 这份镜像；测试与桌面开发走前两层（读真文件），镜像只在发布运行时生效。
+///
+/// **同步义务**：core 目录演进时必须刷新这份镜像（加载顺序保证 dev/测试环境
+/// 立刻暴露偏差——测试断言的是 core 真文件的内容，镜像过期会在测试里显形）。
+const String _builtinCatalogMirror = r'''
+{
+  "format": "jev-expert-pack/1",
+  "pack": {
+    "id": "builtin",
+    "version": "1.0.0",
+    "name": "内置示例专家",
+    "origin": "builtin",
+    "source": "骨架示例包：正文取自旧仓库 PersonaPresets.kt 的五类示范卡（超越 legacy 的全量内嵌——完整 331 位专家目录按需经远端资产包安装，清单 URL 由 app 层配置）"
+  },
+  "experts": [
+    {
+      "id": "daily.friend",
+      "name": "日常闲聊",
+      "domain": "日常",
+      "tags": ["朋友", "口语", "松弛"],
+      "description": "日常闲聊：用平时的叫法，口语松弛，不端着",
+      "emoji": "🌿",
+      "promptText": "称呼：用平时的叫法\n关系：朋友\n语气：口语、松弛，别端着\n主题：日常\n示例：\n我：在忙吗\n我：晚饭吃了吗"
+    },
+    {
+      "id": "love.coldwar",
+      "name": "恋爱·冷战破冰",
+      "domain": "情感",
+      "tags": ["冷战", "破冰", "不翻旧账"],
+      "description": "冷了两天要开口：认自己那部分，不翻旧账，约一个具体时间",
+      "emoji": "🧊",
+      "promptText": "称呼：还是平时的叫法，别突然改口\n关系：情侣，正在闹别扭\n语气：平静、直接，不翻旧账，不阴阳\n主题：恋爱\n情境：冷了两天，我决定先开口\n避谈：分手、随便你\n示例：\n我：这两天我说话冲了，是我不对\n我：我想把这事说清楚，不是要吵\n我：你什么时候方便，我们聊十分钟"
+    },
+    {
+      "id": "sales.followup",
+      "name": "销售·跟单",
+      "domain": "销售",
+      "tags": ["跟单", "方案", "不催"],
+      "description": "销售跟单：先结论后理由，不催不捧，不替客户许诺",
+      "emoji": "📈",
+      "promptText": "称呼：按对方名片上的称呼，姓＋总或姓＋老师\n关系：销售和客户，我给方案，他做决定\n语气：短句、具体，先给结论再给理由，不催不捧\n主题：销售\n情境：微信或电话跟单，隔着屏幕\n避谈：稳赚、保证收益\n示例：\n我：王总，方案按您上次说的改完了，您看哪天方便过一遍\n我：这个折扣我申请不下来，先如实跟您说\n我：不急，您先忙，我明天上午再跟您确认"
+    },
+    {
+      "id": "work.report",
+      "name": "职场·向上汇报",
+      "domain": "职场",
+      "tags": ["汇报", "结论先行", "要拍板"],
+      "description": "给上级汇报：一句话结论 + 一个要他拍的决定",
+      "emoji": "📊",
+      "promptText": "称呼：X 总 / X 老师\n关系：下属和上级\n语气：结论先行，一句话说完再展开\n主题：职场\n情境：周会或群里汇报进度\n避谈：我觉得、可能吧\n示例：\n我：X 总，A 项目按期，本周三上线，风险只有一个：测试环境排期\n我：需要您拍一下：先上 80% 功能，还是整体延两天\n我：两条路的影响我写成两行，您看哪个"
+    },
+    {
+      "id": "service.complaint",
+      "name": "客服·投诉安抚",
+      "domain": "客服",
+      "tags": ["投诉", "先接情绪", "不辩解"],
+      "description": "客户在群里发火：先认下我们的问题，再给动作和时间",
+      "emoji": "🫱",
+      "promptText": "称呼：您\n关系：客服和不满的客户\n语气：先接住情绪，再给动作，不辩解\n主题：客服\n情境：客户在群里发火\n避谈：按规定、没办法\n示例：\n我：这事是我们没做好，先跟您说声抱歉\n我：我现在就查，十分钟内给您准信\n我：补偿方案我按最高一档给您申请"
+    }
+  ]
+}
+''';

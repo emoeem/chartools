@@ -798,8 +798,13 @@ class KbStore {
   // ------------------------------------------------------------------ 内部
 
   bool _flush() {
-    final path = archivePath;
-    if (path == null) return true;
+    // 拒绝降级重写**先于**「无路径」判断：向前兼容是只读的（
+    // [archiveSchemaAhead] 的文档口径「此态下 [_flush] 恒拒绝」），纯内存的
+    // 降级运行存档同样不接受写入——否则路径为空的降级档会把每次写入都在
+    // 内存里挂成「成功」，而这份内存状态已丢未来字段、永远落不了盘。判断
+    // 提前只影响「fromJson/decodeArchive 未挂 archivePath 的降级档」这一种
+    // 形态；带路径的存档行为不变（kb_store_test 的 schemaVersion 超前用例
+    // 钉的就是带路径路径）。
     if (archiveSchemaAhead) {
       // 向前兼容只到这里为止：比已知新的存档**绝不降级重写**。toJson 只认
       // 当前实现的字段，重写会把未来版本的数据（未知字段）静默丢掉——宁可
@@ -808,6 +813,8 @@ class KbStore {
           '$kbArchiveSchemaVersion 新：拒绝降级重写，未知字段不落盘（请升级应用）';
       return false;
     }
+    final path = archivePath;
+    if (path == null) return true;
     try {
       _writeArchiveFileSync(path, encodeArchive());
       lastFlushError = null;

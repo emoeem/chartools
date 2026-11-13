@@ -1,4 +1,5 @@
-import 'package:chartools_core/chartools_core.dart' show PersonaCard;
+import 'package:chartools_core/chartools_core.dart'
+    show ConflictChoice, ExpertCatalog, ExpertPackData, InstallAction, PersonaCard;
 import 'package:flutter/material.dart';
 
 import '../application/experts_controller.dart';
@@ -9,6 +10,11 @@ import '../application/experts_controller.dart';
 /// 组装 `ExpertsController(styleSink: SettingsStyleSink(settings),
 /// contactSink: ContactStorePersonaSink(contacts))..load()`；未接线时页内
 /// 相应动作会如实提示「未接线」而不是假装成功。
+///
+/// #13 收敛适配（最小改动）：控制器已切到 core 三件套（PackCodec +
+/// ExpertPackManager + ExpertApply），页面只换数据来源与字段名（pack 元信息
+/// 的 sourceCommit/contentHash）、按 needsChoice 流程弹「覆盖/并存」二选一，
+/// 资产包区补卸载按钮与坏包提示——浏览结构与布局不重排。
 ///
 /// 浏览层与正文层的分界（沿用 legacy 的铁律）：列表/搜索/标签只读浏览层
 /// 字段；点进详情看到的「提示词预览」是 `PersonaCard.parse(body).promptText()`
@@ -123,10 +129,10 @@ class _ExpertsPageState extends State<ExpertsPage> {
                 child: items.isEmpty
                     ? const Center(child: Text('没有匹配的专家'))
                     : GridView.builder(
-                        // 固定行高的响应式网格：种子目录 8 位专家按名字序
+                        // 固定行高的响应式网格：内置示例包的专家按名字序
                         // 排开后，单列列表在 800×600 一类首屏只能露出前几
-                        // 位（「销售跟进」排第 7）——两列网格让整架在首屏
-                        // 露脸，行高 88 与 tile 自然高度匹配不裁字。
+                        // 位——两列网格让整架在首屏露脸，行高 88 与 tile
+                        // 自然高度匹配不裁字。
                         padding: const EdgeInsets.symmetric(vertical: 4),
                         gridDelegate:
                             const SliverGridDelegateWithMaxCrossAxisExtent(
@@ -383,9 +389,11 @@ class _ExpertsPageState extends State<ExpertsPage> {
     );
   }
 
-  /// 「套用为联系人人设」：先选目标联系人；目标已有专用人设时弹确认
-  /// （套用会**覆盖**那句专用人设——StyleSource 优先级意味着这一步一旦
-  /// 生效就压过全局风格，覆盖不可静默发生）。
+  /// 「套用为联系人人设」：先选目标联系人；冲突判定与选择语义收敛到 core
+  /// ExpertApply——控制器首调返回 needsChoice（core 保证问询期间两个目标都
+  /// 没写）时弹「覆盖/并存」二选一，选完带 ConflictChoice 再调一次。目标已有
+  /// 专用人设时不可静默发生（StyleSource 优先级：专用人设一旦写入就压过
+  /// 全局风格）。
   Future<void> _applyContact(
       BuildContext sheetContext, ExpertShelfItem item) async {
     final controller = widget.controller;
@@ -429,11 +437,11 @@ class _ExpertsPageState extends State<ExpertsPage> {
       ),
     );
     if (picked == null || !sheetContext.mounted) return;
-    if (ExpertsController.contactHasPersona(picked)) {
-      // 冲突判定与选择语义收敛到 core StyleSource（优先级与 needsChoice 的
-      // 唯一出处在 expert_apply.dart/style_source.dart）：目标已有专用人设时
-      // 必须用户裁决——覆盖（重写专用人设）或并存（只写全局风格，专用人设
-      // 保留并继续压全局），不可静默发生。
+    // 首调：core 检测到「专用人设压全局」的冲突时返回 needsChoice 且什么都不
+    // 写（expert_apply.dart:167 的既定语义）；无冲突则直接生效。
+    var result = await controller.applyToContact(item, picked);
+    if (!sheetContext.mounted) return;
+    if (result.needsChoice) {
       final choice = await showDialog<_PersonaApplyChoice>(
         context: sheetContext,
         builder: (dialogContext) => AlertDialog(
@@ -469,9 +477,12 @@ class _ExpertsPageState extends State<ExpertsPage> {
       );
       if (!sheetContext.mounted) return;
       if (choice == null || choice == _PersonaApplyChoice.cancel) return;
-      if (choice == _PersonaApplyChoice.coexist) {
-        final result = await controller.applyAsGlobalStyle(item);
-        if (!sheetContext.mounted) return;
+      final kbChoice = choice == _PersonaApplyChoice.coexist
+          ? ConflictChoice.coexist
+          : ConflictChoice.overwrite;
+      result = await controller.applyToContact(item, picked, choice: kbChoice);
+      if (!sheetContext.mounted) return;
+      if (kbChoice == ConflictChoice.coexist) {
         Navigator.of(sheetContext).pop();
         _snack(
             result.ok
@@ -482,8 +493,6 @@ class _ExpertsPageState extends State<ExpertsPage> {
         return;
       }
     }
-    final result = await controller.applyToContact(item, picked);
-    if (!sheetContext.mounted) return;
     Navigator.of(sheetContext).pop();
     _snack(
         result.ok
@@ -517,6 +526,14 @@ class _ExpertsPageState extends State<ExpertsPage> {
                   Text('资产包（按需安装的专家目录）',
                       style: Theme.of(sheetContext).textTheme.titleMedium),
                   const SizedBox(height: 4),
+                  // 坏包快照（core：坏包被忽略而不是被删除，照实说）。
+                  for (final p in widget.controller.packProblems.value)
+                    Text(
+                      p,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(sheetContext).colorScheme.error),
+                    ),
                   for (final pack in packs)
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -525,15 +542,23 @@ class _ExpertsPageState extends State<ExpertsPage> {
                           pack.meta.name.isEmpty ? '（未命名包）' : pack.meta.name),
                       subtitle: Text(
                         [
-                          '${pack.meta.expertCount} 位专家',
+                          '${pack.expertCount} 位专家 · v${pack.meta.version}',
                           if (pack.meta.source.isNotEmpty) pack.meta.source,
-                          if (pack.meta.commit.isNotEmpty)
-                            'commit ${pack.meta.commit}',
-                          if (pack.meta.hash.isNotEmpty)
-                            '内容指纹 ${pack.meta.hash}',
+                          if (pack.meta.sourceCommit.isNotEmpty)
+                            'commit ${pack.meta.sourceCommit}',
+                          if (pack.meta.contentHash.isNotEmpty)
+                            '内容指纹 ${pack.meta.contentHash}',
                         ].join('\n'),
                         style: const TextStyle(fontSize: 12),
                       ),
+                      // 内置包是货架底座不可卸载（core 会拒，按钮直接不给）。
+                      trailing: pack.meta.id == ExpertsController.builtinPackId
+                          ? null
+                          : IconButton(
+                              tooltip: '卸载',
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () => _uninstallPack(sheetContext, pack),
+                            ),
                     ),
                   const SizedBox(height: 8),
                   FilledButton.tonalIcon(
@@ -570,10 +595,13 @@ class _ExpertsPageState extends State<ExpertsPage> {
     );
     if (json == null || !mounted) return;
     try {
-      final pack = await widget.controller.installPackJson(json);
+      final result = await widget.controller.installPackJson(json);
       if (!mounted) return;
-      _snack('已安装「${pack.meta.name}」：${pack.meta.expertCount} 位专家'
-          '${pack.problem.isEmpty ? '' : '；${pack.problem}'}');
+      // 同版本幂等：core 什么都没写（alreadyCurrent），照实说而不是假装「已安装」。
+      _snack(result.action == InstallAction.alreadyCurrent
+          ? (result.warning.isEmpty ? '同版本已安装，未重复写入' : result.warning)
+          : '已安装「${result.pack!.meta.name}」：${result.pack!.expertCount} 位专家'
+              '${result.warning.isEmpty ? '' : '；${result.warning}'}');
     } on FormatException catch (e) {
       _snack('安装失败：${e.message}', error: true);
     } on StateError catch (e) {
@@ -581,6 +609,21 @@ class _ExpertsPageState extends State<ExpertsPage> {
       // 诊断（如「资产包落盘失败（…），本次没有安装」）。
       _snack(e.message, error: true);
     }
+  }
+
+  /// 卸载一个已安装包（core ExpertPackManager.uninstall：内置包不可卸载、
+  /// 没装过报「没有安装过」）。结果（含失败原因）直接给 SnackBar 照实说。
+  Future<void> _uninstallPack(
+      BuildContext sheetContext, ExpertPackData pack) async {
+    final r = await widget.controller.uninstallPack(pack.meta.id);
+    if (!sheetContext.mounted) return;
+    _snackOf(
+      sheetContext,
+      r.ok
+          ? '已卸载「${pack.meta.name.isEmpty ? pack.meta.id : pack.meta.name}」'
+          : r.problem,
+      error: !r.ok,
+    );
   }
 
   void _snack(String message, {bool error = false}) =>
@@ -627,7 +670,8 @@ class _PackJsonDialogState extends State<_PackJsonDialog> {
             controller: _input,
             maxLines: 8,
             decoration: const InputDecoration(
-              hintText: '粘贴资产包 JSON（experts 数组 + 来源信息）',
+              hintText: '粘贴资产包 JSON（jev-expert-pack/1：'
+                  'format + pack{id,version} + experts）',
               border: OutlineInputBorder(),
             ),
           ),

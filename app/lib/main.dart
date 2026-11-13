@@ -1,4 +1,52 @@
+// ---------------------------------------------------------------------------
+// #13 资料三页接线登记（本次唯一改动文件：app/lib/main.dart）
+//
+// 涉及文件与决策：
+// - 消费但不改动：application/knowledge_controller.dart、
+//   application/experts_controller.dart、application/personas_controller.dart
+//   （构造签名按各自类文档）、ui/knowledge_page.dart、ui/experts_page.dart、
+//   ui/personas_page.dart、core 的 KbStore（kb_store.dart）。
+// - 入口（任务 1）：设置页顶部新增「资料」入口组——知识库 / 专家团 / 人设库
+//   三个 ListTile（副标题一句话说明），push 时经 [_PageHost] 接入对应页面。
+//   首页不加快捷入口（任务 4 的判断，理由见 ScenarioListPage 文档），不重排
+//   首页；原 main.dart:229 起的 CapturePage(scenarioId: store.scenarioId)
+//   高危链路（fix(#11 P0-N) 注释段）一字未动。
+// - 控制器生命周期：「页面所有者构造与 dispose」——push 时构造、路由退场
+//   dispose，落点是 [_PageHost]。**实测三个页面自身不构造也不 dispose 注入
+//   的控制器**（knowledge_page.dart:66-70 只摘监听 + 释放搜索框、
+//   experts_page.dart:34-37 释放搜索框、personas_page.dart 无页面级
+//   dispose）——「页面 dispose 自理」在代码里的真实形状是「页面只管自己的
+//   内部输入框」，控制器收尾因此归页面所有者（[_PageHost]）；main 不代持
+//   （无应用级控制器持有者，pop 即回收，下次 push 重新构造、重新 load）。
+// - KbStore 实例（任务 2）：应用级一份，生产在 main() 读档（Android/Linux
+//   走 path_provider 支持目录 + 一次性旧档迁移）后经 ChartoolsApp 构造注入，
+//   随根 State 存活；消费点=知识库页/迁移页 + **采集页与桌面流页（独立复核
+//   补接线）**——CapturePage 透传给 CaptureSession.knowledgeBase，桌面流
+//   _buildCtx 走 CaptureSession.knowledgeRefsOf 现查，热键路由同一实例。
+//   直接 pump 的测试不传 kbStore，根 State initState 用同步降级自举。
+// - 坏档兜底（任务 3，#12 复核必做项）：[_bootKnowledgeStore] 显式 catch
+//   KbStore.loadFromFileSync 的 FormatException——坏档改名挪为
+//   `<存档>.corrupt.<毫秒>` 备份（KbStore 自己不删数据，挪档在 app 层做；
+//   时间戳后缀沿用 legacy KbStore.kt:539 的保全思路，不覆盖旧备份）后空档
+//   续跑，首帧经 root messenger 弹「存档已损坏：已将原档挪为 .corrupt 备份
+//   并新建空档」。挪档失败退化为纯内存档（绝不挂着路径覆盖坏档），提示
+//   如实改说。存档路径见 [_kbArchivePath]：SettingsStore 走 shared_preferences
+//   无现成文件路径可借，按平台推导；Android 的 cache 妥协点已标注。
+// - migration 页接线（fixer 阶段补上，登记待办在此销账）：MigrationPage 挂
+//   设置页「资料」组第四个入口，MigrationController 包住应用级 KbStore（迁移
+//   目标库与知识库页同一份——迁进来的笔记/联系人当场在知识库页可见）；控制
+//   器生命周期同落 [_PageHost]（MigrationController.dispose 收三个
+//   ValueNotifier）。ZIP/SAF 文件选择器仍按 migration_page.dart 头注释留给
+//   后续（v1 收三段文本粘贴）。
+// - fixer 其他补笔（第 1 轮门禁后的编译修复）：根 State 的启动读档从
+//   createState 挪进 initState（createState 只构造 State 本身），_KbBoot
+//   的拆包装配随之入 initState——字段语义与首帧时序不变。
+// ---------------------------------------------------------------------------
 import 'dart:convert';
+// #13 接线引入 dart:io：应用级 KbStore 的启动读档与坏档挪移是文件操作。
+// core 零第三方依赖的纪律不变；app 层本就有平台面（hotkey 的 win32 FFI），
+// web 不在本应用支持矩阵内（采集/热键/粘贴分析三入口均已按平台分支）。
+import 'dart:io' show Directory, File, Platform;
 // AppExitResponse 只在 dart:ui（platform_dispatcher.dart 的枚举），material/
 // widgets 都不转发这个符号（widgets/binding.dart 自己也是从 dart:ui show 进
 // 来的），覆写 didRequestAppExit 必须显式带这一行。
@@ -7,15 +55,34 @@ import 'dart:ui' show AppExitResponse;
 import 'package:chartools_core/chartools_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+// 独立复核补接线（知识注入 + Android 存档持久化）：应用级 KbStore 的存档
+// 目录在 Android/Linux 走 path_provider 的应用支持目录（进程 cache 目录可能
+// 被系统清理，存档是唯一真源，不能落那里）。已在 app/pubspec.yaml 声明直依
+// （锁内 2.1.6，path_provider_android 钉 2.2.23 无 jni/CMake 问题）。
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'application/contact_store.dart';
+// #13 资料三页接线：控制器与页面按构造签名消费（不改动它们的文件）。
+// 注意 experts_controller.dart 与 core 各有一套 ExpertPack/ExpertCatalog
+// 命名（core 是严格校验的 PackCodec 路径，app 是宽容解析路径），本文件只
+// 引用控制器/适配器三个名字，不触碰那批重名类，避开二义引用。
+import 'application/experts_controller.dart';
 import 'application/hotkey_controller.dart';
+import 'application/knowledge_controller.dart';
 import 'application/model_presets.dart';
+// fixer 补接线（migration 页）：控制器与页面按各自构造签名消费
+// （migration_controller.dart:28 / migration_page.dart:36）。
+import 'application/migration_controller.dart';
+import 'application/personas_controller.dart';
 import 'application/settings_store.dart';
 import 'ui/capture_page.dart';
 import 'ui/desktop_assistant_page.dart';
+import 'ui/experts_page.dart';
+import 'ui/knowledge_page.dart';
+import 'ui/migration_page.dart';
 import 'ui/onboarding_page.dart';
+import 'ui/personas_page.dart';
 
 /// G7 偏好档案的存档键（shared_preferences）。C 的 PreferenceProfile 只给
 /// toJson/fromJson（core 不落盘，见 preference_profile.dart 类注释），读写
@@ -73,6 +140,155 @@ class _HotkeyExitObserver with WidgetsBindingObserver {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 应用级 KbStore 的启动接线（#13，任务 2/3）
+// ---------------------------------------------------------------------------
+
+/// 坏档提示的投递口：读档发生在根 State initState（那时没有 context 可弹
+/// UI），首帧之后经 root messenger 投递（挂接在 MaterialApp 的
+/// scaffoldMessengerKey 上）。挂全局而不是埋进某个页面：坏档提示属于
+/// 「启动事件」，无论首屏是引导页还是场景首页都该看到。
+final GlobalKey<ScaffoldMessengerState> _kbNoticeMessengerKey =
+    GlobalKey<ScaffoldMessengerState>(debugLabel: 'kbCorruptNotice');
+
+/// 应用级 KbStore 的存档路径（#13 接线决策 + 独立复核补正）。
+///
+/// SettingsStore 走 shared_preferences，没有现成文件路径可借；kb_store.dart
+/// 文档只约定「单一存档文档」的形状，文件名沿用知识页接线示例的 kb.json
+/// （knowledge_page.dart:11 的 `<数据目录>/kb.json`）。目录按平台：
+/// - **Windows（生产）**：`%APPDATA%/chartools` —— 与既有存档位置一致，
+///   刻意**不**切 path_provider（它的支持目录带 `<公司>/<产品>` 两段，会把
+///   老档孤儿化），应用自有数据聚在一处，排查时不用两处找；
+/// - **Android（生产）**：path_provider 的应用支持目录（= filesDir，应用
+///   私有、持久、不随存储压力被清）——修复「cache 目录可能被系统清」的
+///   数据丢失风险，见 [_migrateLegacyKbArchive] 的一次性旧档迁移；
+/// - **Linux 桌面（生产）**：同走 path_provider 支持目录（原 TEMP 落点的
+///   同款风险，一并修掉）；
+/// - **降级/测试**（平台通道不可用，如 widget 测试直 pump 根组件）：退回
+///   [_kbArchivePathFallback] 的手推路径（TEMP/TMP/系统临时目录）。
+///
+/// 斜杠统一用 `/`：dart:io 的 File 在 Windows 下两种分隔符都认，不必手拼。
+Future<String> _kbArchivePath() async {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+    return _kbArchivePathFallback();
+  }
+  try {
+    final dir = await getApplicationSupportDirectory();
+    return '${dir.path}/chartools/kb.json';
+  } catch (_) {
+    // 平台通道不可用（测试 / 插件缺失 / 降级运行）：退回手推路径。
+    return _kbArchivePathFallback();
+  }
+}
+
+/// 手推的存档路径（path_provider 出现之前的既有实现，现作降级/测试路径；
+/// 也是 Android/Linux 旧档的**迁移源位置**）：
+/// - Windows：`%APPDATA%/chartools`；
+/// - Android：进程私有 `TMPDIR`（init 设到本应用 cache 目录）；
+/// - 其余：TEMP/TMP 或系统临时目录。
+String _kbArchivePathFallback() {
+  final appData = Platform.environment['APPDATA'];
+  if (appData != null && appData.isNotEmpty) {
+    return '$appData/chartools/kb.json';
+  }
+  final tmp = Platform.environment['TMPDIR'] ??
+      Platform.environment['TEMP'] ??
+      Platform.environment['TMP'];
+  final base =
+      (tmp != null && tmp.isNotEmpty) ? tmp : Directory.systemTemp.path;
+  return '$base/chartools/kb.json';
+}
+
+/// 一次性旧档迁移（独立复核补接线）：Android/Linux 的存档曾落 cache/TEMP
+/// 目录（系统可清 = 数据可丢），现改落应用支持目录。新位置没有档而老位置
+/// 有 → 把老档**复制**过来（不删老档：它在 cache 里本就是系统可清的副本，
+/// 留着当备份零成本）。复制失败不炸启动：按「新位置无档」继续空档起步，
+/// 老档原地保留待重试。Windows 新老路径相同，天然空操作。
+Future<void> _migrateLegacyKbArchive(String newPath) async {
+  final newFile = File(newPath);
+  if (newFile.existsSync()) return;
+  final oldPath = _kbArchivePathFallback();
+  if (oldPath == newPath) return;
+  final oldFile = File(oldPath);
+  if (!oldFile.existsSync()) return;
+  try {
+    await newFile.parent.create(recursive: true);
+    await oldFile.copy(newPath);
+    debugPrint('知识库存档已从 $oldPath 迁移到 $newPath');
+  } catch (e) {
+    debugPrint('知识库存档迁移失败（$e）：按新位置空档起步，旧档原地保留');
+  }
+}
+
+/// [_bootKnowledgeStore] 的结果：存档实例 + 首帧提示（null = 存档正常，
+/// 绝大多数启动走这条）。
+class _KbBoot {
+  const _KbBoot(this.store, this.notice);
+
+  final KbStore store;
+
+  /// null = 正常；非空 = 首帧后要弹的 SnackBar 文案。
+  final String? notice;
+}
+
+/// 应用级 KbStore 的启动读档（#12 复核指出的 main 接线必做项）。生产路径
+/// （[main]）用异步版：解析存档路径（Android/Linux 走 path_provider，见
+/// [_kbArchivePath]）→ 一次性旧档迁移（[_migrateLegacyKbArchive]）→ 读档。
+///
+/// KbStore 的契约（kb_store.dart:656-658）：文件损坏抛 FormatException 交给
+/// 调用方处置——「挪开再重写」是 app 层的活，core 不替用户把读不回来的数据
+/// 当垃圾扔。这里的处置顺序：
+///
+/// 1. 正常读档；
+/// 2. FormatException（坏档）→ 把坏档**改名挪开**为 `<存档>.corrupt.<毫秒>`
+///    （沿用 legacy KbStore.kt:539 的时间戳后缀：绝不覆盖既有备份——坏档也
+///    是用户数据，保全到人工排查为止），然后重新 loadFromFileSync 拿到空档
+///    （archivePath 已挂上，后续变更照常落盘），提示用既定文案；
+/// 3. 挪档失败（Windows 文件占用等）→ 退化为**纯内存档**（archivePath 为空
+///    即纯内存，见 kb_store.dart:21）：绝不挂着路径继续跑——否则首次 flush
+///    会把还没挪走的坏档覆盖掉，那才是二次破坏。提示如实改说，不冒领
+///    「已挪为备份」。
+///
+/// 只显式 catch FormatException（存档内容损坏，可救）；磁盘级
+/// FileSystemException 属环境故障，原样上抛让启动失败，不做静默兜底。
+Future<_KbBoot> _bootKnowledgeStore() async {
+  final path = await _kbArchivePath();
+  await _migrateLegacyKbArchive(path);
+  return _bootKnowledgeStoreAt(path);
+}
+
+/// 生产/测试共用的读档核心（坏档兜底三步），按给定路径同步执行。
+_KbBoot _bootKnowledgeStoreAt(String path) {
+  try {
+    return _KbBoot(KbStore.loadFromFileSync(path), null);
+  } on FormatException catch (e) {
+    debugPrint('知识库存档损坏（$e）：挪为 .corrupt 备份后空档续跑');
+    final backup = File(
+        '$path.corrupt.${DateTime.now().millisecondsSinceEpoch}');
+    try {
+      File(path).renameSync(backup.path);
+    } catch (renameError) {
+      // 挪不开就不挂路径：纯内存续跑，坏档原地保留（宁可不落盘，不覆盖）。
+      debugPrint('坏档挪移失败（$renameError）：本次知识库以纯内存运行');
+      return _KbBoot(
+        KbStore(),
+        '存档已损坏且未能挪为备份：本次知识库以纯内存运行，原档保留待排查',
+      );
+    }
+    return _KbBoot(
+      KbStore.loadFromFileSync(path),
+      '存档已损坏：已将原档挪为 .corrupt 备份并新建空档',
+    );
+  }
+}
+
+/// 同步降级自举（仅根 State initState 兜底用）：直接 pump [ChartoolsApp]
+/// 的 widget 测试不传 kbStore 时，initState 里没有 async 可等，退回手推
+/// 路径同步读档——读不到就是空档，行为与接线前一致。生产永远走
+/// [_bootKnowledgeStore]（main 里注入），不经过这里。
+_KbBoot _bootKnowledgeStoreSync() =>
+    _bootKnowledgeStoreAt(_kbArchivePathFallback());
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // fix(#8 DS-8) 接线退出清理：热键反注册挂在退出请求钩子上（Windows 关窗
@@ -88,6 +304,10 @@ Future<void> main() async {
   final contactStore = ContactStore();
   await contactStore.load();
   final preferences = await _loadPreferences();
+  // 应用级 KbStore（#13 任务 2/3 + 独立复核补接线）：启动即读档（Android/
+  // Linux 走 path_provider 支持目录 + 一次性旧档迁移），生产全部消费点——
+  // 知识库页/迁移页/采集流/桌面流（含热键路由）——共用这一份实例。
+  final kbBoot = await _bootKnowledgeStore();
   // Windows 全局热键（Ctrl+Alt+C）启动即恢复：存档开关默认开，热键把桌面
   // 助手页切到前台（路由工厂在这里建——只有 main 持有 store/contactStore 等
   // 页面参数）。非 Windows 是空操作。控制器细节见 hotkey_controller.dart。
@@ -104,6 +324,9 @@ Future<void> main() async {
           scenarioId: store.scenarioId,
           contactStore: contactStore,
           preferences: preferences,
+          // 知识检索注入（独立复核补接线）：热键路由的桌面流与首页入口共用
+          // 同一份应用级 KbStore（main 在 runApp 前读好档，路由工厂闭包捕获）。
+          knowledgeBase: kbBoot.store,
           // C9 接线：统计与设置页/采集流是同一份实例（usage_stats.dart 契约）。
           usage: store.usage,
           // 与下方 runApp 传的同款闭包（main() 里它不是具名变量，这里就地重建）。
@@ -124,13 +347,23 @@ Future<void> main() async {
       _savePreferences(preferences);
     },
     startOnOnboarding: !store.onboarded.value,
+    // 应用级 KbStore（含坏档首帧提示）：main 读好档经构造注入，根 State 不再
+    // 自举（直接 pump 的测试不传，走 initState 同步降级，见 ChartoolsApp 文档）。
+    kbStore: kbBoot.store,
+    kbNotice: kbBoot.notice,
   ));
 }
 
 /// 应用根：内存里持有一份设置（[SettingsStore] 的 ValueNotifier），设置页
 /// 改它、连通性测试读它。启动时从 shared_preferences 加载，设置页的保存
-/// 按钮写盘（见 application/settings_store.dart）；UI 与骨架阶段一致。
-class ChartoolsApp extends StatelessWidget {
+/// 按钮写盘（见 application/settings_store.dart）。
+///
+/// #13 接线：本组件由 StatelessWidget 改为 StatefulWidget——应用级 [KbStore]
+/// 生产由 [main] 读档后经 [kbStore] 注入（独立复核补接线：这份实例同时供给
+/// 采集流/桌面流），随根 State 存活；直接 pump 本组件的既有测试不传
+/// [kbStore]，根 State initState 走同步降级自举（[_bootKnowledgeStoreSync]，
+/// 存档不存在时 boot 只做一次 existsSync，零写入）。
+class ChartoolsApp extends StatefulWidget {
   const ChartoolsApp({
     super.key,
     required this.store,
@@ -138,6 +371,8 @@ class ChartoolsApp extends StatelessWidget {
     this.preferences,
     this.persistPreferences,
     this.startOnOnboarding = false,
+    this.kbStore,
+    this.kbNotice,
   });
 
   final SettingsStore store;
@@ -157,6 +392,58 @@ class ChartoolsApp extends StatelessWidget {
   /// 不受它影响。
   final bool startOnOnboarding;
 
+  /// #13 应用级知识库存档（可选——main() 注入生产实例；直接 pump 的测试不
+  /// 传，根 State initState 用 [_bootKnowledgeStoreSync] 自举）。与知识库页/
+  /// 迁移页/采集流/桌面流共用同一份。
+  final KbStore? kbStore;
+
+  /// 启动读档遇坏档时的首帧提示文案（[kbStore] 一并注入时才可能有值）；
+  /// null = 存档正常。
+  final String? kbNotice;
+
+  @override
+  State<ChartoolsApp> createState() => _ChartoolsAppState();
+}
+
+class _ChartoolsAppState extends State<ChartoolsApp> {
+  /// 应用级知识库存档（#13 任务 2 的落点）：生产由 main() 读档后经
+  /// [ChartoolsApp.kbStore] 注入，**采集流/桌面流也共用这一份**（独立复核
+  /// 补接线——CapturePage/DesktopAssistantPage 的构造参数与热键路由同一
+  /// 实例）；知识库入口 push 时包进 KnowledgeController 做增删改查与落盘。
+  /// 直接 pump 的测试不传 widget.kbStore：initState 用 [_bootKnowledgeStoreSync]
+  /// 同步自举（无平台通道，手推路径，读不到即空档）。
+  late final KbStore kbStore;
+
+  /// 启动读档遇到坏档时的首帧提示文案；null = 存档正常。
+  late final String? kbNotice;
+
+  @override
+  void initState() {
+    super.initState();
+    // 生产：main 读好档经构造注入（initState 只接手，不再做文件 IO）。
+    // 测试/降级：widget.kbStore 为 null → 同步自举（initState 无 async 可等，
+    // 手推路径 + 坏档兜底与生产同一套 [_bootKnowledgeStoreAt] 核心）。
+    final provided = widget.kbStore;
+    if (provided != null) {
+      kbStore = provided;
+      kbNotice = widget.kbNotice;
+    } else {
+      final boot = _bootKnowledgeStoreSync();
+      kbStore = boot.store;
+      kbNotice = boot.notice;
+    }
+    final notice = kbNotice;
+    if (notice == null) return;
+    // 读档在 main/initState 完成（都无 context 可弹 UI）：挪到首帧之后经
+    // root messenger 投递，坏档提示在首屏 Scaffold 就绪后立即出现；mounted
+    // 守卫防极端时序。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _kbNoticeMessengerKey.currentState
+          ?.showSnackBar(SnackBar(content: Text(notice)));
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -165,6 +452,8 @@ class ChartoolsApp extends StatelessWidget {
       // 页面推入栈顶，拿不到 BuildContext，只能经 navigatorKey（见
       // hotkey_controller.dart 的 _handleActivated）。非 Windows 下它闲置。
       navigatorKey: HotkeyController.instance.navigatorKey,
+      // #13 坏档提示的投递口（见 _kbNoticeMessengerKey 文档）。
+      scaffoldMessengerKey: _kbNoticeMessengerKey,
       // fix(#11 P0-3)：采集页 RouteAware 的路由观察者接线——RouteAware 的
       // didPopNext（应用内路由 pop 回来触发采集页刷新）依赖观察者被
       // navigatorObservers 引用才会派发；实例由 CapturePage 静态持有（进程
@@ -173,37 +462,50 @@ class ChartoolsApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
       ),
-      home: startOnOnboarding
+      home: widget.startOnOnboarding
           ? OnboardingPage(
-              store: store,
+              store: widget.store,
               homeBuilder: (_) => ScenarioListPage(
-                store: store,
-                contactStore: contactStore,
-                preferences: preferences,
-                persistPreferences: persistPreferences,
+                store: widget.store,
+                kbStore: kbStore,
+                contactStore: widget.contactStore,
+                preferences: widget.preferences,
+                persistPreferences: widget.persistPreferences,
               ),
             )
           : ScenarioListPage(
-              store: store,
-              contactStore: contactStore,
-              preferences: preferences,
-              persistPreferences: persistPreferences,
+              store: widget.store,
+              kbStore: kbStore,
+              contactStore: widget.contactStore,
+              preferences: widget.preferences,
+              persistPreferences: widget.persistPreferences,
             ),
     );
   }
 }
 
 /// 首页：内置五场景（[Scenarios.builtIns]）+ 右上角进设置。
+///
+/// #13 任务 4 的判断：首页**不**加快捷入口。右上角是采集助手 / 粘贴分析与
+/// 设置的助手入口排，知识库是管理面不是助手流；「资料」入口组放在设置页
+/// 顶部（知识页「一等页面」定位的落点，见 knowledge_page.dart:5-6），两步
+/// 可达且不与助手入口争夺 AppBar 的注意力。只透传 [kbStore] 给设置页。
 class ScenarioListPage extends StatelessWidget {
   const ScenarioListPage({
     super.key,
     required this.store,
+    required this.kbStore,
     this.contactStore,
     this.preferences,
     this.persistPreferences,
   });
 
   final SettingsStore store;
+
+  /// #13 应用级知识库存档（main 注入，随根 State 存活）：透传给设置页的
+  /// 「资料」入口组，**并传给采集页/桌面流页做知识检索注入**（独立复核补
+  /// 接线——生产注入此前落空，四个组 ctx 调用点恒拿空表）。本页自己不消费。
+  final KbStore kbStore;
 
   /// #6 联系人档案与 G7 偏好：透传给两个助手入口页（构造参数注入）。
   final ContactStore? contactStore;
@@ -250,6 +552,9 @@ class ScenarioListPage extends StatelessWidget {
                     usage: store.usage,
                     writeCheckpoint: store.saveSessionCheckpoint,
                     sessionCheckpoint: store.sessionCheckpoint,
+                    // 知识检索注入（独立复核补接线）：应用级 KbStore 与知识
+                    // 库页同一份，随 CaptureSession 进四个组的 ctx 调用点。
+                    knowledgeBase: kbStore,
                   ),
                 ),
               ),
@@ -277,6 +582,9 @@ class ScenarioListPage extends StatelessWidget {
                     // C9 接线：统计与设置页/采集流是同一份实例（桌面流不经
                     // CaptureSession，单独注入）。
                     usage: store.usage,
+                    // 知识检索注入（独立复核补接线）：_buildCtx 每轮分析现查
+                    // 同一份应用级 KbStore（CaptureSession.knowledgeRefsOf）。
+                    knowledgeBase: kbStore,
                   ),
                 ),
               ),
@@ -286,7 +594,11 @@ class ScenarioListPage extends StatelessWidget {
             tooltip: '设置',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) => SettingsPage(store: store),
+                builder: (_) => SettingsPage(
+                  store: store,
+                  kbStore: kbStore,
+                  contactStore: contactStore,
+                ),
               ),
             ),
           ),
@@ -352,6 +664,64 @@ class _ScenarioCard extends StatelessWidget {
       );
 }
 
+/// 「页面所有者构造与 dispose」约定的 main 接线落点（#13）：路由装配、页面
+/// 首次 build 之前经 [create] 构造控制器，路由退场时 dispose 归还。
+///
+/// 为什么控制器不交给页面自己 dispose：实测三个管理页都只自理内部资源——
+/// KnowledgePage 的 State.dispose 摘监听 + 释放搜索框（knowledge_page.dart:
+/// 66-70）、ExpertsPage 释放搜索框（experts_page.dart:34-37）、PersonasPage
+/// 连页面级 dispose 都没有——没有一个碰注入的控制器。「页面 dispose 自理」
+/// 在代码里的真实形状是「页面只管自己的输入框」，控制器收尾就落在所有者
+/// （本宿主）手里；这里不兜住，每次进出页面都会漏一批 ValueNotifier。
+///
+/// main 不代持：控制器实例只活在本宿主的 State 里，没有应用级持有者；pop
+/// 即回收，下次 push 重新构造并重新 load——页面每次进来看到的都是盘上的
+/// 最新状态。
+///
+/// 已知微风险（留 fixer/复核评判）：Experts/Personas 的 load() 是异步收尾，
+/// 若 push 后在 shared_preferences 平台通道返回**之前**就 pop，load 会在
+/// dispose 之后写 notifier——PersonasController.load 内部全吞
+/// （personas_controller.dart:360-381 的 try/catch），ExpertsController.load
+/// 的收尾赋值在 try 外（experts_controller.dart:1121），debug 模式会抛未处理
+/// 异步错误。人手触发不了这个窗口（首次启动后 getInstance 已缓存，load 的
+/// 续体都是微任务级），根治要改控制器的可取消 load，不在本文件权限内。
+class _PageHost<C> extends StatefulWidget {
+  const _PageHost({required this.create, required this.builder});
+
+  /// push 装配时构造控制器（「入口 push 时构造」）。Experts/Personas 的
+  /// 存档读取是异步 load，由 create 闭包以 `..load()` 触发（级联返回自身）。
+  final C Function() create;
+
+  /// 用构造好的控制器装配页面。
+  final Widget Function(BuildContext context, C controller) builder;
+
+  @override
+  State<_PageHost<C>> createState() => _PageHostState<C>();
+}
+
+class _PageHostState<C> extends State<_PageHost<C>> {
+  late final C _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = widget.create();
+  }
+
+  @override
+  void dispose() {
+    // 三个控制器的收尾都是无参 dispose()（knowledge_controller.dart:418、
+    // experts_controller.dart:1170、personas_controller.dart:650）。泛型拿
+    // 不到成员签名，dynamic 派发一次；哪天签名漂移，进出资料页会立刻炸
+    // 出来，不会静默漏。
+    (_controller as dynamic).dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _controller);
+}
+
 /// 设置页：[JevConfig] 五项 + 服务商预设下拉 + 关系描述 + 悬浮窗开关；保存
 /// 按钮把内存改好的整包设置写盘（[SettingsStore.save]）。「连通性测试」
 /// 跑一次真实的 ping 往返。
@@ -359,12 +729,31 @@ class _ScenarioCard extends StatelessWidget {
 /// 服务商下拉（p0-plan ①）只做「起点」：选中即把预设地址回填进地址框，
 /// 地址框仍可手改——下拉回显的永远是「当前地址属于哪档」，手改成自定义
 /// 地址就落回「自定义」，不会锁死。
+///
+/// #13 接线：页顶新增「资料」入口组（知识库 / 专家团 / 人设库）。控制器不
+/// 在本页持有——三个入口的 push 都经 [_PageHost] 当场构造、路由退场 dispose；
+/// 本页只提供构造它们所需的 [kbStore] 与 [contactStore]。
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key, required this.store});
+  const SettingsPage({
+    super.key,
+    required this.store,
+    required this.kbStore,
+    this.contactStore,
+  });
 
   /// 设置的内存态与落盘目标。测试用的是输入框里的**当前值**——所见即所测，
   /// 不必先点保存。
   final SettingsStore store;
+
+  /// #13 应用级知识库存档（根 State initState 构造）：知识库入口 push 时包
+  /// 进 KnowledgeController。必填——管理页没有存档就无从谈起，缺了在编译期
+  /// 报错好过运行时收起入口装没有。
+  final KbStore kbStore;
+
+  /// #6 联系人档案（可选——直接 pump 本页的测试不传）：专家团「套用为联系
+  /// 人人设」的写入口（ContactStorePersonaSink）。不传时 ExpertsController
+  /// 的 contactSink 缺位，专家页对套用动作如实提示「未接线」而不是假装成功。
+  final ContactStore? contactStore;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -534,6 +923,74 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // ------------------------------------------------------------ 资料入口组
+
+  /// 知识库（#13）：控制器包住应用级那份 [KbStore]（构造在根 State
+  /// initState，见 _ChartoolsAppState.kbStore），路由退场由 [_PageHost]
+  /// dispose 控制器——KbStore 是应用级存档，**不**随页面销毁。
+  /// KnowledgePage 是 body-only 组件（knowledge_page.dart:12），路由外壳的
+  /// Scaffold + AppBar 由接线方（这里）补上，与另外两页自带的外壳对齐。
+  void _openKnowledge() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _PageHost<KnowledgeController>(
+        create: () => KnowledgeController(widget.kbStore),
+        builder: (_, controller) => Scaffold(
+          appBar: AppBar(title: const Text('知识库')),
+          body: KnowledgePage(controller: controller),
+        ),
+      ),
+    ));
+  }
+
+  /// 专家团（#13）：套用写入口按 experts_controller.dart 类文档的接线口径
+  /// 组装——SettingsStyleSink 写设置里的 style（本页的 [widget.store]），
+  /// ContactStorePersonaSink 覆写联系人档案的 persona；未传联系档案时 sink
+  /// 缺位，专家页对套用动作如实提示「未接线」。`..load()` 读我的库与已装
+  /// 资产包（shared_preferences），坏档/通道缺失按空清单继续。
+  void _openExperts() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _PageHost<ExpertsController>(
+        create: () => ExpertsController(
+          styleSink: SettingsStyleSink(widget.store),
+          contactSink: widget.contactStore == null
+              ? null
+              : ContactStorePersonaSink(widget.contactStore!),
+        )..load(),
+        builder: (_, controller) => ExpertsPage(controller: controller),
+      ),
+    ));
+  }
+
+  /// 人设库（#13）：接线口径见 personas_page.dart:8——`PersonasController()
+  /// ..load()`；列表经 entries notifier 监听，load 完成即刷新。
+  void _openPersonas() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _PageHost<PersonasController>(
+        create: () => PersonasController()..load(),
+        builder: (_, controller) => PersonasPage(controller: controller),
+      ),
+    ));
+  }
+
+  /// 迁移旧版数据（fixer 补接线）：MigrationPage 是 body-only 组件
+  /// （migration_page.dart:23），路由外壳 Scaffold + AppBar 由这里补上，与
+  /// 知识库页同款。控制器包住应用级那份 [widget.kbStore]——迁移目标库与
+  /// 知识库页是同一份实例（migration_controller.dart:26 的口径），迁进来的
+  /// 笔记/联系人退出本页后在知识库页当场可见；push 时经 [_PageHost] 构造、
+  /// 退场 dispose（dispose 收控制器自己的三个 ValueNotifier，KbStore 不随
+  /// 页面销毁）。无异步 load（预览是即时的），不需要 `..load()`。
+  void _openMigration() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _PageHost<MigrationController>(
+        create: () => MigrationController(store: widget.kbStore),
+        builder: (_, controller) => Scaffold(
+          appBar: AppBar(title: const Text('迁移旧版数据')),
+          body: MigrationPage(controller: controller),
+        ),
+      ),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -541,6 +998,46 @@ class _SettingsPageState extends State<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // #13 资料入口组（任务 1）：放页顶——知识页的「一等页面」定位
+          // （knowledge_page.dart:5-6）要求管理面不藏在模型参数里。三个入口
+          // 都不在这里构造控制器：push 交给 [_PageHost] 当场构造、退场即收。
+          Text('资料', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.menu_book_outlined),
+            title: const Text('知识库'),
+            subtitle: const Text('笔记、联系人档案与检索评测的统一管理'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _openKnowledge,
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.groups_outlined),
+            title: const Text('专家团'),
+            subtitle: const Text('浏览专家目录与资产包，套用为全局风格或联系人人设'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _openExperts,
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.face_outlined),
+            title: const Text('人设库'),
+            subtitle: const Text('维护人设卡，支持导入 Character Card（CCV2）'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _openPersonas,
+          ),
+          // 迁移入口（fixer 补接线）：同属资料管理面——旧版数据的一次性迁入，
+          // 与上面三个管理页同组、不进模型参数也不占首页。
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.move_down_outlined),
+            title: const Text('迁移旧版数据'),
+            subtitle: const Text('把旧版导出的笔记/联系人 JSON 迁入知识库'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _openMigration,
+          ),
+          const SizedBox(height: 12),
           Text('模型路由', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
           Text(

@@ -33,6 +33,7 @@ class DesktopAssistantPage extends StatefulWidget {
     this.preferences,
     this.persistPreferences,
     this.usage,
+    this.knowledgeBase,
   });
 
   final ValueNotifier<JevConfig> config;
@@ -67,6 +68,14 @@ class DesktopAssistantPage extends StatefulWidget {
   /// 的判断/起草/改写调用打点写进它，设置页统计卡读同一份对象。桌面流不经
   /// [CaptureSession]，需要单独注入。null = 不打点（与接入前逐字节一致）。
   final UsageStats? usage;
+
+  /// 知识检索注入（独立复核补接线，超越点）：main.dart 传应用级 [KbStore]
+  /// （与知识库页/迁移页/采集流同一份实例），[_buildCtx] 每轮分析用「最后
+  /// 一条对方消息」检索库内启用笔记，命中的以「知识参考（来源：知识库笔记
+  /// 《标题》）」段随 ctx 进提示词——桌面流不经 [CaptureSession] 常驻实例，
+  /// 走静态 [CaptureSession.knowledgeRefsOf] 现查。null = 未注入（旧构造方/
+  /// 测试），ctx 与缓存键和未接线时逐字节一致。
+  final KbStore? knowledgeBase;
 
   @override
   State<DesktopAssistantPage> createState() => _DesktopAssistantPageState();
@@ -188,17 +197,22 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
   ContactProfile? get _activeContact =>
       widget.contactStore?.activeContact.value;
 
-  /// 组装本轮 ctx（补充背景 + 风格样本 + 激活联系人 + G7 偏好附言）：judge 与
-  /// draftAndRank 必须拿同一份，G1 预览由它算出。contact 走 A 的 buildContext
-  /// 契约扩展（ContactProfile? 可选参数）——无激活联系人且无偏好记录时传
-  /// null/空，请求与基线逐字节一致。偏好附言只进写作路（buildContext 内按
-  /// 固定 id 笔记承载，core 侧 background 刻意跳过），G1 预览同步列出。
+  /// 组装本轮 ctx（补充背景 + 风格样本 + 激活联系人 + G7 偏好附言 + 知识
+  /// 参考）：judge 与 draftAndRank 必须拿同一份，G1 预览由它算出。contact 走
+  /// A 的 buildContext 契约扩展（ContactProfile? 可选参数）——无激活联系人且
+  /// 无偏好记录时传 null/空，请求与基线逐字节一致。偏好附言只进写作路
+  /// （buildContext 内按固定 id 笔记承载，core 侧 background 刻意跳过），G1
+  /// 预览同步列出。知识参考（独立复核补接线）：未注入库/无对方消息/无命中/
+  /// 检索异常一律返回空表（CaptureSession.knowledgeRefsOf 契约），空表时
+  /// buildContext 产出与改前逐字节一致。
   ChatContext? _buildCtx(ChatSnapshot snapshot) => CaptureSession.buildContext(
         extra: _extra.text,
         myMessages: CaptureSession.myMessagesOf(snapshot),
         styleLearning: _styleLearning,
         contact: _activeContact,
         preferences: widget.preferences,
+        knowledgeRefs:
+            CaptureSession.knowledgeRefsOf(widget.knowledgeBase, snapshot),
       );
 
   /// G7 偏好变更（记录/删除/清空）后的页面联动：先落盘回调（main.dart 注入），
