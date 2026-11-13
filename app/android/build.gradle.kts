@@ -3,9 +3,14 @@ allprojects {
         // 国内镜像优先（dl.google.com / repo1.maven.org 本机直连超时），原仓库兜底。
         // Flutter 引擎构件（io.flutter:*）只在这里有镜像，aliyun google 不收
         // 这个 group（实测 404）——与 flutter 工具自身配置的 storage.flutter-io.cn 一致。
+        // CI 跳过 aliyun（GITHUB_ACTIONS=true，见 settings.gradle.kts 同款裁定）；
+        // flutter-io.cn 在 CI 上是历史验证可用的（alpha.1 起），保留。
+        val onCi = System.getenv("GITHUB_ACTIONS") == "true"
         maven("https://storage.flutter-io.cn/download.flutter.io")
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/public")
+        if (!onCi) {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/public")
+        }
         google()
         mavenCentral()
     }
@@ -23,12 +28,14 @@ subprojects {
     // pub 缓存里的插件各自在 buildscript 里写死 google()/mavenCentral()：
     // dl.google.com / repo1.maven.org 本机直连超时，把 aliyun 镜像插到最前面
     // （先于插件自带的仓库生效），原仓库留作兜底。与 settings.gradle.kts 的
-    // pluginManagement 镜像同一批。
+    // pluginManagement 镜像同一批；CI 跳过（同 settings 的裁定）。
     buildscript {
         repositories {
-            maven("https://maven.aliyun.com/repository/google")
-            maven("https://maven.aliyun.com/repository/public")
-            maven("https://maven.aliyun.com/repository/gradle-plugin")
+            if (System.getenv("GITHUB_ACTIONS") != "true") {
+                maven("https://maven.aliyun.com/repository/google")
+                maven("https://maven.aliyun.com/repository/public")
+                maven("https://maven.aliyun.com/repository/gradle-plugin")
+            }
         }
     }
     // 本机 SDK 只装了 platform android-35（镜像无 36 的包、dl.google.com
