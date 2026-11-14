@@ -182,26 +182,91 @@ class CaptureAndroid {
   /// 进 configure，Kotlin 侧落为 overlay.setSecure——服务重连重放（[onConfigureReplay]
   /// → 采集页 _pushConfigure）时用它把原生内存态恢复成 Dart 侧当前值，服务重启
   /// 后 FLAG_SECURE 不再静默丢失。载荷契约：`{packages, ocrFallback, blocked,
-  /// secure}`；`secure` 键在旧调用方/旧载荷缺省时按 false 处理（Kotlin 侧缺省
-  /// 语义，向后兼容）。configure 是幂等重放：同一载荷重复下发无副作用。
+  /// secure, injectionEnabled}`（M0 起恒带末键，见下）；`secure` 键在旧调用方/
+  /// 旧载荷缺省时按 false 处理（Kotlin 侧缺省语义，向后兼容）。configure 是
+  /// 幂等重放：同一载荷重复下发无副作用。
   ///
   /// fix(#11 P0-1)：服务未连接时本方法不再抛 MissingPluginException——control
   /// 通道上有插件级兜底 handler（CaptureAndroidPlugin.onAttachedToEngine 注册），
   /// 把载荷缓存进 CaptureService.ServiceConfig 静态字段，服务连接时自动生效
   /// （secure 属 overlay 实例态不缓存，由服务连接后的 [onConfigureReplay] 重放
   /// 补齐）；服务连接后由服务级 handler（CaptureService.handleControl）接管。
+  ///
+  /// M0 注入开关镜像（root-module-design.md §3.3-3「逐 App 开关、默认关」）：
+  /// 载荷恒带 `injectionEnabled` 键（[_injectionEnabled] 的当前值）——「沿用
+  /// 既有 configure MethodCall，payload 增加可选键 injectionEnabled」的开关
+  /// 镜像契约。键在 Kotlin 侧缺省 = 空映射 = 全关（injectionEnabledOf 的
+  /// fail-closed 解析），本门面恒带键（哪怕空映射），让每次既有推送（采集页
+  /// 进页 / 重放 / 黑名单增删）都原样携带当前注入开关意图，调用方零改动。
   Future<void> configure({
     required Set<String> packages,
     required bool ocrFallback,
     required Set<String> blocked,
     required bool secure,
-  }) =>
-      _control.invokeMethod<void>('configure', {
-        'packages': packages.toList(),
-        'ocrFallback': ocrFallback,
-        'blocked': blocked.toList(),
-        'secure': secure,
-      });
+  }) {
+    final payload = <String, Object?>{
+      'packages': packages.toList(),
+      'ocrFallback': ocrFallback,
+      'blocked': blocked.toList(),
+      'secure': secure,
+      'injectionEnabled': Map<String, bool>.of(_injectionEnabled),
+    };
+    // 记下最后一次完整下发的载荷（[setInjectionEnabled] 的重推底稿）。在
+    // invoke 之前记：载荷代表「我方最后的完整配置意图」，通道失败不改意图，
+    // 重推幂等（configure 契约即幂等重放）。
+    _lastConfigurePayload = Map<String, Object?>.of(payload);
+    return _control.invokeMethod<void>('configure', payload);
+  }
+
+  /// 最近一次经 [configure] 下发的完整载荷（含 injectionEnabled 键）；null =
+  /// 本会话从未完整下发过。门面自己记得「最后一次发了什么」，调用方无需向
+  /// 服务或存储回读（契约原文：读当前已下发配置无必要）。
+  static Map<String, Object?>? _lastConfigurePayload;
+
+  /// Dart 侧的逐 App 注入开关镜像：唯一写入口是 [setInjectionEnabled]（值仅
+  /// 来自调用方——SettingsStore.injectionEnabled 的当前值），与 Kotlin 侧
+  /// ServiceConfig.injectionEnabled「值仅来自 Dart 下发」的镜像纪律同款。
+  /// 默认空映射 = 全关（fail-closed，与 Kotlin 缺省一致）。
+  static Map<String, bool> _injectionEnabled = const {};
+
+  /// M0 注入开关镜像的写入口（开关镜像契约，与 Kotlin 侧
+  /// CaptureService.applyConfigureStatics/injectionEnabledOf 逐字对齐）：
+  /// 把 [enabled] 并进 configure 推送。
+  ///
+  /// 语义（契约原文「读当前已下发配置无必要：把 enabled 并进下次 configure
+  /// 推送」）：
+  /// - 门面已记得最后一次完整载荷（[configure] 落的 [_lastConfigurePayload]）
+  ///   时，**立即**按同载荷重推一次 configure——载荷完整（packages/blocked/
+  ///   ocrFallback/secure 原样），不存在「孤键载荷把 Kotlin 白名单清空」的
+  ///   问题（packages 键缺省 = 恒替换为空集，孤键载荷绝不能发）；重推幂等，
+  ///   secure 沿用「最后下发值即期望值」的既有重放语义。
+  /// - 从未完整下发过（采集页本会话还没推开）时只记录镜像，等下次
+  ///   [configure]（进页 initState / 重放）随完整载荷带出——与既有 configure
+  ///   的「页面不在时请求被丢弃，下次进页重新下发」同一条路。
+  ///
+  /// [enabled] 是整表（`Map<pkg, bool>`），不是增量：调用方传设置里的当前全量
+  /// 值，门面不读旧值做合并（契约「读当前已下发配置无必要」的另一半）。键名
+  /// `injectionEnabled` 逐字——Kotlin 侧 injectionEnabledOf 以字面量取键。
+  ///
+  /// 通道不可用（Windows 调试 / 引擎未挂）时抛 MissingPluginException，由
+  /// 调用方兜底，与 [canRequestNotifications] 同款；镜像照旧已记录，通道
+  /// 恢复后随下次完整推送补齐。
+  Future<void> setInjectionEnabled(Map<String, bool> enabled) async {
+    _injectionEnabled = Map<String, bool>.of(enabled);
+    final last = _lastConfigurePayload;
+    if (last == null) return;
+    final merged = Map<String, Object?>.of(last)
+      ..['injectionEnabled'] = Map<String, bool>.of(enabled);
+    _lastConfigurePayload = Map<String, Object?>.of(merged);
+    await _control.invokeMethod<void>('configure', merged);
+  }
+
+  /// 仅供测试：清空开关镜像与最后载荷缓存（静态态跨用例残留会串味）。
+  /// 生产代码不要调用。
+  static void resetInjectionMirrorForTest() {
+    _injectionEnabled = const {};
+    _lastConfigurePayload = null;
+  }
 
   /// 采集服务是否已连接并可用。
   ///

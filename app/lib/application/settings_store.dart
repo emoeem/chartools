@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:capture_android/capture_android.dart';
 import 'package:chartools_core/chartools_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -30,8 +32,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// - [onboarded]：首次运行引导完成标记（p0-plan ②，引导页写、主入口读）。
 /// - [scenarioId]：引导第一步记住的场景（p0-plan ②「单选并记住」）。
 /// - [usage]：四条模型路由的调用统计（C9），累计口径随设置存档持久化。
+/// - [injectionEnabled]：M0 注入开关镜像（root-module-design.md §3.3-3，逐
+///   App 开关、默认全关；变更随既有 configure 推送路径下发，原生侧只做镜像）。
 class SettingsStore {
-  SettingsStore();
+  SettingsStore() {
+    // M0 注入开关镜像（root-module-design.md §3.3-3「逐 App 开关、默认关」）：
+    // 本 notifier 是注入开关的事实来源，Kotlin 侧（ServiceConfig.injectionEnabled，
+    // 消费方 bridge 的 gate 应答）只做镜像、值仅来自 Dart 下发——所以变更
+    // 必须随既有 configure 推送路径下发，见 [_pushInjectionEnabled]。
+    injectionEnabled.addListener(_pushInjectionEnabled);
+  }
 
   /// shared_preferences 里的存档键：一个 key 存整包 JSON。旧仓库是每项
   /// 一个 key；整包存取让读写始终对称，也给 [JevConfig.toJson] 一个位置。
@@ -136,6 +146,55 @@ class SettingsStore {
   /// 引用从构造起始终有效。
   final UsageStats usage = UsageStats();
 
+  /// M0 注入开关镜像（root-module-design.md §3.3-3：「用户明示开启、默认关」
+  /// 的逐 App 开关，legacy `Prefs.injectionEnabled` 的对应项）：Map<包名, 开>。
+  /// **默认空映射 = 全关**（fail-closed：键缺省/包名缺省一律按关处理，Kotlin
+  /// 侧 injectionEnabledOf 的解析语义同款）。
+  ///
+  /// 这是注入开关的**事实来源**：设置页「注入采集(实验)」区写它；原生侧
+  /// （CaptureService.ServiceConfig.injectionEnabled，bridge 的 gate 应答消费）
+  /// 只做镜像，值仅来自 Dart 下发——变更经 [_pushInjectionEnabled] 随既有
+  /// configure 推送路径下发（开关镜像契约：payload 键 `injectionEnabled`，
+  /// `{"pkg": true|false}`，键名与 Kotlin 侧 injectionEnabledOf 逐字一致）。
+  ///
+  /// 与 [blockedPackages] 不同，本开关**不做** UI 之外的默认兜底：映射里没有
+  /// 的包 = 关，映射本身就是完整意图。持久化走整包存档（[toJson] 的
+  /// 'injectionEnabled' 键），load 时坏形状（非 Map / 键值类型不符）整键丢弃
+  /// 回默认空映射——与 displayMode「存档里的其它值落回默认」同一口径。
+  final ValueNotifier<Map<String, bool>> injectionEnabled =
+      ValueNotifier(const {});
+
+  /// 注入采集的目标 App 清单（设置页「注入采集(实验)」区逐 App 开关的渲染源，
+  /// 当前仅 Telegram 一项）。**与 Kotlin 常量互钳**：HookTargets.SCOPED
+  /// （packages/capture_android/android/src/main/kotlin/dev/chartools/capture/
+  /// bridge/HookTargets.kt:23，legacy 原文 com/jev/probe/bridge/HookTargets.kt:20
+  /// 的对位移植）——那是模块入口「自己再判一次」的门槛清单，这边是给同一份
+  /// 白名单渲染开关的 Dart 侧钳制值；改任何一侧必须两侧同步（各自测试钳
+  /// 字面量互锁）。
+  static const List<String> injectionScopedPackages = <String>[
+    'org.telegram.messenger',
+  ];
+
+  /// [injectionEnabled] 变更 → 随既有 configure 推送路径下发（开关镜像契约
+  /// 「变更时随既有推送路径下发」）。推送本体在门面
+  /// [CaptureAndroid.setInjectionEnabled]：有最后一次完整载荷就立即按同载荷
+  /// 重推（幂等重放，packages 等原样——孤键载荷会清空 Kotlin 白名单，绝不
+  /// 发），没有就记入门面镜像、随下次完整 configure 带出。
+  ///
+  /// 通道不可用（Windows 调试 / 引擎未挂）的 MissingPluginException 在这里
+  /// 兜底吞掉：store 无 UI，可提示的调用方（设置页开关）不在本层；镜像值
+  /// 已在门面记录，通道恢复后随下次推送补齐，不因通道缺失丢开关状态。
+  void _pushInjectionEnabled() {
+    final snapshot = Map<String, bool>.of(injectionEnabled.value);
+    unawaited(() async {
+      try {
+        await CaptureAndroid().setInjectionEnabled(snapshot);
+      } catch (_) {
+        // 通道不可用 / 服务未连且无兜底：静默（见上注释）。
+      }
+    }());
+  }
+
   /// C10 会话检查点的存档位（p0-plan C10）：CaptureSession 最近一次快照进门
   /// /切换联系人时记下的会话状态（最近快照签名 / 关系描述 / 激活联系人 id）。
   /// 形状归 capture_session.dart 的 SessionCheckpoint 管——本类把它当作不透明
@@ -218,6 +277,18 @@ class SettingsStore {
         if (savedOnboarded is bool) onboarded.value = savedOnboarded;
         final savedScenarioId = decoded['scenarioId'];
         if (savedScenarioId is String) scenarioId.value = savedScenarioId;
+        // M0 注入开关镜像：坏形状整键丢弃回默认空映射（= 全关，fail-closed
+        // 方向安全），逐项只收 String 键 + bool 值。load 期赋值同样会触发
+        // [_pushInjectionEnabled]：启动时门面还没有完整载荷底稿，只把存档值
+        // 记进门面镜像，随下次（采集页进页/重放的）完整 configure 带出。
+        final savedInjection = decoded['injectionEnabled'];
+        if (savedInjection is Map) {
+          injectionEnabled.value = <String, bool>{
+            for (final entry in savedInjection.entries)
+              if (entry.key is String && entry.value is bool)
+                entry.key as String: entry.value as bool,
+          };
+        }
         // 调用统计（C9）就地恢复：缺键 / 坏形状按 0 处理（UsageStats.restore
         // 的容错规则），不挡其余字段。
         final savedUsage = decoded['usage'];
@@ -323,6 +394,7 @@ class SettingsStore {
       'displayMode': displayMode.value,
       'onboarded': onboarded.value,
       'scenarioId': scenarioId.value,
+      'injectionEnabled': injectionEnabled.value,
       'usage': usage.toJson(),
       'sessionCheckpoint': _sessionCheckpoint,
     };
@@ -336,5 +408,6 @@ class SettingsStore {
     displayMode.dispose();
     onboarded.dispose();
     scenarioId.dispose();
+    injectionEnabled.dispose();
   }
 }

@@ -40,6 +40,13 @@ android {
     compileSdk = 35
     buildToolsVersion = "35.0.0"
 
+    // M0 桥 AIDL：AGP 8 起默认关闭（aidl=false），IBridgeConnection.aidl 编译需要。
+    // （owner 批准的一次性例外：本文件原不在 M0 接收端写手的独占清单内，仅此
+    // 一项，其余配置一律未动。）
+    buildFeatures {
+        aidl = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -91,4 +98,8 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
     testImplementation("org.mockito:mockito-core:5.0.0")
+    // 真实 org.json 只上测试类路径（legacy cn/app/build.gradle.kts:102-105 同款）；
+    // M0 桥 Payload 往返测试需要（单测跑在 mockable android.jar 上，org.json 是
+    // 桩，SnapshotConfidenceContractTest 尾注记录过这堵墙）。owner 批准的单行例外。
+    testImplementation("org.json:json:20240303")
 }

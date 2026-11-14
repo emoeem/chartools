@@ -153,6 +153,18 @@ class CaptureService : AccessibilityService() {
         @Volatile var ocrFallbackEnabled: Boolean = false
 
         /**
+         * Root/Xposed 注入层的逐 App 开关镜像（M0，root-module-design.md §2.2/§4-M0；
+         * configure 载荷新增可选键 `injectionEnabled: {pkg: bool}`，解析见
+         * [injectionEnabledOf]，消费方是 bridge 的 gate 应答 —— BridgeDispatch.gateVerdict
+         * 按模块自报的包名查这里）。与 [configuredPackages] 同款镜像纪律：值仅来自
+         * Dart 下发（configure 载荷），原生侧从不自写。键缺省 / 类型不符 =
+         * 空映射 = 全关（fail-closed：没有 Dart 的明确指令，gate 一律回 false）。
+         * M0 没有钩子，本镜像唯一的读者是 gate 问路（legacy 的
+         * `Prefs.injectionEnabled(pkg)` 不随迁，新仓库设置的事实来源在 Dart）。
+         */
+        @Volatile var injectionEnabled: Map<String, Boolean> = emptyMap()
+
+        /**
          * 插件 attaching 时塞进来的 messenger（见 CaptureAndroidPlugin）。
          * 无障碍服务的生命周期独立于 Flutter 引擎：服务先连上、引擎后起是常态，
          * 两侧谁后到，谁负责调用 [attachEngineChannels]。
@@ -256,11 +268,35 @@ class CaptureService : AccessibilityService() {
             (arguments as? Map<*, *>)?.get("secure") as? Boolean ?: false
 
         /**
+         * M0 注入开关镜像（[injectionEnabled]）：configure 载荷的
+         * `injectionEnabled` 解析（契约键名逐字 —— Dart 侧 W3 的 setInjectionEnabled
+         * 把它并进下次 configure 推送）。纯函数放 companion 与 [overlaySecureOf]
+         * 同一取舍：两路 configure（服务级 handleControl / 插件级兜底的
+         * [applyConfigureStatics]）共用本入口，「两路逐行一致」不靠注释约定、
+         * 靠同一函数。语义：键缺省（旧调用方不带该字段）或类型不符 = 空映射 =
+         * 全关（与 packages 的恒替换同构 —— 开关镜像没有「保留当前值」语义，
+         * 用户关掉最后一个开关后 Dart 下发的空映射必须真的把它关掉）；映射内
+         * 非 (String → Boolean) 的条目逐项丢弃不抛。
+         */
+        // 铸型结果要继续 `?.` 链必须整体加括号：as? 绑定松于后置 safe-call，
+        // 不加括号 K2 解析器在铸型目标处报 Incomplete code（K2.4.0 实测复现）。
+        internal fun injectionEnabledOf(arguments: Any?): Map<String, Boolean> =
+            ((arguments as? Map<*, *>)?.get("injectionEnabled") as? Map<*, *>)
+                ?.mapNotNull { (pkg, on) ->
+                    val p = pkg as? String ?: return@mapNotNull null
+                    val v = on as? Boolean ?: return@mapNotNull null
+                    p to v
+                }?.toMap()
+                ?: emptyMap()
+
+        /**
          * fix(#11 P0-1)：configure 载荷 → [ServiceConfig] 静态字段的落盘，插件级
          * 兜底 handler 在服务未连接时用它接住 Dart 的 configure（见
          * [CONFIGURE_METHOD] 注释）。解析语义与 handleControl 的 configure 分支
          * **逐行一致**（改任何一侧必须同步）：packages 恒替换、blocked 键缺省
-         * 保留当前值不重置、ocrFallback 缺省 false。落的是 companion 静态——
+         * 保留当前值不重置、ocrFallback 缺省 false、injectionEnabled 键缺省 =
+         * 空映射 = 全关（M0 注入开关镜像，解析入口 [injectionEnabledOf]）。
+         * 落的是 companion 静态——
          * onAccessibilityEvent 的白名单门（`eventPkg !in configuredPackages`）与
          * maybeCapture 的 ocrFallbackEnabled 都直接读静态，服务连接后无需再等
          * Dart 重放就已生效（重放幂等，照旧覆盖）。secure 键**不**在这里落：
@@ -274,6 +310,7 @@ class CaptureService : AccessibilityService() {
                 blockedPackages = blocked.filterIsInstance<String>().toSet()
             }
             ocrFallbackEnabled = call.argument<Boolean>("ocrFallback") ?: false
+            injectionEnabled = injectionEnabledOf(call.arguments)
         }
 
         /**
@@ -1123,6 +1160,12 @@ class CaptureService : AccessibilityService() {
                     ServiceConfig.blockedPackages = blocked.filterIsInstance<String>().toSet()
                 }
                 ServiceConfig.ocrFallbackEnabled = call.argument<Boolean>("ocrFallback") ?: false
+                // fix(M0 注入开关镜像)：逐 App 注入开关随 configure 下发落镜像，
+                // 与 applyConfigureStatics 同入口解析（injectionEnabledOf）——
+                // 「两路逐行一致」靠同一函数而非注释约定。键缺省 = 空映射 =
+                // 全关（fail-closed，见 [injectionEnabledOf]）。消费方：bridge
+                // 的 gate 应答（BridgeDispatch.gateVerdict）。
+                ServiceConfig.injectionEnabled = injectionEnabledOf(call.arguments)
                 // fix(#9 K-2)：防截屏期望值随 configure 载荷走（缺省 false，向后
                 // 兼容——旧调用方不带 secure 键，解析见 [overlaySecureOf]）。
                 // 服务重连时 requestConfigure → Dart 重放 configure，原生
@@ -1136,7 +1179,8 @@ class CaptureService : AccessibilityService() {
                     "configure pkgs=${pkgs.size} " +
                         "blocked=${ServiceConfig.blockedPackages.size} " +
                         "ocrFallback=${ServiceConfig.ocrFallbackEnabled} " +
-                        "secure=$secure"
+                        "secure=$secure " +
+                        "inj=${ServiceConfig.injectionEnabled.size}"
                 )
                 result.success(true)
             }

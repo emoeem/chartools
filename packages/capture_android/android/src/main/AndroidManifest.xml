@@ -32,5 +32,46 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep the accessibility reader alive on aggressive OEM power management" />
         </service>
+
+        <!--
+          Root/Xposed 注入层的桥接收端（M0，设计 §1.3/§2.2）。真机上唯一走得通
+          的方向是**广播**：目标 App 进程里的模块用的是目标 App 的 uid，包可见
+          性把本 App 对它整个挡掉了（Provider 取不到、Service 绑不上、
+          getPackageInfo 抛 NameNotFound）。广播的投递由系统完成，不需要发送方
+          解析出接收方。
+
+          所以默认通道是这条 receiver：exported=true、**不加 android:permission**
+          （门是 UID 白名单不是签名权限，见 BridgeDispatch/BridgeSender），方法名
+          放在 extra 里，答复走 setResultExtras。
+
+          library 清单里必须写全限定类名：相对名（.bridge.BridgeReceiver）会在
+          合并时按宿主包名解析而落空（同上方 CaptureService 的声明注释）。
+        -->
+        <receiver
+            android:name="dev.chartools.capture.bridge.BridgeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <!-- 与 BridgeContract.ACTION 常量逐字一致（dev.chartools.chartools_app.bridge.CALL）。 -->
+                <action android:name="dev.chartools.chartools_app.bridge.CALL" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          兜底通道：同步、能直接拿答复，给**不**受可见性限制的调用方用（本 App
+          自己、root 调试）。它也是真机上证明「Provider 本身没坏、只是被可见性
+          挡住」的对照手段。exported=true 且不加 permission：门禁在
+          BridgeDispatch 里按发送方 UID 判（§1.3）。authority 与
+          BridgeContract.AUTHORITY 常量逐字一致。
+        -->
+        <provider
+            android:name="dev.chartools.capture.bridge.BridgeProvider"
+            android:authorities="dev.chartools.chartools_app.bridge"
+            android:exported="true" />
+
+        <!-- Provider 的备（OPPO/Android 16 上 Provider 返回 null 的机型）：
+             显式绑定，同样 exported + UID 门禁。 -->
+        <service
+            android:name="dev.chartools.capture.bridge.BridgeConnectionService"
+            android:exported="true" />
     </application>
 </manifest>

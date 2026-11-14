@@ -1036,6 +1036,71 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // -------------------------------------------------------- 注入采集(实验)
+
+  /// 注入采集 App 名的显示映射（清单在 [SettingsStore.injectionScopedPackages]，
+  /// 与 Kotlin HookTargets.SCOPED 互钳）；不在映射里的包名原样显示。
+  static const Map<String, String> _injectionAppLabels = {
+    'org.telegram.messenger': 'Telegram',
+  };
+
+  /// M0「注入采集(实验)」区（root-module-design.md §4-M0：设置页逐 App 开关 +
+  /// 「已连接」状态；§3.3-3/4 的合规硬约束）。
+  ///
+  /// - 逐 App 开关：渲染源 [SettingsStore.injectionScopedPackages]（当前仅
+  ///   Telegram 一项，HookTargets 同值清单），默认关——映射里没有的包一律按
+  ///   关处理（fail-closed）。开关变更即时写 store（[_setInjectionEnabled]，
+  ///   JudgeRouteSection 同款即时写风格，不经保存按钮合并）；原生侧镜像由
+  ///   store 的变更监听随既有 configure 推送路径下发，本区不直接碰通道。
+  /// - 已连接状态行：M0 **恒显「未检测到注入模块」**——本仓库此刻没有随附
+  ///   注入模块（无任何 xposed meta-data/xposed_init/xposedscope，M0 验收④），
+  ///   不假装已连接；M1 起接 bridge 的 hello 账本（BridgeLedger）后改为按
+  ///   账本现状回显。
+  /// - 账号风险声明按 §3.3-4 原文呈现（微信条款摘要 + 「只读、不发消息」
+  ///   不能推导出不会封号；Telegram 无条款原文，按同一精神写同类风险句，
+  ///   不编造条款号）。
+  Widget _injectionSection() {
+    final enabled = widget.store.injectionEnabled.value;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('注入采集(实验)', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 4),
+        // 状态行（M0 恒真值，见方法注释）。
+        Text('未检测到注入模块', style: Theme.of(context).textTheme.bodySmall),
+        const SizedBox(height: 4),
+        for (final pkg in SettingsStore.injectionScopedPackages)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            key: ValueKey('injection-switch-$pkg'),
+            title: Text(_injectionAppLabels[pkg] ?? pkg),
+            subtitle: Text(pkg),
+            value: enabled[pkg] ?? false,
+            onChanged: (v) => _setInjectionEnabled(pkg, v),
+          ),
+        const SizedBox(height: 4),
+        // 账号风险原文（§3.3-4「不可谈判，全部沿用 legacy 硬约束」）。
+        Text(
+          '账号风险声明（原文）：微信协议 8.2.1.4–8.2.1.7 限制未授权插件接入'
+          '与对运行数据的读取，8.5.1 处置含功能限制与账号封禁；「只读、不发消息」'
+          '不能推导出不会封号。Telegram：同类风险适用于任何被注入的 App。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
+
+  /// 注入开关的单一写入口：即时写 store 的 [SettingsStore.injectionEnabled]
+  /// notifier（JudgeRouteSection 同款即时写风格——内存即时生效，不经保存
+  /// 按钮合并，落盘走设置页既有保存按钮的整包写盘；重启未落盘即回默认
+  /// 全关，fail-closed 方向安全）。store 构造时挂的变更监听负责把新值随
+  /// 既有 configure 推送路径下发（开关镜像契约），本方法不直接碰通道。
+  void _setInjectionEnabled(String pkg, bool enabled) {
+    final next = Map<String, bool>.of(widget.store.injectionEnabled.value)
+      ..[pkg] = enabled;
+    setState(() => widget.store.injectionEnabled.value = next);
+  }
+
   // ------------------------------------------------------------ 资料入口组
 
   /// 知识库（#13）：控制器包住应用级那份 [KbStore]（构造在根 State
@@ -1241,6 +1306,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 ? SettingsStore.displayModePrimary
                 : SettingsStore.displayModeAll),
           ),
+          const SizedBox(height: 12),
+          // M0「注入采集(实验)」区（root-module-design.md §4-M0）：逐 App 开关
+          // + 状态行 + 账号风险原文，见 [_injectionSection] 的注释。
+          _injectionSection(),
           const SizedBox(height: 8),
           // C9 调用统计卡：judge/reply/review/polish 四行数字（累计 + 本次
           // 会话两个口径）+ 重置按钮。统计是用户自己的数据（p0-plan ②），
