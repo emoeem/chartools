@@ -20,11 +20,26 @@ class JevConfig {
   /// `'jev'`（契约决定，不在旧清单里）——它不属于任何具名分支，在
   /// [judgeEndpoint] 里与 openrouter 一样落到 else 分支（base +
   /// `/alpha/decisions`），即旧仓库默认路由走的同一条路。
+  ///
+  /// 另有本仓库新增档 [judgeProviderFollowReply]（「跟随回复路由」，判断路由
+  /// 复用回复接口）。**默认 `'jev'` + [judgeBaseUrl] 空 = 判断路由未配置**：
+  /// [judgeEndpoint] 产物是 `/alpha/decisions` 相对地址，根本发不出 POST——
+  /// P0 修复（判断路由默认关闭 + 优雅降级）裁定默认关，调用方先用
+  /// [judgeRouteConfigured] 判定，未配置就跳过判断直接起草。
   String judgeProvider = 'jev';
+
+  /// 「跟随回复路由」档的服务商值（设置页判断配置区可选）：判断就挂在回复
+  /// 接口上——端点复用 [replyEndpoint]（openai_chat 语义）、协议强制 chat、
+  /// 密钥随 [effectiveReplyKey]、模型留空沿用 [replyModel]。代价是每轮比
+  /// 判断路由独立配置时多挂在同一条路上（判断 + 起草两连发，时延累加），
+  /// 由设置页副标题说明；配置项零新增负担（base/key/model 全跟回复走）。
+  static const String judgeProviderFollowReply = 'follow_reply';
 
   /// 判断路由的主机根，路径按协议/服务商拼（见 [judgeEndpoint]）。
   /// 旧仓库 setter 里 trim（Prefs.kt:87-89），这里由调用方在写入时保证；
-  /// 空串表示尚未配置，app 层负责给出真实地址。
+  /// 空串表示尚未配置，app 层负责给出真实地址。空串 + 非 chat 协议时
+  /// [judgeEndpoint] 产物是**相对地址**（发不出 POST）——那不是抛错的信号，
+  /// 而是「判断路由未配置」的正常态，调用方以 [judgeRouteConfigured] 判定。
   String judgeBaseUrl = '';
 
   /// 判断路由的密钥。旧仓库经 ApiKeyVault 加密读写（Prefs.kt:91-93），
@@ -136,7 +151,12 @@ class JevConfig {
   /// `judgeProtocol.ifBlank { if (judgeProvider == PROVIDER_DEEPSEEK)
   /// PROTO_CHAT else PROTO_DECISIONS }` —— ifBlank 的语义是
   /// 「非空白原样返回（含未 trim 的空白字符）」，这里保持一致。
+  ///
+  /// 「跟随回复路由」档（[judgeProviderFollowReply]）在显式选择**之前**短路：
+  /// 它的判断就挂在回复接口上，协议恒为 chat（openai_chat 语义），用户存档里
+  /// 残留的 judgeProtocol 显式值不参与——换档不应该被旧档的协议拖住。
   String effectiveJudgeProtocol() {
+    if (judgeProvider == judgeProviderFollowReply) return 'chat';
     if (judgeProtocol.trim().isNotEmpty) return judgeProtocol;
     return judgeProvider == 'deepseek' ? 'chat' : 'decisions';
   }
@@ -145,6 +165,8 @@ class JevConfig {
   /// 的模型（DeepSeek 官方）无论怎么选都挂在 `{base}/chat/completions`，
   /// decisions 协议按服务商保留各自路径（Prefs.kt:511-534 的注释原话）。
   ///
+  /// - 「跟随回复路由」档：直接复用 [replyEndpoint]——判断就挂在回复接口
+  ///   上（P0 判断降级的可配项，见 [judgeProviderFollowReply]）。
   /// - chat：base 为空回退 `https://api.deepseek.com`（契约钉死的宿主根；
   ///   旧仓库用的是带 `/v1` 的 `DEEPSEEK_BASE`，Prefs.kt:522 + 657/661 行，
   ///   两者 DeepSeek 都接受）。已有完整路径的自定义地址不再追加。
@@ -152,7 +174,14 @@ class JevConfig {
   ///   （后三家是 TypeSafe 兼容网关，Prefs.kt:527-530）；custom 原样返回
   ///   用户填的完整地址（Prefs.kt:531，只 trim 不拼路径）；其余（含默认
   ///   'jev' 与 openrouter）落 `{base}/alpha/decisions`（Prefs.kt:532）。
+  ///
+  /// ⚠️ 返回值**可能是相对地址**（如全新安装 judgeBaseUrl 空时的
+  /// `/alpha/decisions`）：那是「判断路由未配置」的正常产物，不是异常——
+  /// 本方法保持纯函数、不抛（旧仓库语义原样保留），发不发请求由调用方先过
+  /// [judgeRouteConfigured] 决定。
   String judgeEndpoint() {
+    // 「跟随回复路由」：端点即回复端点，一个字节都不另拼。
+    if (judgeProvider == judgeProviderFollowReply) return replyEndpoint();
     // 旧仓库 Prefs.kt:518：trim 后去掉**所有**尾部斜杠（trimEnd('/')）。
     final base = _stripTrailingSlashes(judgeBaseUrl.trim());
     if (effectiveJudgeProtocol() == 'chat') {
@@ -178,6 +207,35 @@ class JevConfig {
     }
   }
 
+  /// 判断路由是否已配置到「可以直接发起一次 POST」的程度——P0 判断降级的
+  /// **唯一判据**（capture_session 与 JudgeClient 的未配置门都调它，判据
+  /// 只此一份）。
+  ///
+  /// 判据：[judgeEndpoint] 的产物必须是绝对 http(s) 地址（有 scheme 且有
+  /// host）。落到具体配置上：
+  /// - 全新安装（judgeProvider='jev'、judgeBaseUrl=''）→ 产物是
+  ///   `/alpha/decisions` 相对地址 → **false**。HttpClient.openUrl 对相对
+  ///   地址直接抛 ArgumentError，三次重试也是白打——这正是 P0（候选恒空）
+  ///   的根因，现在在门口就拦住。
+  /// - chat 协议 base 空 → 回退 DeepSeek 官方宿主（既有契约）→ 产物绝对
+  ///   地址 → **true**。能否连通是另一回事：属于「已配置但调用失败」，
+  ///   走 JudgeClient.judge 的既有错误返回（Analysis.error）+ 调用方降级
+  ///   起草，错误不吞。
+  /// - 「跟随回复路由」档 → 产物即 [replyEndpoint]：回复路由有出厂默认
+  ///   base（openrouter）时恒 true；用户把回复地址也清空了则同样按未配置
+  ///   降级——判断与回复同生共死，不会出现「回复没配判断却在跑」的怪态。
+  /// - custom 档填了裸域名（无 scheme）→ Uri 解析无 scheme → **false**：
+  ///   那种地址本来就发不出 POST，按未配置处理比让它烂在重试循环里诚实。
+  ///
+  /// 「已配置」≠「可用」：配错地址/密钥时本方法恒 true——那是调用失败
+  /// 降级路径的事，这里不猜网络。
+  bool judgeRouteConfigured() {
+    final url = Uri.tryParse(judgeEndpoint());
+    return url != null &&
+        (url.scheme == 'http' || url.scheme == 'https') &&
+        url.host.isNotEmpty;
+  }
+
   /// 回复路由的完整 POST 地址（Prefs.kt:537 逐字对应）。
   String replyEndpoint() =>
       '${_stripTrailingSlashes(replyBaseUrl.trim())}/chat/completions';
@@ -194,6 +252,25 @@ class JevConfig {
   /// `replyKey.ifBlank { judgeKey }` —— 非空白原样返回（不 trim）。
   String effectiveReplyKey() =>
       replyKey.trim().isNotEmpty ? replyKey : judgeKey;
+
+  /// 判断路由的实际生效密钥：「跟随回复路由」档判断就挂在回复接口上，密钥
+  /// 随回复路由走（[effectiveReplyKey] 的既有回退链）；其余档就是 [judgeKey]
+  /// 原样——与 JudgeClient 既有取值逐字节一致，非跟随档的请求字节不变。
+  String effectiveJudgeKey() => judgeProvider == judgeProviderFollowReply
+      ? effectiveReplyKey()
+      : judgeKey;
+
+  /// 判断路由的实际生效模型：「跟随回复路由」档 judgeModel 留空沿用回复模型
+  /// （与复查/润色路由「留空沿用回复」的回退规则同模式）；其余档原样返回
+  /// [judgeModel]，不引入新的回退——旧仓库没有这条规则，非跟随档的请求体
+  /// 必须与移植版逐字节一致。
+  String effectiveJudgeModel() {
+    if (judgeProvider == judgeProviderFollowReply &&
+        judgeModel.trim().isEmpty) {
+      return replyModel;
+    }
+    return judgeModel;
+  }
 
   /// 复查密钥依次回退到回复密钥（Prefs.kt:499-500，注释原话：
   /// 「复查路由 key，依次回退到回复路由和判断路由」）。
@@ -262,31 +339,29 @@ class JevConfig {
   /// catch 会把全部设置一起重置成默认——一个坏字段连坐整包。现在类型不符
   /// 的字段单独落回默认值，其余字段照常读回。
   factory JevConfig.fromJson(Map<String, dynamic> j) => JevConfig()
-        ..judgeProvider = _str(j, 'judgeProvider', 'jev')
-        ..judgeBaseUrl = _str(j, 'judgeBaseUrl', '')
-        ..judgeKey = _str(j, 'judgeKey', '')
-        ..judgeModel = _str(j, 'judgeModel', '')
-        ..judgeProtocol = _str(j, 'judgeProtocol', '')
-        ..replyBaseUrl =
-            _str(j, 'replyBaseUrl', 'https://openrouter.ai/api/v1')
-        ..replyKey = _str(j, 'replyKey', '')
-        ..replyModel = _str(j, 'replyModel', '')
-        ..reviewEnabled = _bool(j, 'reviewEnabled', false)
-        ..reviewBaseUrl = _str(j, 'reviewBaseUrl', '')
-        ..reviewKey = _str(j, 'reviewKey', '')
-        ..reviewModel = _str(j, 'reviewModel', '')
-        ..polishBaseUrl = _str(j, 'polishBaseUrl', '')
-        ..polishKey = _str(j, 'polishKey', '')
-        ..polishModel = _str(j, 'polishModel', '')
-        ..style = _str(j, 'style', '')
-        ..replyLanguage = _str(j, 'replyLanguage', 'follow')
-        ..replyLength = _str(j, 'replyLength', 'standard')
-        ..replyTemperature = _num(j, 'replyTemperature', 0.8).toDouble()
-        ..replyFrequencyPenalty =
-            _num(j, 'replyFrequencyPenalty', 0.0).toDouble()
-        ..replyPresencePenalty = _num(j, 'replyPresencePenalty', 0.0).toDouble()
-        ..contextHistoryCount = _num(j, 'contextHistoryCount', 30).toInt()
-        ..usePositiveExamples = _bool(j, 'usePositiveExamples', false);
+    ..judgeProvider = _str(j, 'judgeProvider', 'jev')
+    ..judgeBaseUrl = _str(j, 'judgeBaseUrl', '')
+    ..judgeKey = _str(j, 'judgeKey', '')
+    ..judgeModel = _str(j, 'judgeModel', '')
+    ..judgeProtocol = _str(j, 'judgeProtocol', '')
+    ..replyBaseUrl = _str(j, 'replyBaseUrl', 'https://openrouter.ai/api/v1')
+    ..replyKey = _str(j, 'replyKey', '')
+    ..replyModel = _str(j, 'replyModel', '')
+    ..reviewEnabled = _bool(j, 'reviewEnabled', false)
+    ..reviewBaseUrl = _str(j, 'reviewBaseUrl', '')
+    ..reviewKey = _str(j, 'reviewKey', '')
+    ..reviewModel = _str(j, 'reviewModel', '')
+    ..polishBaseUrl = _str(j, 'polishBaseUrl', '')
+    ..polishKey = _str(j, 'polishKey', '')
+    ..polishModel = _str(j, 'polishModel', '')
+    ..style = _str(j, 'style', '')
+    ..replyLanguage = _str(j, 'replyLanguage', 'follow')
+    ..replyLength = _str(j, 'replyLength', 'standard')
+    ..replyTemperature = _num(j, 'replyTemperature', 0.8).toDouble()
+    ..replyFrequencyPenalty = _num(j, 'replyFrequencyPenalty', 0.0).toDouble()
+    ..replyPresencePenalty = _num(j, 'replyPresencePenalty', 0.0).toDouble()
+    ..contextHistoryCount = _num(j, 'contextHistoryCount', 30).toInt()
+    ..usePositiveExamples = _bool(j, 'usePositiveExamples', false);
 
   /// 拷贝一份再改：设置页预览、客户端构造前的小调整都走这里，
   /// 不许直接动共享实例。null 参数表示保持原值。
@@ -337,7 +412,8 @@ class JevConfig {
         ..replyTemperature = replyTemperature ?? this.replyTemperature
         ..replyFrequencyPenalty =
             replyFrequencyPenalty ?? this.replyFrequencyPenalty
-        ..replyPresencePenalty = replyPresencePenalty ?? this.replyPresencePenalty
+        ..replyPresencePenalty =
+            replyPresencePenalty ?? this.replyPresencePenalty
         ..contextHistoryCount = contextHistoryCount ?? this.contextHistoryCount
         ..usePositiveExamples = usePositiveExamples ?? this.usePositiveExamples;
 }

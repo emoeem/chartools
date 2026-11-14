@@ -37,9 +37,39 @@ void main() {
   });
 
   Future<void> pumpPage(WidgetTester tester) async {
+    // 与 main.dart _openKnowledge 的路由外壳同款（AppBar「导入」动作即文档
+    // 导入入口——KnowledgePage 本体 body-only，AppBar 归路由外壳，测试按
+    // 生产形状装配才测得到入口接线）。context 取自 Builder：IconButton 的
+    // onPressed 需要 navigator 之下的 context。
     await tester.pumpWidget(MaterialApp(
-      home: Scaffold(body: KnowledgePage(controller: controller)),
+      home: Builder(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: const Text('知识库'),
+            actions: [
+              IconButton(
+                tooltip: '导入文档笔记',
+                icon: const Icon(Icons.upload_file_outlined),
+                onPressed: () => showKnowledgeImportSheet(context, controller),
+              ),
+            ],
+          ),
+          body: KnowledgePage(controller: controller),
+        ),
+      ),
     ));
+    await tester.pumpAndSettle();
+  }
+
+  /// 导入全流程的前半段（粘贴 → 解析预览），重复导入测试与主流程共用。
+  Future<void> pasteAndParse(WidgetTester tester, String docText) async {
+    await tester.tap(find.byTooltip('导入文档笔记'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('knowledge_import_text')), docText);
+    await tester.enterText(
+        find.byKey(const Key('knowledge_import_source')), '产品手册');
+    await tester.tap(find.byKey(const Key('knowledge_import_parse')));
     await tester.pumpAndSettle();
   }
 
@@ -168,5 +198,91 @@ void main() {
     expect(controller.lastRetrieval.value!.annotated, isNotNull);
     expect(controller.lastRetrieval.value!.precisionAtK, 1.0);
     expect(store.searchLog().single.precisionAtK, 1.0);
+  });
+
+  testWidgets('文档导入全流程：粘贴 → 预览计数 → 入库 → 列表出现并标「文档」', (tester) async {
+    await pumpPage(tester);
+
+    // 两个标题各带 ≥10 字正文（DocImporterConfig.minChars=10）→ 2 个候选。
+    const docText = '# 发布检查\n'
+        '上线前检查反向代理与证书有效期，确认备份任务完成后再发布。\n'
+        '# 饮食偏好\n'
+        '对方不吃香菜，以微辣为主，汤面不要放葱花。\n';
+    await pasteAndParse(tester, docText);
+
+    // 预览：候选/丢弃对账计数 + 页内候选列表。
+    expect(find.text('候选 2 条'), findsOneWidget);
+    expect(find.text('发布检查'), findsOneWidget);
+    expect(find.text('饮食偏好'), findsOneWidget);
+    expect(find.textContaining('丢弃项不会入库'), findsNothing); // 没有丢弃
+
+    // 确认入库 → 结果对账。
+    await tester.tap(find.byKey(const Key('knowledge_import_confirm')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('对账：预览候选 2 条'), findsOneWidget);
+    expect(find.textContaining('新增 2'), findsOneWidget);
+    expect(find.textContaining('重复跳过 0'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('knowledge_import_done')));
+    await tester.pumpAndSettle();
+
+    // 列表出现新笔记并标「文档」来源（原 manual 两条 + 文档两条）。
+    expect(find.text('发布检查'), findsOneWidget);
+    expect(find.text('饮食偏好'), findsOneWidget);
+    expect(find.text('文档'), findsNWidgets(2));
+    expect(find.text('手动'), findsNWidgets(2));
+    expect(find.textContaining('共 4 条'), findsOneWidget);
+    // 入库核实：source=doc，出处在存储层盖章。
+    final docNotes =
+        controller.notes.value.where((t) => t.source == KbSource.doc).toList();
+    expect(docNotes.length, 2);
+    expect(docNotes.every((t) => t.importedAt > 0), isTrue);
+    expect(store.note(docNotes.first.note.id), isNotNull);
+  });
+
+  testWidgets('文档导入重复对账：同文本再导一次 → 全部按重复跳过，不翻倍', (tester) async {
+    await pumpPage(tester);
+
+    const docText = '# 发布检查\n'
+        '上线前检查反向代理与证书有效期，确认备份任务完成后再发布。\n'
+        '# 饮食偏好\n'
+        '对方不吃香菜，以微辣为主，汤面不要放葱花。\n';
+    await pasteAndParse(tester, docText);
+    await tester.tap(find.byKey(const Key('knowledge_import_confirm')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('knowledge_import_done')));
+    await tester.pumpAndSettle();
+
+    // 同文本第二次导入：KbStore.importNotes 按归一化内容判重 → 全部跳过。
+    await pasteAndParse(tester, docText);
+    expect(find.text('候选 2 条'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('knowledge_import_confirm')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('新增 0'), findsOneWidget);
+    expect(find.textContaining('重复跳过 2'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('knowledge_import_done')));
+    await tester.pumpAndSettle();
+
+    // 库里仍是 4 条（2 manual + 2 doc），重复没有翻倍。
+    expect(find.textContaining('共 4 条'), findsOneWidget);
+  });
+
+  testWidgets('空状态文案指向导入入口（过时的 #13 接线句子已改掉）', (tester) async {
+    final emptyStore = KbStore(); // 纯内存空库
+    final emptyController = KnowledgeController(emptyStore);
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: KnowledgePage(controller: emptyController)),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('还没有笔记'), findsOneWidget);
+    // 文案指向真实存在的入口，不再留「由 #13 接线」的过时句子。
+    expect(find.textContaining('把粘贴的文档切块入库'), findsOneWidget);
+    expect(find.textContaining('文档导入入口由 #13 接线'), findsNothing);
+
+    // 先拆树再 dispose：页面 State.dispose 的 removeListener 要在控制器
+    // dispose 之前跑，否则会撞「used after being disposed」断言。
+    await tester.pumpWidget(const SizedBox.shrink());
+    emptyController.dispose();
   });
 }

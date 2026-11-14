@@ -15,6 +15,11 @@ import android.os.IBinder
  * accessibility service (which otherwise dies within seconds — see P1 report).
  * Not a full fix on its own: the user must also grant autostart / no battery
  * restriction, but this holds the process while the app is set up and running.
+ *
+ * 生命周期跟随 CaptureService：onServiceConnected 里 [start]、CaptureService
+ * onDestroy 里 [stop]（fix P1 保活残留：用户在系统设置关掉无障碍后保活不得
+ * 残留；显式 stop 同时作废 START_STICKY 的系统重拉登记）。legacy 的
+ * ChatCaptureService 只 start 从不 stop——外部审阅 P1 ① 的原始形态，本版不随。
  */
 class KeepAliveService : Service() {
 
@@ -28,14 +33,15 @@ class KeepAliveService : Service() {
             nm.createNotificationChannel(ch)
         }
         // 「唤出助手」兜底：悬浮胶囊被拖丢/遮住时，通知上一按就展开卡片。
-        // 走 CaptureService 的 onStartCommand（SUMMON action），不开新界面。
-        // （旧仓库类名 ChatCaptureService，移植时更名 CaptureService。）
+        // 走 CaptureService 的 onStartCommand（SUMMON action，路由见
+        // CaptureService.commandRouteOf），不开新界面。
         val summon = android.app.PendingIntent.getService(
             this, 1,
             Intent(this, CaptureService::class.java).setAction(ACTION_SUMMON),
             android.app.PendingIntent.FLAG_IMMUTABLE)
         // 「重新生成」兜底：卡片被聊天键盘顶住、胶囊被拖到屏幕边缘时，这是最后
-        // 一个一定能按到的手动入口——不经过悬浮窗，直接让服务生成一次。
+        // 一个一定能按到的手动入口——不经过悬浮窗，走 CaptureService 的
+        // onStartCommand（GENERATE action）抓一轮当前屏幕发给 Dart。
         val regenerate = android.app.PendingIntent.getService(
             this, 2,
             Intent(this, CaptureService::class.java).setAction(ACTION_GENERATE),
@@ -56,16 +62,29 @@ class KeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
-        /** 通知「唤出助手」的动作；[ChatCaptureService.onStartCommand] 消费。 */
+        /** 通知「唤出助手」的动作；由 [CaptureService.onStartCommand] 消费
+         *  （路由见 [CaptureService.commandRouteOf]，字面量契约由
+         *  CommandRouteContractTest 互钳）。值沿用 legacy 字面量。 */
         const val ACTION_SUMMON = "com.jev.probe.action.SUMMON_OVERLAY"
 
-        /** 通知「重新生成」的动作；同样由 [ChatCaptureService.onStartCommand] 消费。 */
+        /** 通知「重新生成」的动作；同样由 [CaptureService.onStartCommand] 消费。 */
         const val ACTION_GENERATE = "com.jev.probe.action.GENERATE_REPLIES"
 
         fun start(ctx: Context) {
             val i = Intent(ctx, KeepAliveService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
             else ctx.startService(i)
+        }
+
+        /**
+         * fix(P1 保活残留)：与 [start] 成对的停止口，CaptureService.onDestroy
+         * 调用。用户在系统设置关掉无障碍后，保活通知与前台服务必须跟着下线，
+         * 也不能再被 START_STICKY 拉起（显式 stopService 即作废重启登记）。
+         * 返回值只是「本来就没在跑」的 false，本体不另加 try（调用方
+         * CaptureService.onDestroy 沿用 start 的先例整体 runCatching 兜底）。
+         */
+        fun stop(ctx: Context) {
+            ctx.stopService(Intent(ctx, KeepAliveService::class.java))
         }
     }
 }

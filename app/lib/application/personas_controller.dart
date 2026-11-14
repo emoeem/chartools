@@ -17,6 +17,20 @@
 /// 映射见 [Ccv2Preview] 与 [PersonasController.importCcv2] 的注释——**导入
 /// 必须先预览**（G8「确认后入库」的同一条纪律：机器解析的东西不直接落盘）。
 ///
+/// ## 套用（本轮接线）
+///
+/// 人设创建后要能参与模型请求才有意义（外部审阅 ①：此前 PersonasPage 没有
+/// 套用入口，人设卡与提示词链路是断的）。套用语义**复用 #13 收敛后的既有
+/// 判定**：冲突/优先级判定唯一出处是 core 的 [StyleSource.resolve] /
+/// [ExpertApply]（专家页同一套），本层不复制第二份 trim 判空。落点只有
+/// 两个：ContactStore 的联系人人设、SettingsStore 的全局 style——写入口
+/// 直接复用 experts_controller.dart 的 [StyleSinkPort] / [ContactPersonaSink]
+/// 端口与适配器（只 import 消费，不改那个文件）。
+///
+/// **各库各持数据，套用不搬数据**：与 ExpertsController 的套用不同（那边会
+/// 把条目落进「我的专家库」并记热度），人设套用只写两个 sink，不往专家库
+/// 插条目、不记 usedCount——人设库与专家库是两份独立数据，谁也不并吞谁。
+///
 /// ## 持久化
 ///
 /// shared_preferences 键 [PersonasController._storageKey] 整包 JSON。人设
@@ -27,9 +41,20 @@ library;
 
 import 'dart:convert';
 
-import 'package:chartools_core/chartools_core.dart' show PersonaCard;
+import 'package:chartools_core/chartools_core.dart'
+    show
+        ConflictChoice,
+        Contact,
+        Expert,
+        ExpertApply,
+        ExpertSource,
+        PersonaCard,
+        StyleSource;
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'experts_controller.dart'
+    show ContactTarget, ContactPersonaSink, ExpertsController, StyleSinkPort;
 
 /// 人设库里的一条。结构化字段直接存用户输入的**原值**（不做 PersonaCard
 /// 那样的关键词展开），进提示词的正文由 [composedBody] 现场组装后交给
@@ -340,15 +365,37 @@ class Ccv2Preview {
   }
 }
 
-/// 人设库控制器：列表持久化 + 增改删复制 + CCV2 导入（预览 → 确认）。
+/// 人设库控制器：列表持久化 + 增改删复制 + CCV2 导入（预览 → 确认）+ 套用
+/// （core ExpertApply 语义，见「套用」一节）。
 ///
-/// 页面接线留 **#13**：main.dart 不由本工作流改动；接线时
-/// `PersonasController()..load()`。
+/// 页面接线（main.dart `_openPersonas`）：`PersonasController(styleSink:
+/// SettingsStyleSink(settings), contactSink: ContactStorePersonaSink(contacts))
+/// ..load()`。两个 sink 可选（构造注入），缺位时套用动作如实报「未接线」，
+/// 其余能力不受影响——与 ExpertsController 的接线口径一致。
 class PersonasController {
-  PersonasController();
+  PersonasController({
+    StyleSinkPort? styleSink,
+    ContactPersonaSink? contactSink,
+  })  : _styleSink = styleSink,
+        _contactSink = contactSink {
+    // core ExpertApply 的冲突/回滚判定都在 core；sink 缺位时 core 自己会报
+    // 「没有通道」，这里构造照常（页面用 hasStyleSink/hasContactSink 提前拦）。
+    _apply = ExpertApply(sink: _styleSink);
+  }
 
   /// shared_preferences 里的存档键：名单整包一个 JSON。
   static const String _storageKey = 'personas';
+
+  /// 全局风格写入口（experts_controller.dart 的端口复用，见套用一节）；
+  /// null = 未接线（套用为全局风格如实报错）。
+  final StyleSinkPort? _styleSink;
+
+  /// 联系人人设写入口（同上）；null = 未接线（套用为联系人人设如实报错）。
+  final ContactPersonaSink? _contactSink;
+
+  /// 套用的唯一判定处（core）：needsChoice / 覆盖 / 并存 / 回滚全在那里，
+  /// 本层只做接线检查与异步落盘 flush 的兜底（与 ExpertsController 同款）。
+  late final ExpertApply _apply;
 
   /// 全部人设（updatedAt 降序即展示顺序；写回永远换新 List——ValueNotifier
   /// 按 identical 判定，与 ContactStore.contacts 同一纪律）。
@@ -390,7 +437,41 @@ class PersonasController {
     return null;
   }
 
+  // -------------------------------------------------------- 套用（接线面）
+
+  /// 全局风格写入口是否已接线（未接线时页面禁用套用为全局并如实提示）。
+  bool get hasStyleSink => _styleSink != null;
+
+  /// 联系人写入口是否已接线。
+  bool get hasContactSink => _contactSink != null;
+
+  /// 当前联系人目标快照（页面选套用目标、判断「已有专用人设」用）。
+  List<ContactTarget> get contactTargets => _contactSink?.targets ?? const [];
+
+  /// 「这位联系人是否写了专用人设」：**直接复用 ExpertsController.contactHasPersona**
+  /// （它内部才是 core StyleSource.resolve 的收敛判定）。判定只活在 core 一处 +
+  /// experts_controller 一个转发——本层不再写第二份 trim 判空，规则漂移不会分叉。
+  static bool contactHasPersona(ContactTarget target) =>
+      ExpertsController.contactHasPersona(target);
+
   // --------------------------------------------------------------- 增改删
+
+  /// 上一次生成 id 的时间戳（微秒）。本机（Windows）实测系统时钟粒度是
+  /// 毫秒级而非微秒级（dart 探针连读 50 万次只有十几个不同值）：create 与
+  /// duplicate 同一刻内连发会拿到同一微秒值 → 同 id 撞车（duplicate 出的
+  /// 「副本」与原件同 id，update 会互相顶掉）。与 [update] 里 updatedAt 的
+  /// 「同一毫秒也要产出新实例」是同一类坑——id 这里用静态单调递增兜底：
+  /// 同刻第二次生成取上次 +1，进程内严格递增永不重复；跨进程重启时钟必然
+  /// 前进，不会撞旧存档的 id。
+  static int _lastIdMicros = 0;
+
+  /// 生成新人设 id：时间基（base36 微秒）+ 同刻单调递增兜底。
+  static String _newId() {
+    var micros = DateTime.now().microsecondsSinceEpoch;
+    if (micros <= _lastIdMicros) micros = _lastIdMicros + 1;
+    _lastIdMicros = micros;
+    return 'p_${micros.toRadixString(36)}';
+  }
 
   /// 新建人设并落盘。id 由本类生成，updatedAt 取当下，sourceRef 默认 `mine`。
   Future<PersonaEntry> create({
@@ -407,7 +488,7 @@ class PersonasController {
     String sourceRef = 'mine',
   }) async {
     final entry = PersonaEntry(
-      id: 'p_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      id: _newId(),
       name: name.trim(),
       description: description,
       address: address,
@@ -452,7 +533,7 @@ class PersonasController {
     final src = byId(id);
     if (src == null) return null;
     final copy = src.copyWith(
-      id: 'p_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      id: _newId(),
       name: '${src.name}（副本）',
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
@@ -634,6 +715,135 @@ class PersonasController {
     return candidate;
   }
 
+  // ------------------------------------------------------------- 套用动作
+
+  /// PersonaEntry → core Expert 的最小投影：套用真正写进目标的东西只有
+  /// [PersonaEntry.composedBody]（与提示词预览同一条路径），tags/domain 等
+  /// 浏览层字段一个字节都不进 persona/style（expert_apply.dart「只有
+  /// promptText 进目标」的铁律）。core 不持久化这个投影，id/key 沿用人设 id
+  /// 仅为本次判定的日志可读性；packId 置空 = 非包来源（与 ExpertShelfItem
+  /// 对 `mine` 的口径一致）。
+  Expert _expertOf(PersonaEntry entry) => Expert(
+        id: entry.id,
+        key: entry.id,
+        name: entry.name,
+        domain: '人设库',
+        promptText: entry.composedBody(),
+        source: const ExpertSource(packId: '', packVersion: ''),
+      );
+
+  Contact _coreContactOf(ContactTarget t) =>
+      Contact(id: t.id, name: t.displayName, persona: t.persona);
+
+  List<Contact> _coreContacts() => <Contact>[
+        for (final t in contactTargets) _coreContactOf(t),
+      ];
+
+  /// 「套用为全局风格」。判定与落笔唯一出处是 core ExpertApply.applyToGlobal：
+  /// 正文空拒绝、写失败回滚、shadowed 提示都在 core。本层保留两件事：接线
+  /// 检查、异步落盘 flush 的成败兜底（core 的 sink 是同步接口，盘上成败由
+  /// StyleSinkPort.flush 上交，失败在这里回滚内存并如实报错）——与
+  /// ExpertsController.applyAsGlobalStyle 同款兜底，只是**不落库不记热度**
+  /// （人设库与专家库各自持数据，套用不搬数据，见套用一节）。
+  Future<PersonaApplyResult> applyAsGlobalStyle(PersonaEntry entry) async {
+    final sink = _styleSink;
+    if (sink == null) {
+      return const PersonaApplyResult(
+          ok: false, problem: '全局风格未接线（#13），暂时不能套用');
+    }
+    // 空正文套上去等于把人设清空（与 core 同一判定，提前拦是为了文案口径
+    // 与 experts_page 一致：'「名字」没有正文，没套用'）。
+    if (entry.composedBody().trim().isEmpty) {
+      return PersonaApplyResult(ok: false, problem: '「${entry.name}」没有正文，没套用');
+    }
+    final previous = sink.style; // flush 失败要原样退回去
+    final r = _apply.applyToGlobal(_expertOf(entry), contacts: _coreContacts());
+    if (!r.ok) {
+      return PersonaApplyResult(ok: false, problem: r.problem, note: r.note);
+    }
+    try {
+      await sink.flush();
+    } catch (e) {
+      sink.style = previous;
+      try {
+        await sink.flush();
+      } catch (_) {
+        // 回滚也失败：problem 里照实说，不假装成功。
+      }
+      return PersonaApplyResult(
+        ok: false,
+        problem: '设置里那句人设没写成（$e），已经还原成原来那句',
+      );
+    }
+    return PersonaApplyResult(ok: true, note: r.note);
+  }
+
+  /// 「套用为联系人人设」。冲突判定（专用人设压全局）唯一出处是 core
+  /// StyleSource.resolve——ExpertApply.applyToContact 检测到冲突时返回
+  /// needsChoice 且**两个目标都不动**，界面问完用户（覆盖/并存）带
+  /// [ConflictChoice] 再调一次。并存路径 core 写全局 sink、盘上成败由 flush
+  /// 兜底；覆盖路径 core 返回新 persona，联系人落盘走 ContactPersonaSink。
+  /// 失败文案与 ExpertsController.applyToContact 同口径。
+  Future<PersonaApplyResult> applyToContact(
+    PersonaEntry entry,
+    ContactTarget target, {
+    ConflictChoice? choice,
+  }) async {
+    final contactSink = _contactSink;
+    if (contactSink == null) {
+      return const PersonaApplyResult(
+          ok: false, problem: '联系人档案未接线（#13），暂时不能套用');
+    }
+    if (entry.composedBody().trim().isEmpty) {
+      return PersonaApplyResult(ok: false, problem: '「${entry.name}」没有正文，没套用');
+    }
+    final styleBefore = _styleSink?.style ?? ''; // 并存要写全局，失败得还原
+    final r = _apply.applyToContact(_expertOf(entry), _coreContactOf(target),
+        choice: choice);
+    // 冲突待裁决：core 保证两个目标都没写——界面弹「覆盖/并存」后再调。
+    if (r.needsChoice) {
+      return PersonaApplyResult(ok: false, needsChoice: true, note: r.note);
+    }
+    if (!r.ok) {
+      return PersonaApplyResult(ok: false, problem: r.problem, note: r.note);
+    }
+    if (r.wroteGlobalStyle) {
+      // 并存：人设正文已由 core 写进全局 sink，联系人专用人设没动。
+      final sink = _styleSink;
+      if (sink == null) {
+        return PersonaApplyResult(
+            ok: false, problem: '并存需要全局风格通道：控制器未接线 styleSink');
+      }
+      try {
+        await sink.flush();
+      } catch (e) {
+        sink.style = styleBefore;
+        try {
+          await sink.flush();
+        } catch (_) {
+          // 回滚也失败：problem 里照实说。
+        }
+        return PersonaApplyResult(
+          ok: false,
+          problem: '全局风格没写成（$e），已经还原；'
+              '「${target.displayName}」的专用人设没动',
+        );
+      }
+      return PersonaApplyResult(ok: true, note: r.note);
+    }
+    // 覆盖/直写：把 core 给的 persona 落到联系人档案。写失败如实报 problem
+    //（core 已保证内存写成功前不会返回 ok，这里只剩 app 层落盘一条路）。
+    try {
+      await contactSink.writePersona(target.id, r.appliedText);
+    } catch (e) {
+      return PersonaApplyResult(
+        ok: false,
+        problem: '「${target.displayName}」的专用人设没写成（$e），原句未改动',
+      );
+    }
+    return PersonaApplyResult(ok: true, note: r.note);
+  }
+
   Future<void> _persist() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
@@ -650,6 +860,32 @@ class PersonasController {
   void dispose() {
     entries.dispose();
   }
+}
+
+/// 一次人设套用的结果。[needsChoice] 为 true 时**什么都没写**——core
+/// ExpertApply 检测到「专用人设压全局」的冲突，等界面问完用户（覆盖/并存）
+/// 再带 [ConflictChoice] 调一次。与 ExpertApplyResult（experts_controller）
+/// 的差别只在没有 profile 字段：人设套用不落专家库，没有「库里那条」可指。
+class PersonaApplyResult {
+  const PersonaApplyResult({
+    required this.ok,
+    this.needsChoice = false,
+    this.problem = '',
+    this.note = '',
+    this.warning = '',
+  });
+
+  final bool ok;
+  final bool needsChoice;
+
+  /// 失败原因，给界面直接显示。
+  final String problem;
+
+  /// core 的冲突/优先级提示文案（needsChoice 与并存路径都有，界面照实念）。
+  final String note;
+
+  /// 降级说明，不影响套用（与 ExpertApplyResult 同形保留，当前路径不产）。
+  final String warning;
 }
 
 /// String.indexOfFirst 的最小实现（dart:core 没有 take-while 式的 indexOf）。

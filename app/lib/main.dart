@@ -11,6 +11,15 @@
 //   首页不加快捷入口（任务 4 的判断，理由见 ScenarioListPage 文档），不重排
 //   首页；原 main.dart:229 起的 CapturePage(scenarioId: store.scenarioId)
 //   高危链路（fix(#11 P0-N) 注释段）一字未动。
+// - 本轮（外部审阅三项接线，均在此文件落地）：① 人设库入口补注入
+//   SettingsStyleSink / ContactStorePersonaSink（套用落点，语义见
+//   personas_controller.dart 套用一节）；② 知识库路由 AppBar 补「导入」动作
+//   （showKnowledgeImportSheet，页面本体 body-only 分工不变）；③ 首页场景
+//   卡片从静态展示升级为选择面（点卡片写 store.scenarioId + 落盘）——
+//   ScenarioListPage 文档记录了对旧裁决「首页不加快捷入口」的**部分推翻**
+//   （导航快捷入口仍不加，推翻的只是「场景卡保持静态」那半条）。
+//   CapturePage(scenarioId:) 链路一字未动：卡片写的就是采集流消费的同一
+//   notifier（fix(#11 P0-N) 的同源值）。
 // - 控制器生命周期：「页面所有者构造与 dispose」——push 时构造、路由退场
 //   dispose，落点是 [_PageHost]。**实测三个页面自身不构造也不 dispose 注入
 //   的控制器**（knowledge_page.dart:66-70 只摘监听 + 释放搜索框、
@@ -83,6 +92,7 @@ import 'ui/knowledge_page.dart';
 import 'ui/migration_page.dart';
 import 'ui/onboarding_page.dart';
 import 'ui/personas_page.dart';
+import 'ui/settings_page.dart';
 
 /// G7 偏好档案的存档键（shared_preferences）。C 的 PreferenceProfile 只给
 /// toJson/fromJson（core 不落盘，见 preference_profile.dart 类注释），读写
@@ -263,8 +273,8 @@ _KbBoot _bootKnowledgeStoreAt(String path) {
     return _KbBoot(KbStore.loadFromFileSync(path), null);
   } on FormatException catch (e) {
     debugPrint('知识库存档损坏（$e）：挪为 .corrupt 备份后空档续跑');
-    final backup = File(
-        '$path.corrupt.${DateTime.now().millisecondsSinceEpoch}');
+    final backup =
+        File('$path.corrupt.${DateTime.now().millisecondsSinceEpoch}');
     try {
       File(path).renameSync(backup.path);
     } catch (renameError) {
@@ -486,10 +496,15 @@ class _ChartoolsAppState extends State<ChartoolsApp> {
 
 /// 首页：内置五场景（[Scenarios.builtIns]）+ 右上角进设置。
 ///
-/// #13 任务 4 的判断：首页**不**加快捷入口。右上角是采集助手 / 粘贴分析与
-/// 设置的助手入口排，知识库是管理面不是助手流；「资料」入口组放在设置页
-/// 顶部（知识页「一等页面」定位的落点，见 knowledge_page.dart:5-6），两步
-/// 可达且不与助手入口争夺 AppBar 的注意力。只透传 [kbStore] 给设置页。
+/// #13 任务 4 的旧裁决（「首页不加快捷入口」）**部分推翻，原因记录在此**：
+/// 当时的对象是「资料/知识库一类管理面的导航快捷入口」——那条仍然成立，
+/// 「资料」入口组留在设置页顶部，本轮没有给首页加任何导航入口。推翻的是
+/// 它的另一半：场景卡片此前是纯静态展示（外部审阅 ③ 取证），而场景已经
+/// 接进起草链路（fix(#11 P0-N)），用户引导完之后却改不了场景——引导入口
+/// 只在首启出现，等于「选一次用一辈子」。所以本轮把首页场景卡片升级成
+/// **选择面**：当前选中 = [SettingsStore.scenarioId] 持久化值，点卡片写入
+/// store（视觉反馈 + 落盘），不新增导航、不重排页面。「不选场景」的路径
+/// 保持：没选过就明确显示「未指定（按默认聊天副驾执行）」，不强制选。
 class ScenarioListPage extends StatelessWidget {
   const ScenarioListPage({
     super.key,
@@ -511,6 +526,20 @@ class ScenarioListPage extends StatelessWidget {
   final ContactStore? contactStore;
   final PreferenceProfile? preferences;
   final void Function()? persistPreferences;
+
+  /// 点场景卡：写 [SettingsStore.scenarioId]（采集/桌面流每轮从同一 notifier
+  /// 现读，下一批候选即生效——与引导页 onboarding_page.dart:213 的写入同一
+  /// 语义）并尽力落盘。写盘失败不阻塞切换：内存 notifier 已生效，落盘失败
+  /// 的代价只是重启后回落上一次成功落盘的值；吞异常是因为 flutter_secure_
+  /// storage 等通道问题不该把「换场景」变成报错现场。
+  Future<void> _switchScenario(String id) async {
+    store.scenarioId.value = id;
+    try {
+      await store.save();
+    } catch (_) {
+      // 落盘失败不阻塞：见上。
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -604,48 +633,133 @@ class ScenarioListPage extends StatelessWidget {
           ),
         ],
       ),
-      body: ListView.separated(
-        padding: const EdgeInsets.all(12),
-        itemCount: scenarios.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 8),
-        itemBuilder: (_, index) => _ScenarioCard(scenario: scenarios[index]),
+      body: ListenableBuilder(
+        // 场景选中态跟 store.scenarioId 走：本页/引导页/设置页写它，这里
+        // 监听重建，选中态与持久化值永远同源（ValueNotifier 写入即通知，
+        // 点卡片的视觉反馈不需要 setState）。
+        listenable: store.scenarioId,
+        builder: (context, _) {
+          final current = Scenarios.byId(store.scenarioId.value);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 当前态说明条：「不选场景」的路径也给出明确事实——不强制选。
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: Text(
+                  current == null
+                      ? '当前未指定场景（默认按「${Scenarios.chatCopilot.name}」执行）；点卡片切换，选择会记住。'
+                      : '当前场景：${current.name}；点其他卡片切换，选择会记住。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+              Expanded(
+                child: ListView.separated(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: scenarios.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (_, index) => _ScenarioCard(
+                    scenario: scenarios[index],
+                    selected: scenarios[index].id == store.scenarioId.value,
+                    onTap: () => _switchScenario(scenarios[index].id),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
 }
 
 /// 一张场景卡：名称 + 一句话描述 + 采集目标标签（[ScenarioTemplate.platforms]）。
+/// 本轮升级为可选：[selected] 高亮当前场景（主色描边 + 「当前场景」徽标），
+/// [onTap] 由页面写入 store——布局不重排，只加视觉层与点击层。
 class _ScenarioCard extends StatelessWidget {
-  const _ScenarioCard({required this.scenario});
+  const _ScenarioCard({
+    required this.scenario,
+    required this.selected,
+    this.onTap,
+  });
 
   final ScenarioTemplate scenario;
+
+  /// 当前场景 = SettingsStore.scenarioId 持久化值命中的那张卡。
+  final bool selected;
+
+  /// 点击切换场景（写 store + 落盘，见 ScenarioListPage._switchScenario）。
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              scenario.name,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 4),
-            Text(scenario.description),
-            if (scenario.platforms.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
+      // 选中态描边：主色 2px；未选中给透明描边保持同宽度不跳版。
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.all(Radius.circular(12)),
+        side: selected
+            ? BorderSide(color: scheme.primary, width: 2)
+            : BorderSide(color: scheme.surfaceContainerHighest),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: const BorderRadius.all(Radius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  for (final platform in scenario.platforms)
-                    _platformTag(platform, scheme),
+                  Expanded(
+                    child: Text(
+                      scenario.name,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  // 选中徽标：明确的当前态（视觉反馈的一部分）。
+                  if (selected)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: scheme.primaryContainer,
+                        borderRadius:
+                            const BorderRadius.all(Radius.circular(999)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check,
+                              size: 13, color: scheme.onPrimaryContainer),
+                          const SizedBox(width: 3),
+                          Text(
+                            '当前场景',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: scheme.onPrimaryContainer,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               ),
+              const SizedBox(height: 4),
+              Text(scenario.description),
+              if (scenario.platforms.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final platform in scenario.platforms)
+                      _platformTag(platform, scheme),
+                  ],
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -763,7 +877,6 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _baseUrl;
   late final TextEditingController _replyKey;
   late final TextEditingController _replyModel;
-  late final TextEditingController _judgeModel;
   late final TextEditingController _style;
   late final TextEditingController _relationship;
 
@@ -785,7 +898,6 @@ class _SettingsPageState extends State<SettingsPage> {
     _baseUrl = TextEditingController(text: c.replyBaseUrl);
     _replyKey = TextEditingController(text: c.replyKey);
     _replyModel = TextEditingController(text: c.replyModel);
-    _judgeModel = TextEditingController(text: c.judgeModel);
     _style = TextEditingController(text: c.style);
     _relationship =
         TextEditingController(text: widget.store.relationship.value);
@@ -798,20 +910,21 @@ class _SettingsPageState extends State<SettingsPage> {
     _baseUrl.dispose();
     _replyKey.dispose();
     _replyModel.dispose();
-    _judgeModel.dispose();
     _style.dispose();
     _relationship.dispose();
     super.dispose();
   }
 
-  /// 把输入框当前值合进现有配置（copyWith 只动这五项，judgeKey 等不丢）。
-  /// base/key/model 按旧仓库 Prefs setter 的习惯 trim，style 是用户自己的
-  /// 话，原样保留。copyWith 的 null 表示「不动」，所以空串也要显式传。
+  /// 把输入框当前值合进现有配置（copyWith 只动回复三项 + style；判断四
+  /// 字段由 [JudgeRouteSection] 即时写 config.value，**不经这里合并**——
+  /// 否则保存按钮会用 initState 时的陈旧控制器值覆盖判断区的即时写入，
+  /// 见模型路由区接线注释）。base/key/model 按旧仓库 Prefs setter 的习惯
+  /// trim，style 是用户自己的话，原样保留。copyWith 的 null 表示「不动」，
+  /// 所以空串也要显式传。judgeKey 等未列出的字段原样不丢。
   JevConfig _configFromFields() => widget.store.config.value.copyWith(
         replyBaseUrl: _baseUrl.text.trim(),
         replyKey: _replyKey.text.trim(),
         replyModel: _replyModel.text.trim(),
-        judgeModel: _judgeModel.text.trim(),
         style: _style.text,
       );
 
@@ -935,7 +1048,20 @@ class _SettingsPageState extends State<SettingsPage> {
       builder: (_) => _PageHost<KnowledgeController>(
         create: () => KnowledgeController(widget.kbStore),
         builder: (_, controller) => Scaffold(
-          appBar: AppBar(title: const Text('知识库')),
+          appBar: AppBar(
+            title: const Text('知识库'),
+            // 文档导入入口（本轮接线，外部审阅 ②）：粘贴文本 → 解析预览 →
+            // 入库 → 对账全在 knowledge_page.dart 的 showKnowledgeImportSheet；
+            // 动作挂这里是因为页面本体 body-only，AppBar 归路由外壳——
+            // 空状态文案指向同一入口。
+            actions: [
+              IconButton(
+                tooltip: '导入文档笔记',
+                icon: const Icon(Icons.upload_file_outlined),
+                onPressed: () => showKnowledgeImportSheet(context, controller),
+              ),
+            ],
+          ),
           body: KnowledgePage(controller: controller),
         ),
       ),
@@ -961,12 +1087,21 @@ class _SettingsPageState extends State<SettingsPage> {
     ));
   }
 
-  /// 人设库（#13）：接线口径见 personas_page.dart:8——`PersonasController()
-  /// ..load()`；列表经 entries notifier 监听，load 完成即刷新。
+  /// 人设库（#13）：列表经 entries notifier 监听，load 完成即刷新。套用
+  /// 动作（本轮接线，外部审阅 ①）的两个落点按 experts_controller.dart 类
+  /// 文档的同一接线口径组装——SettingsStyleSink 写设置里的 style（本页的
+  /// [widget.store]），ContactStorePersonaSink 覆写联系人档案的 persona；
+  /// 未传联系档案时 contactSink 缺位，人设页对相应动作如实提示「未接线」。
+  /// 人设套用只写这两个 sink，不搬数据（人设库与专家库各自持数据）。
   void _openPersonas() {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => _PageHost<PersonasController>(
-        create: () => PersonasController()..load(),
+        create: () => PersonasController(
+          styleSink: SettingsStyleSink(widget.store),
+          contactSink: widget.contactStore == null
+              ? null
+              : ContactStorePersonaSink(widget.contactStore!),
+        )..load(),
         builder: (_, controller) => PersonasPage(controller: controller),
       ),
     ));
@@ -1069,7 +1204,17 @@ class _SettingsPageState extends State<SettingsPage> {
             onChanged: (_) => setState(() {}),
           ),
           _field('回复模型', _replyModel),
-          _field('判断模型', _judgeModel),
+          // P0 判断路由接线（settings_page.dart:10-15 头注的三步，本轮执行）：
+          // 判断服务商/地址/Key/模型四字段由 JudgeRouteSection 即时写
+          // config.value（内存生效、保存按钮落盘——与悬浮窗开关同节奏），
+          // 旧的单行判断模型输入框已删，避免与本区双写同一字段；
+          // _configFromFields 同步去掉 judgeModel 合并行——否则保存按钮会用
+          // initState 时的陈旧控制器值覆盖判断区的即时写入。onEdited 触发
+          // 宿主重绘，让页面上依赖 config 的回显跟手。
+          JudgeRouteSection(
+            config: widget.store.config,
+            onEdited: () => setState(() {}),
+          ),
           _field('语气 / 人设备注', _style, maxLines: 3),
           const SizedBox(height: 8),
           Text('关系与悬浮窗', style: Theme.of(context).textTheme.titleMedium),

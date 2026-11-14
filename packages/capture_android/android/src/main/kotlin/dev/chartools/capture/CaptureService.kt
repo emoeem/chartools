@@ -27,6 +27,13 @@ import org.json.JSONObject
 import java.util.concurrent.Executors
 
 /**
+ * [CaptureService.onStartCommand] 的动作路由结果（KeepAliveService 通知按钮的
+ * 两个 action 与未知动作）。顶层 internal 枚举而非塞进 companion：companion 里
+ * 的嵌套类型引用要经 Companion 限定，顶层类型对实例方法与单测两侧都直接可见。
+ */
+internal enum class CommandRoute { SUMMON, GENERATE, IGNORE }
+
+/**
  * 精简版无障碍采集服务：只采集、只发射，不做任何编排。
  *
  * 旧仓库的 ChatCaptureService（1757 行）在这里被拆掉：jev 分析、注入层、
@@ -267,6 +274,25 @@ class CaptureService : AccessibilityService() {
                 blockedPackages = blocked.filterIsInstance<String>().toSet()
             }
             ocrFallbackEnabled = call.argument<Boolean>("ocrFallback") ?: false
+        }
+
+        /**
+         * fix(P1 通知按钮)：onStartCommand 的动作路由——KeepAliveService 前台通知
+         * 按钮构造的 Intent action（[KeepAliveService.ACTION_SUMMON] /
+         * [KeepAliveService.ACTION_GENERATE]，PendingIntent.getService 指向本服务）
+         * 与消费分支的字面量互钳点。纯函数放 companion 与 [isBlockedPackage] 同一
+         * 取舍：onStartCommand 是 AccessibilityService 的实例方法，测试环境实例化
+         * 不了，单测直接钳这个路由（CommandRouteContractTest）——KeepAliveService
+         * 改 action 常量或这里漏接一个分支，测试必红。
+         * 匹配是 when(String) 的逐字相等：大小写、空白差异一律 IGNORE（不「宽容」
+         * 匹配，避免系统里其他 startService 的任意 action 碰巧命中按钮语义）。
+         * null action（START_STICKY 重启携带的 null intent、无 action 的
+         * startService）同样 IGNORE——onStartCommand 对未知输入的容错就在这一行。
+         */
+        internal fun commandRouteOf(action: String?): CommandRoute = when (action) {
+            KeepAliveService.ACTION_SUMMON -> CommandRoute.SUMMON
+            KeepAliveService.ACTION_GENERATE -> CommandRoute.GENERATE
+            else -> CommandRoute.IGNORE
         }
 
         /** On an app whose adapter has been reading bubbles, an empty read must
@@ -987,6 +1013,78 @@ class CaptureService : AccessibilityService() {
         runCatching { sink.success(o.toString()) }
     }
 
+    // ---- 通知栏动作（KeepAliveService 通知按钮 → onStartCommand）------------
+    // fix(P1 通知按钮)：KeepAliveService 的前台通知上有「唤出助手 / 重新生成」
+    // 两个按钮（PendingIntent.getService → 本服务），legacy ChatCaptureService
+    // 靠 onStartCommand 消费；本服务此前没有 onStartCommand，按钮点了没反应
+    // （外部审阅 P1 ②）。两个动作的本体在下面，路由在 ServiceConfig.commandRouteOf。
+
+    /**
+     * 最近一批成功上屏的候选（handleControl 的 showSuggestions 分支 ok=true 时
+     * 登记），通知「唤出助手」的重放源。OverlayController 的「把卡展开」入口
+     * （expandCard）是私有的，公开展示入口只有 showSuggestions——服务侧自己
+     * 留一份，重放同批候选等价于 legacy summon 的「把卡还给用户」。只留最后
+     * 一批候选文案（几条短字符串），无内存顾虑。
+     */
+    private var lastSuggestions: Triple<List<OverlayController.Suggestion>, String?, String?>? = null
+
+    /**
+     * 通知「唤出助手」（ACTION_SUMMON）。legacy ChatCaptureService.onStartCommand
+     * 的 SUMMON 分支（1629-1632 行）：
+     * - 不在任何聊天窗（[session.target] == null）→ 不出卡。legacy 在卡上 toast
+     *   「先打开一个聊天窗口…」；Toast 随 overlay 移植一并移除（OverlayController
+     *   类注释），降级为 Trace 记录——「不凭空画一张空卡」的门控语义不变。
+     * - 在聊天窗 → 把卡展开。legacy 的 overlay.summon() 分胶囊收起（expandCard）/
+     *   已展开（闪边框提醒位置）两态，且窗口从未建（mode==null）时是 no-op；
+     *   新 OverlayController 没有这两个入口，改用最近一批候选重放
+     *   [OverlayController.showSuggestions]：胶囊收起态重新展开、窗口被
+     *   hideSuggestions 整撤时重弹，都是同一句「把卡还给用户」；从无候选时
+     *   与 legacy 的 no-op 降级一致。已展开时 showSuggestions 重渲染同一批
+     *   候选（expandedCandidates 清空是既有语义），legacy 的闪边框提醒降级为
+     *   无内容变化的重绘。
+     */
+    private fun summonFromNotification() {
+        if (session.target == null) {
+            Trace.log("summon: no conversation target, skip (legacy: toast)")
+            return
+        }
+        val (list, title, mode) = lastSuggestions ?: run {
+            Trace.log("summon: no suggestions shown yet, skip")
+            return
+        }
+        val ok = runCatching { overlay.showSuggestions(list, title, mode) }.getOrDefault(false)
+        Trace.log("summon: replay suggestions ok=$ok count=${list.size}")
+    }
+
+    /**
+     * 通知「重新生成」（ACTION_GENERATE）。legacy 的 manualGenerate（822-863 行）
+     * 是 jev 编排层的一环：ManualGenerate.decide 按 enabled/hasKey/忙碌三态分流，
+     * 忙超 8 秒还能 cancelInFlight 强制接管；编排与分析轮次未随迁（本服务
+     * 「只采集、只发射」，起草决策在 Dart），可移植的核心只有一条：立刻抓一轮
+     * 当前屏幕，结果发给 Dart——与 control 通道 manualOcr 共用 [manualCapture]
+     * 的门控与采集链（reply=null 变体，见其注释）。
+     * 随编排层留在 legacy、本版不可达的路径（fix(port) 备注，接上 Dart 侧契约
+     * 后才有对应物）：
+     * - 从缓存快照直接重生成（lastAnalyzed/currentSnapshot）：本服务唯一的
+     *   「最近快照」是 EventChannel 的 pendingLatestJson，重放它需要新的 Dart
+     *   消息契约（现 JSON 无「这是重放」的标记，Dart 会当成新采集），服务层
+     *   够不着——窗口读不到时直接放弃，不造假快照。
+     * - 忙碌强制接管（cancelInFlight）：本服务无可取消的轮次；ocrBusy 时静默
+     *   让位并记录（在途的可能是通道 manualOcr，动它的回执会双重回话）。截屏/
+     *   识别回调本就有 30s watchdog 兜底（见 [ocrWatchdog]），不会永久忙下去。
+     * - legacy 的「节点树优先、其次截屏」capture-first 细节：本服务的手动入口
+     *   统一走 manualCapture 的整屏 OCR（与 manualOcr 一致），树路径由自动采集
+     *   负责。
+     * - 「这一屏没认出文字」的卡片提示：无 Result 可回，空结果静默（Trace）。
+     */
+    private fun generateFromNotification() {
+        if (ocrBusy || destroyed) {
+            Trace.log("generate: busy=$ocrBusy destroyed=$destroyed, skip")
+            return
+        }
+        manualCapture(reply = null)
+    }
+
     // ---- MethodChannel: capture_android/control ----------------------------
 
     /** 手动 OCR（manualOcr）的挂起结果；finishOcr/失败路径里恰好回一次。 */
@@ -1054,19 +1152,22 @@ class CaptureService : AccessibilityService() {
                 result.success(ok)
             }
             "refill" -> refill(call, result)
-            "manualOcr" -> manualOcr(call, result)
+            "manualOcr" -> manualCapture(result)
             // 服务活着（通道由 CaptureService 注册）才谈得上悬浮窗；窗口加不出
             // （无 SYSTEM_ALERT_WINDOW 权限）回 false，由 Dart 提示去开权限。
             "showSuggestions" -> {
+                // fix(P1 通知按钮)：成功上屏的一批登记进 [lastSuggestions]，通知
+                // 「唤出助手」重放用。窗口加不出（ok=false，无悬浮窗权限）不登记
+                // ——重放只会再失败一次。
+                val list = parseSuggestions(call)
+                val title = call.argument<String>("title")
+                val mode = call.argument<String>("mode")
                 val ok = runCatching {
                     // B8 展示模式随候选透传（'primary' 主推大卡+备选折叠，
                     // null/'all' 整列平铺——移植期默认行为）。
-                    overlay.showSuggestions(
-                        parseSuggestions(call),
-                        call.argument<String>("title"),
-                        call.argument<String>("mode"),
-                    )
+                    overlay.showSuggestions(list, title, mode)
                 }.getOrDefault(false)
+                if (ok) lastSuggestions = Triple(list, title, mode)
                 Trace.log("overlay showSuggestions ok=$ok")
                 result.success(ok)
             }
@@ -1120,12 +1221,22 @@ class CaptureService : AccessibilityService() {
         }
     }
 
-    private fun manualOcr(call: MethodCall, result: MethodChannel.Result) {
+    /**
+     * 手动采集的公共本体（control 通道 manualOcr 与通知栏 ACTION_GENERATE 共用，
+     * 原 manualOcr 的门控与采集链逐分支搬移，行为不变）。[reply] 非 null =
+     * 通道请求：采集结果（快照 JSON 或 null）恰好回它一次，登记进
+     * [manualOcrResult]；null = 通知栏触发：没有回话句柄，也不动
+     * [manualOcrResult]（那是 Dart 挂起请求的回执，碰了会把通道请求的答复抢走
+     * 或双重回话）——快照经 finishOcrSnapshot 的 manual 分支照常 emitSnapshot
+     * 发给 Dart（manual=true 跳过签名去重，「重新生成」每按必发）。
+     */
+    private fun manualCapture(reply: MethodChannel.Result?) {
         val root = rootInActiveWindow
         val pkg = root?.packageName?.toString() ?: foregroundPkg ?: activePkg ?: ""
+        Trace.log("manual capture pkg=$pkg reply=${reply != null}")
         // WhatsApp 等永不截屏的应用：手动 OCR 也拒绝（照抄 ocrCaptureManual）。
         if (ChatApps.forPackage(pkg)?.allowScreenshot == false) {
-            result.success(null)
+            reply?.success(null)
             return
         }
         // Top bar text, if this app has one we can read; else the first OCR line.
@@ -1137,13 +1248,16 @@ class CaptureService : AccessibilityService() {
         }
         val target = root?.let { targetFor(it) }
         if (target == null) {
-            result.success(null)
+            reply?.success(null)
             return
         }
         observeTarget(target)
-        // 上一次挂起的手动请求作废（恰好回一次的保证）。
-        if (manualOcrResult != null) replyManualOcr(null)
-        manualOcrResult = result
+        if (reply != null) {
+            // 上一次挂起的手动请求作废（恰好回一次的保证）——句柄交接只属于
+            // 通道请求；通知栏触发没有句柄，不碰这条链。
+            if (manualOcrResult != null) replyManualOcr(null)
+            manualOcrResult = reply
+        }
         ocrCapture(title, emptyList(), pkg, manual = true)
     }
 
@@ -1196,6 +1310,32 @@ class CaptureService : AccessibilityService() {
         Log.i(TAG, "capture service connected")
     }
 
+    /**
+     * fix(P1 通知按钮)：KeepAliveService 前台通知上的「唤出助手 / 重新生成」按钮
+     * 经 PendingIntent.getService 到这里——legacy ChatCaptureService.onStartCommand
+     * （1627-1638 行）的移植，路由见 [ServiceConfig.commandRouteOf]：
+     * - SUMMON → [summonFromNotification]（legacy 的 overlay.summon() 路径）；
+     * - GENERATE → [generateFromNotification]（legacy 的 manualGenerate() 路径）；
+     * - IGNORE（未知/null action）→ 静默忽略，legacy 的 when 无 else 同款容错。
+     * main.post 与 legacy 同款：动作处理让出 startService 的派发本身，也把
+     * overlay/采集状态的访问统一压到主线程消息队列上。
+     *
+     * 返回 START_NOT_STICKY 而非 legacy 的 super.onStartCommand（= START_STICKY），
+     * 刻意偏离 legacy：capture 服务不是保活服务（那是 KeepAliveService 的职责），
+     * 被杀后不靠 started-service 的 sticky 重启复活——无障碍服务仍启用时由系统
+     * 无障碍框架重绑（onServiceConnected 会重新 start 保活），sticky 重启只会先于
+     * 重绑造出一个 null intent 的空转实例（null intent 在 commandRouteOf 里就是
+     * IGNORE，无害但无意义）。
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (ServiceConfig.commandRouteOf(intent?.action)) {
+            CommandRoute.SUMMON -> main.post { summonFromNotification() }
+            CommandRoute.GENERATE -> main.post { generateFromNotification() }
+            CommandRoute.IGNORE -> {}
+        }
+        return START_NOT_STICKY
+    }
+
     override fun onInterrupt() {
         // 旧服务：leaveConversation + overlay.hide。无编排层：断开事件流即可；
         // 悬浮窗跟旧服务一样收起——无障碍被打断而服务未销毁期间 sink 已空，
@@ -1240,6 +1380,24 @@ class CaptureService : AccessibilityService() {
         replyManualOcr(null)
         main.removeCallbacksAndMessages(null)
         pixelWorker.shutdownNow()
+        // fix(P1 保活残留)：保活前台服务跟随 capture 服务生命周期——
+        // onServiceConnected 里 start、这里 stop。legacy（ChatCaptureService）
+        // 只 start 从不 stop：用户在系统设置关掉无障碍后，保活通知与前台服务
+        // 永生（onStartCommand=START_STICKY，进程被杀还会被系统拉起），这是外部
+        // 审阅 P1 ①，本版超越 legacy 补上停止。
+        // 选 onDestroy 而不是 onUnbind：与上面 detachEngineChannels 的理由同源
+        // ——onUnbind 后实例可能仍在（onRebind 复用的窗口，系统崩溃恢复路径），
+        // 那里停保活会让仍活着的服务失去前台优先级、重新暴露给 MIUI 冻结；
+        // onDestroy 是「实例不复存在」的确定时刻（用户在设置里关掉开关走
+        // onUnbind → onDestroy）。
+        // 「服务临时重建」路径的取舍（legacy 对此就是无脑不停，无先例可循）：
+        // 系统杀进程时 onDestroy 不保证执行，进程没了保活随之没了；
+        // KeepAliveService 的 START_STICKY 重拉进程后，无障碍框架会重绑仍启用的
+        // capture 服务 → onServiceConnected 再 start 保活——与 legacy 的
+        // 「连接即保活」一致。onDestroy 真执行过的重建（关→再开无障碍）则是先
+        // stop、重连时再 start，中间空窗只损失前台优先级，语义正确。显式
+        // stopService 同时作废 START_STICKY 的重启登记，停了就不再被系统拉起。
+        runCatching { KeepAliveService.stop(this) }
         super.onDestroy()
     }
 }

@@ -1,14 +1,25 @@
+import 'package:chartools_core/chartools_core.dart' show ConflictChoice;
 import 'package:flutter/material.dart';
 
+// ContactTarget 是套用目标快照（类型住在 experts_controller.dart，端口适配器
+// 所在文件）——只 import 消费，不改那个文件（文件所有权纪律）。
+import '../application/experts_controller.dart' show ContactTarget;
 import '../application/personas_controller.dart';
 
-/// 人设库页（人设列表 + 新建/编辑 + 复制/删除 + Character Card V2 导入）。
+/// 人设库页（人设列表 + 新建/编辑 + 复制/删除 + Character Card V2 导入 +
+/// 套用为全局风格/联系人人设）。
 ///
-/// **接线留 #13**：main.dart 不由本工作流改动——接线时在主导航挂本页并
-/// `PersonasController()..load()`。
+/// 接线（main.dart `_openPersonas`）：`PersonasController(styleSink:
+/// SettingsStyleSink(settings), contactSink: ContactStorePersonaSink(contacts))
+/// ..load()`——套用动作的两个落点（全局 style / 联系人专用人设）经注入的
+/// sink 生效；sink 缺位（如测试直 pump）时套用按钮照在、点了如实提示
+/// 「未接线」，与 experts_page 同款。
 ///
-/// 编辑表单的六个字段（称呼/关系/语气/边界/避谈/安全词）一一对应
-/// PersonaCard 的键；页面不自己拼提示词——预览走
+/// 套用交互与 experts_page 同款同文案：StyleSource 优先级（专用人设压全局）
+/// 要求「套用为全局」前先确认哪些联系人不生效；「套用为联系人」遇到已有
+/// 专用人设的目标时弹「覆盖/并存」二选一（needsChoice 语义，判定在 core
+/// ExpertApply，页面只问不改）。编辑表单的六个字段（称呼/关系/语气/边界/
+/// 避谈/安全词）一一对应 PersonaCard 的键；页面不自己拼提示词——预览走
 /// [PersonasEntry.promptPreview]（内部是 `PersonaCard.parse` →
 /// `promptText()`，与起草提示词同一条路径）。CCV2 导入必须先预览、确认才
 /// 落库（G8「确认后入库」纪律，映射表见 PersonasController.importCcv2 注释）。
@@ -165,6 +176,32 @@ class _PersonasPageState extends State<PersonasPage> {
                   ),
                 ),
                 const SizedBox(height: 16),
+                // 套用动作（本轮接线）：与 experts_page 详情同款双落点——写
+                // ContactStore 的联系人人设或全局 style，不搬数据、不动专家库
+                //（语义见 PersonasController 套用一节）。sink 未接线时点了
+                // 如实提示，不假装成功。
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        key: const Key('personas_apply_global'),
+                        onPressed: () => _applyGlobal(sheetContext, current),
+                        icon: const Icon(Icons.public),
+                        label: const Text('套用为全局风格'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: const Key('personas_apply_contact'),
+                        onPressed: () => _applyContact(sheetContext, current),
+                        icon: const Icon(Icons.person_outline),
+                        label: const Text('套用为联系人人设'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -237,6 +274,180 @@ class _PersonasPageState extends State<PersonasPage> {
         ),
       ),
     );
+  }
+
+  // ------------------------------------------------------------------ 套用
+
+  /// 「套用为全局风格」。StyleSource 优先级（style_source.dart:27 的既定
+  /// 事实：联系人专用人设压过全局风格）要求**照实说话**：存在写了专用人设
+  /// 的联系人时先弹确认，说明这次套用对 TA 们不生效——交互与文案口径与
+  /// experts_page 完全一致，判定复用 PersonasController.contactHasPersona
+  ///（内部即 ExpertsController → core StyleSource.resolve 的同一链条）。
+  Future<void> _applyGlobal(
+      BuildContext sheetContext, PersonaEntry entry) async {
+    final controller = widget.controller;
+    if (!controller.hasStyleSink) {
+      _snackOf(sheetContext, '全局风格未接线（#13），暂时不能套用', error: true);
+      return;
+    }
+    final shadowed = controller.contactTargets
+        .where(PersonasController.contactHasPersona)
+        .toList();
+    if (shadowed.isNotEmpty) {
+      final goOn = await _confirmStyleSourceShadow(sheetContext, shadowed);
+      if (goOn != true || !sheetContext.mounted) return;
+    }
+    final result = await controller.applyAsGlobalStyle(entry);
+    if (!sheetContext.mounted) return;
+    Navigator.of(sheetContext).pop(); // 套用后收起详情。
+    _snack(
+        result.ok
+            ? '已套用为全局风格${result.warning.isEmpty ? '' : '；${result.warning}'}'
+            : result.problem,
+        error: !result.ok);
+  }
+
+  /// StyleSource 优先级确认：这些联系人写了专用人设，全局风格对 TA 们不生效。
+  /// 与 experts_page._confirmStyleSourceShadow 同文案（按钮 key 换人设前缀）。
+  Future<bool?> _confirmStyleSourceShadow(
+    BuildContext sheetContext,
+    List<ContactTarget> shadowed,
+  ) {
+    return showDialog<bool>(
+      context: sheetContext,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('部分联系人不会生效'),
+        content: Text(
+          '以下联系人写了专用人设（专用人设优先于全局风格）：\n\n'
+          '${shadowed.map((t) => '· ${t.displayName}').join('\n')}\n\n'
+          '这次套用只对没有专用人设的聊天生效，仍要套用吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('personas_confirm_shadowed'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('仍要套用'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 「套用为联系人人设」：先选目标联系人；冲突判定与选择语义收敛到 core
+  /// ExpertApply——控制器首调返回 needsChoice（core 保证问询期间两个目标都
+  /// 没写）时弹「覆盖/并存」二选一，选完带 ConflictChoice 再调一次。目标已有
+  /// 专用人设时不可静默发生（StyleSource 优先级：专用人设一旦写入就压过
+  /// 全局风格）。交互流程与 experts_page._applyContact 逐步同款。
+  Future<void> _applyContact(
+      BuildContext sheetContext, PersonaEntry entry) async {
+    final controller = widget.controller;
+    if (!controller.hasContactSink) {
+      _snackOf(sheetContext, '联系人档案未接线（#13），暂时不能套用', error: true);
+      return;
+    }
+    final targets = controller.contactTargets;
+    if (targets.isEmpty) {
+      _snackOf(sheetContext, '还没有联系人档案，先在联系人页建一个', error: true);
+      return;
+    }
+    final picked = await showModalBottomSheet<ContactTarget>(
+      context: sheetContext,
+      builder: (pickContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('套用给哪位联系人？'),
+            ),
+            for (final t in targets)
+              ListTile(
+                title: Text(t.displayName),
+                // 「已有专用人设」判定走 StyleSource.resolve 收敛口径
+                //（PersonasController.contactHasPersona 转发），不手写判空。
+                trailing: PersonasController.contactHasPersona(t)
+                    ? const Tooltip(
+                        message: '已有专用人设',
+                        child: Icon(Icons.description_outlined),
+                      )
+                    : null,
+                subtitle: PersonasController.contactHasPersona(t)
+                    ? const Text('已有专用人设（套用将覆盖）')
+                    : null,
+                onTap: () => Navigator.of(pickContext).pop(t),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !sheetContext.mounted) return;
+    // 首调：core 检测到「专用人设压全局」的冲突时返回 needsChoice 且什么都不
+    // 写；无冲突则直接生效。
+    var result = await controller.applyToContact(entry, picked);
+    if (!sheetContext.mounted) return;
+    if (result.needsChoice) {
+      final choice = await showDialog<_PersonaApplyChoice>(
+        context: sheetContext,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('覆盖「${picked.displayName}」的专用人设？'),
+          content: const Text(
+            '这位联系人已有专用人设（专用人设优先于全局风格）。\n\n'
+            '覆盖套用：与 TA 的聊天改用新人设，原专用人设被覆盖。\n'
+            '并存套用：这个人设写入全局风格，原专用人设保留并继续生效'
+            '（仅对没有专用人设的聊天，全局风格才会露出）。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(_PersonaApplyChoice.cancel),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              // 并存要写全局风格：风格未接线时没有第二条路可走。
+              onPressed: controller.hasStyleSink
+                  ? () => Navigator.of(dialogContext)
+                      .pop(_PersonaApplyChoice.coexist)
+                  : null,
+              child: const Text('并存套用'),
+            ),
+            FilledButton(
+              key: const Key('personas_confirm_overwrite'),
+              onPressed: () => Navigator.of(dialogContext)
+                  .pop(_PersonaApplyChoice.overwrite),
+              child: const Text('覆盖套用'),
+            ),
+          ],
+        ),
+      );
+      if (!sheetContext.mounted) return;
+      if (choice == null || choice == _PersonaApplyChoice.cancel) return;
+      final kbChoice = choice == _PersonaApplyChoice.coexist
+          ? ConflictChoice.coexist
+          : ConflictChoice.overwrite;
+      result = await controller.applyToContact(entry, picked, choice: kbChoice);
+      if (!sheetContext.mounted) return;
+      if (kbChoice == ConflictChoice.coexist) {
+        Navigator.of(sheetContext).pop();
+        _snack(
+            result.ok
+                ? '已并存套用：写入全局风格，「${picked.displayName}」的'
+                    '专用人设保留并继续生效'
+                : result.problem,
+            error: !result.ok);
+        return;
+      }
+    }
+    Navigator.of(sheetContext).pop();
+    _snack(
+        result.ok
+            ? '已套用为「${picked.displayName}」的专用人设'
+                '${result.warning.isEmpty ? '' : '；${result.warning}'}'
+            : result.problem,
+        error: !result.ok);
   }
 
   // ------------------------------------------------------------- 新建/编辑
@@ -391,7 +602,8 @@ class _PersonaFormSheetState extends State<_PersonaFormSheet> {
     final existing = widget.existing;
     return Padding(
       // 键盘顶起表单：底部的 viewInsets 让最后一个输入框不被遮。
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Form(
@@ -573,8 +785,8 @@ class _Ccv2ImportDialogState extends State<_Ccv2ImportDialog> {
                 const SizedBox(height: 8),
                 OutlinedButton(
                   key: const Key('personas_ccv2_preview'),
-                  onPressed: () => setState(
-                      () => _preview = widget.controller.previewCcv2(_input.text)),
+                  onPressed: () => setState(() =>
+                      _preview = widget.controller.previewCcv2(_input.text)),
                   child: const Text('解析预览'),
                 ),
                 if (_preview != null) ...[
@@ -583,7 +795,8 @@ class _Ccv2ImportDialogState extends State<_Ccv2ImportDialog> {
                     _previewRow('名称', _preview!.name),
                     _previewRow('描述 → 补充正文（进提示词）', _preview!.description),
                     _previewRow('persona → 六字段+补充', _preview!.persona),
-                    _previewRow('personality → 语气（缺时补位）', _preview!.personality),
+                    _previewRow(
+                        'personality → 语气（缺时补位）', _preview!.personality),
                     _previewRow('scenario → 补充（情境：）', _preview!.scenario),
                     _previewRow('first_mes → 开场白（对方示例）', _preview!.firstMes),
                     _previewRow('mes_example → 补充（示例行）', _preview!.mesExample),
@@ -592,7 +805,8 @@ class _Ccv2ImportDialogState extends State<_Ccv2ImportDialog> {
                       '导入会新建一条人设（来源：ccv2），预览确认后才落库。',
                       style: TextStyle(
                           fontSize: 12,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant),
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant),
                     ),
                   ] else
                     Text(
@@ -638,3 +852,8 @@ class _Ccv2ImportDialogState extends State<_Ccv2ImportDialog> {
         ),
       );
 }
+
+/// 套用为联系人人设时的用户裁决（core ExpertApply 的 needsChoice 语义）：
+/// 覆盖专用人设 / 并存（只写全局风格、专用人设保留并继续压全局）/ 取消。
+/// 与 experts_page 的同名枚举同义——两页各自私有，改名不影响对方。
+enum _PersonaApplyChoice { overwrite, coexist, cancel }

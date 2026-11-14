@@ -303,17 +303,31 @@ class _DesktopAssistantPageState extends State<DesktopAssistantPage> {
       final jev = _jev = JevClient(widget.config.value, stats: widget.usage);
       final analysis = await jev.judge(snapshot, relationshipText, ctx: ctx);
       var ranked = const <RankedReply>[];
+      // 判断不可用 → 盲写（P0 降级的唯一准入判定 [JudgeClient.usableJudgment]，
+      // 与采集会话 capture_session.dart 同一份静态方法，两端口径一致）：
+      // 未配置合成的空对象 / 答案全缺的判断若原样进 draftAndRank，
+      // judgmentBlock 会产出「判断结果（先按它读局势…）：看不出×3」噪声块
+      // （reply_prompt.dart:208-231）——null 起草提示词与无判断轮逐字节等价。
+      // F1 的 best_action 同样取 usable：无判断信号 → 无策略偏好 → 原序。
+      final usable = JudgeClient.usableJudgment(analysis);
       if (analysis.error == null) {
         // fix(#11 P0-N)：场景随 store.scenarioId 进起草路，与采集流同一份
         // 解析（CaptureSession.resolveScenario）；null 时与接入前逐字节一致。
         // 判断路不消费场景（ScenarioTemplate 只有起草侧附加段），judge 不传。
         ranked = await jev.draftAndRank(snapshot, relationshipText,
-            judgment: analysis,
+            judgment: usable,
             ctx: ctx,
             scenario: CaptureSession.resolveScenario(widget.scenarioId));
         // F1：best_action 对应的策略候选提前——与采集会话同一份静态实现。
-        ranked = CaptureSession.applyStrategyOrder(ranked, analysis);
+        ranked = CaptureSession.applyStrategyOrder(ranked, usable);
       }
+      // judge 调用失败（error != null）保持既有行为：整轮不起草、错误卡可见
+      // （_resultSection 的错误卡与结果区互斥：analysis.error 非空直接 return
+      // 错误卡，候选区不在了）——与采集流「失败也降级起草、候选照常出」
+      // **刻意不同构**：桌面页结果区没有错误+候选并排的渲染形态，照搬采集
+      // 语义等于从后门复刻「候选恒空」（错误卡顶掉结果区）；要并排得先改
+      // 结果区 UI，属桌面端产品取舍，不在本轮。
+      // 未配置（error == null 但 usable == null）不走这条——盲写照常起草。
       if (!mounted) return;
       setState(() {
         _analysis = analysis.copyWith(rankedReplies: ranked);

@@ -108,8 +108,9 @@ class SessionCheckpoint {
         signature: j['signature'] is String ? j['signature'] as String : '',
         relationship:
             j['relationship'] is String ? j['relationship'] as String : '',
-        activeContactId:
-            j['activeContactId'] is String ? j['activeContactId'] as String : null,
+        activeContactId: j['activeContactId'] is String
+            ? j['activeContactId'] as String
+            : null,
       );
 
   /// 没有任何可恢复内容（UI 据此决定要不要弹「待确认恢复」提示）。
@@ -124,8 +125,7 @@ class SessionCheckpoint {
       other.activeContactId == activeContactId;
 
   @override
-  int get hashCode =>
-      Object.hash(signature, relationship, activeContactId);
+  int get hashCode => Object.hash(signature, relationship, activeContactId);
 }
 
 /// C10 检查点的落盘句柄：把一份检查点存档覆盖写下去（传 null = 清除「待确认
@@ -435,8 +435,7 @@ class CaptureSession {
         final title = tracked.note.title.trim();
         refs.add(Note(
           id: '$kbRefIdPrefix${tracked.note.id}',
-          title:
-              '知识参考（来源：知识库笔记《${title.isEmpty ? '无标题' : title}》）',
+          title: '知识参考（来源：知识库笔记《${title.isEmpty ? '无标题' : title}》）',
           content: tracked.note.content,
         ));
       }
@@ -675,8 +674,7 @@ class CaptureSession {
             '（开了「学习我的说话方式」才有；只进写作路，判断路不看）',
         // G7 偏好附言原文照列（写出去了什么就列什么）；它是用户自己的标注
         // 统计，不是聊天内容，附言里也从不引用候选原文。
-        if (preference.isNotEmpty)
-          '偏好反馈附言：「$preference」（你在候选卡上标注的结构化偏好，只进写作路）',
+        if (preference.isNotEmpty) '偏好反馈附言：「$preference」（你在候选卡上标注的结构化偏好，只进写作路）',
       ],
     );
   }
@@ -835,6 +833,27 @@ class CaptureSession {
   /// 自动路径（高置信快照）与手动确认路径（[confirmAnalyze]）共用这一份；
   /// [round] 是进门时领到的轮次 token，await 期间被更新的快照/确认抢先就
   /// 整轮作废（见 [_round] 的乱序/并发防护），旧结果不许写回。
+  ///
+  /// P0 判断降级（裁定：判断路由默认关闭 + 优雅降级）：
+  /// - **未配置就跳过判断**：`config.value.judgeRouteConfigured()` 为 false
+  ///   （判据唯一在 JevConfig，典型落点：全新安装 judgeProvider='jev' +
+  ///   judgeBaseUrl='' → 端点是相对地址，发不出 POST）时**不发起 judge 调用**
+  ///   （连打点都不记——路由没配就不算「调用」），合成一个无错误、无
+  ///   best_action 的空判断对象直接进起草。判定用与客户端同一份
+  ///   `config.value`（JevClient 每 config 变更重建，见 [_onConfigChanged]，
+  ///   不存在门与客户端各读一份旧值的分叉）；core 的 JudgeClient.judge 还有
+  ///   一道同判据的门兜住其它调用方（桌面页/analyze）。
+  /// - **已配置但调用失败照样起草**：judge 失败的既有语义是返回
+  ///   `Analysis.error`（不抛），原来 error 非 null 就整轮放弃起草、候选恒
+  ///   空（P0 取证路径）。现在失败只降级判断，不拦起草；错误**留在
+  ///   state 的可见位置**——`CaptureState.analysis.error` 原样保留（桌面
+  ///   助手页按它渲染判断错误卡，不静默吞；采集页当前只渲染顶层
+  ///   [CaptureState.error]，候选与错误互斥的渲染改进归 UI 文件，见
+  ///   capture_page.dart `_suggestionsSection` 的注释责任划分），本轮
+  ///   刻意**不**写顶层 error：写了它采集页就用错误卡顶掉候选列表，等于
+  ///   从后门复刻「候选恒空」。进起草的 judgment 经
+  ///   [JudgeClient.usableJudgment] 过滤（失败/空判断 → null 盲写，
+  ///   提示词不引入「看不出×3」的噪声块）。
   Future<void> _runRound(ChatSnapshot snapshot, int round) async {
     // ③/A3/联系人：本轮上下文在进 try 前组好——judge 与 draftAndRank 必须
     // 拿同一份，G1 预览也由它算出（预览与实际发送同源，不是两套各说各话的
@@ -867,25 +886,40 @@ class CaptureSession {
         relationship.value.trim().isEmpty ? '朋友' : relationship.value.trim(),
       );
 
-      final analysis = await jev.judge(snapshot, relationshipText, ctx: ctx);
+      // P0 判断降级第一道门：未配置跳过 judge 调用（含打点），合成空判断。
+      // 空对象形状与 core 门（JudgeClient.judge 未配置分支）一致，两处共用
+      // JevConfig.judgeRouteConfigured 这一份判据；判定与客户端构造读同一份
+      // config.value，门与请求用的配置不会各拿各的。
+      final Analysis analysis;
+      if (config.value.judgeRouteConfigured()) {
+        analysis = await jev.judge(snapshot, relationshipText, ctx: ctx);
+      } else {
+        analysis = Analysis(
+          rankedReplies: const [],
+          latencyMs: 0,
+        );
+      }
       // await 期间可能已有更新的快照开轮：本轮作废，不许覆盖新快照的状态。
       if (round != _round) return;
-      var ranked = const <RankedReply>[];
-      if (analysis.error == null) {
-        // 新快照一律从头起草（avoid 只在「换一组」的当次请求里生效）。
-        // fix(#11 P0-N)：场景随 notifier 当前值进起草路（判断路不消费场景，
-        // judge 调用不动）——resolveScenario 为 null 时与接入前逐字节一致。
-        ranked = await jev.draftAndRank(
-          snapshot,
-          relationshipText,
-          judgment: analysis,
-          ctx: ctx,
-          scenario: resolveScenario(scenarioId),
-        );
-        if (round != _round) return;
-        // F1：best_action 对应的策略候选提前（仅显示顺序，概率不变）。
-        ranked = applyStrategyOrder(ranked, analysis);
-      }
+      // 新快照一律从头起草（avoid 只在「换一组」的当次请求里生效）。
+      // P0 判断降级：judge 失败/未配置不再拦起草——判断不可用就盲写。
+      // fix(#11 P0-N)：场景随 notifier 当前值进起草路（判断路不消费场景，
+      // judge 调用不动）——resolveScenario 为 null 时与接入前逐字节一致。
+      final usable = JudgeClient.usableJudgment(analysis);
+      var ranked = await jev.draftAndRank(
+        snapshot,
+        relationshipText,
+        judgment: usable,
+        ctx: ctx,
+        scenario: resolveScenario(scenarioId),
+      );
+      if (round != _round) return;
+      // F1：best_action 对应的策略候选提前（仅显示顺序，概率不变）。判断
+      // 不可用时 usable 的 best_action 为 null → StrategyOrder 无偏好 →
+      // 原序返回，与「判断不可用」语义一致。
+      ranked = applyStrategyOrder(ranked, usable);
+      // 错误随 analysis 原样保留（含判 latency）：桌面页渲染判断错误卡，
+      // 采集页候选区照常出卡——见方法头注释的可见位置说明。
       state.value = CaptureState(
         snapshot: snapshot,
         analysis: analysis.copyWith(rankedReplies: ranked),
@@ -916,12 +950,21 @@ class CaptureSession {
   /// 所以先取局部再写 state）。③：extraContext 与风格学习开关照常生效
   /// （「换一组」保留补充背景）；激活联系人的正文字段照常随 ctx 进来；
   /// F1 的策略提升同样接入。
+  ///
+  /// P0 判断降级：卡上的判断可能不可用（未配置合成的空对象 / 调用失败带错
+  /// 对象）——写回 state 的仍用**原对象**（错误标注、候选载体不能丢，桌面
+  /// 页的错误卡靠它），但进起草路 judgment 的按 [JudgeClient.usableJudgment]
+  /// 过滤成 null（盲写），与 [_runRound] 的降级轮同构：同快照同配置下，
+  /// 首轮与「换一组」的起草提示词形状一致，不会一轮带「看不出」噪声块、
+  /// 一轮不带。可用判断（error == null 且有信号）的行为与改前一致。
   Future<void> regenerate() async {
     final snapshot = state.value.snapshot;
     if (snapshot == null || state.value.busy) return;
-    final judgment = state.value.analysis;
+    final stored = state.value.analysis;
+    // 盲写口径与 _runRound 同一份准入判定：判断不可用 → null。
+    final judgment = JudgeClient.usableJudgment(stored);
     final avoid = [
-      for (final r in judgment?.rankedReplies ?? const <RankedReply>[])
+      for (final r in stored?.rankedReplies ?? const <RankedReply>[])
         if (r.text.isNotEmpty) r.text,
     ];
     final round = ++_round;
@@ -963,7 +1006,8 @@ class CaptureSession {
       final ordered = applyStrategyOrder(ranked, judgment);
       state.value = CaptureState(
         snapshot: snapshot,
-        analysis: judgment?.copyWith(rankedReplies: ordered),
+        // 写回用原对象（含 error / 空判断语义），只换候选列表。
+        analysis: stored?.copyWith(rankedReplies: ordered),
         preview: preview,
       );
       _pushSuggestions();

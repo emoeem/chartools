@@ -5,11 +5,12 @@
 /// ChatGPT 报告的建议（知识库是核心入口，不该藏在模型参数里）：本页是
 /// 一等页面 —— 独立入口、完整管理面，而不是模型参数里的一个子区块。
 ///
-/// **main 接线留 #13：设置页入口 + KbStore 实例注入** —— 本文件不 import
-/// main.dart，也不自建 KbStore / KnowledgeController；构造注入由 #13 完成
-/// （例如 `KnowledgePage(controller: KnowledgeController(
-///   KbStore.loadFromFileSync(<数据目录>/kb.json)))`）。本页是 body-only
-/// 组件（无 Scaffold），方便 #13 嵌进路由、设置页或桌面助手侧栏。
+/// **main 接线（#13 已完成）**：本文件不 import main.dart，也不自建
+/// KbStore / KnowledgeController；构造注入由 main.dart 的路由装配完成
+/// （`KnowledgePage(controller: KnowledgeController(应用级 KbStore))`）。
+/// 本页是 body-only 组件（无 Scaffold），AppBar 归路由外壳——**文档导入的
+/// AppBar 动作因此挂在 main.dart `_openKnowledge` 的外壳上**，动作本体是
+/// 本文件导出的 [showKnowledgeImportSheet]（粘贴 → 预览 → 入库 → 对账）。
 ///
 /// 检索评测透出（#12 超越点）：搜索框**输入**做实时过滤（浏览，不落日志），
 /// **提交**（回车/放大镜）触发 BM25 检索（LexicalSearch，经 KbStore.search
@@ -453,7 +454,10 @@ class _KnowledgePageState extends State<KnowledgePage> {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                '点右上角「新建」写第一条；文档导入入口由 #13 接线。',
+                // 外部审阅 ②：原句「文档导入入口由 #13 接线」是过时的待办
+                // 语气——导入入口已挂路由 AppBar 的「导入」动作
+                //（showKnowledgeImportSheet），文案照实说去哪点。
+                '点右上角「新建」写第一条，或点顶部「导入」把粘贴的文档切块入库。',
                 style: TextStyle(
                   fontSize: 12,
                   color: theme.colorScheme.onSurfaceVariant,
@@ -581,6 +585,316 @@ class _KnowledgePageState extends State<KnowledgePage> {
 }
 
 // ------------------------------------------------------------------ 对话框
+
+/// 文档导入入口（本轮接线）：粘贴文本 → DocImporter.importTextWithStats
+/// 解析 → 预览（候选/丢弃对账计数，页内列表）→ 确认批量入库（source 标
+/// doc）→ 结果对账。生产入口是知识库路由 AppBar 的「导入」动作（main.dart
+/// `_openKnowledge` 的外壳）；空状态文案（_buildEmptyState）指向同一入口。
+/// KnowledgePage 本体保持 body-only，AppBar 归路由外壳——与 #13 接线时的
+/// 分工一致。
+///
+/// **粘贴文本起步**：与迁移页同款 textarea（migration_page.dart 的最小可用
+/// 取舍同源）——**文件选择器（.md/.txt/.html）留给下一轮**，届时接在本入口
+/// 的输入阶段之前，解析/预览/入库链路不动（弹层内已照实标注）。
+Future<void> showKnowledgeImportSheet(
+    BuildContext context, KnowledgeController controller) {
+  return showDialog<void>(
+    context: context,
+    builder: (_) => _DocImportDialog(controller: controller),
+  );
+}
+
+/// 导入弹层的三个阶段（migration_page 的阶段模型收进一个对话框）。
+enum _DocImportStage { input, preview, result }
+
+/// 文档导入弹层。controller 由页面注入（只消费，不持有生命周期）；
+/// TextEditingController 归本 State 所有并在自己的 dispose 里释放——退场
+/// 动画期间输入框还挂在树上，页面侧 await 完就 dispose 会撞
+/// 「used after being disposed」断言（同 _PersonaFormSheet 的所有权纪律）。
+class _DocImportDialog extends StatefulWidget {
+  const _DocImportDialog({required this.controller});
+
+  final KnowledgeController controller;
+
+  @override
+  State<_DocImportDialog> createState() => _DocImportDialogState();
+}
+
+class _DocImportDialogState extends State<_DocImportDialog> {
+  _DocImportStage _stage = _DocImportStage.input;
+
+  final TextEditingController _text = TextEditingController();
+  final TextEditingController _source = TextEditingController();
+
+  /// 解析预览（确认前不落库——G8「确认后入库」的同一条纪律）。
+  DocImportOutcome? _outcome;
+
+  /// 入库对账（确认后）。
+  ImportReport? _report;
+
+  /// 候选的来源名（未填退回「粘贴文本」）；无标题候选的兜底编号用它。
+  String _sourceName = '粘贴文本';
+
+  @override
+  void initState() {
+    super.initState();
+    // 解析按钮的可用性跟着「正文是否非空」走：输入变化时刷新。
+    _text.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() => setState(() {});
+
+  @override
+  void dispose() {
+    _text
+      ..removeListener(_onTextChanged)
+      ..dispose();
+    _source.dispose();
+    super.dispose();
+  }
+
+  // ------------------------------------------------------------- 动作
+
+  void _parse() {
+    final text = _text.text;
+    if (text.trim().isEmpty) return;
+    setState(() {
+      _sourceName = _source.text.trim().isEmpty ? '粘贴文本' : _source.text.trim();
+      // 解析在 isolate 外同步执行（可接受）：粘贴文档量级小，DocImporter 是
+      // 纯 CPU 字符串切分，DocImporterConfig 自带护栏（单文档候选上限
+      // maxCandidates=2000，超限截断并计入 droppedOverflow 对账，不无声无息；
+      // 单块超长按句末断开）——超大文本的超限行为靠现有护栏，不另起炉灶。
+      _outcome = DocImporter.importTextWithStats(
+        text: text,
+        sourceDoc: _sourceName,
+      );
+      _stage = _DocImportStage.preview;
+    });
+  }
+
+  void _confirm() {
+    final outcome = _outcome;
+    if (outcome == null || outcome.candidates.isEmpty) return;
+    setState(() {
+      // 候选 → Note：id 留空由 KbStore.importNotes 生成；无标签、不常驻，
+      // 出处（source/importedAt/updatedAt）由 KbStore 按导入路径盖章。
+      final notes = <Note>[
+        for (final c in outcome.candidates)
+          Note(id: '', title: c.title, content: c.content, type: 'note'),
+      ];
+      // source 显式标 doc（KbSource.doc）：列表的「文档」来源徽标由此产生。
+      _report = widget.controller.importNotes(notes, source: KbSource.doc);
+      // 与 _openEditor 同款「保存后必须可见」纪律：入库有新增而当前筛选会
+      // 挡住时清筛选——别让「导入成功但列表没动静」被误读成没导入。
+      if (_report!.added.isNotEmpty) widget.controller.clearFilters();
+      _stage = _DocImportStage.result;
+    });
+  }
+
+  // ------------------------------------------------------------- 布局
+
+  @override
+  Widget build(BuildContext context) => switch (_stage) {
+        _DocImportStage.input => _buildInput(context),
+        _DocImportStage.preview => _buildPreview(context),
+        _DocImportStage.result => _buildResult(context),
+      };
+
+  Widget _buildInput(BuildContext context) {
+    return AlertDialog(
+      title: const Text('导入文档笔记'),
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              key: const Key('knowledge_import_source'),
+              controller: _source,
+              decoration: const InputDecoration(
+                labelText: '来源名称（可选，无标题候选按它编号）',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 12),
+            // 与迁移页同款 textarea（migration_page._buildJsonField 的形态）。
+            TextField(
+              key: const Key('knowledge_import_text'),
+              controller: _text,
+              minLines: 8,
+              maxLines: 12,
+              decoration: const InputDecoration(
+                labelText: '文档内容',
+                hintText: '粘贴 Markdown / HTML / 纯文本，按标题切块成笔记候选',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            // 入口的「预留」部分照实说明（与 experts_page 资产包区同款口径）：
+            // 文件选择器走下一轮，粘贴文本已能走通全链路。
+            Text(
+              '粘贴文本起步；文件选择器（.md / .txt / .html）下轮接入。',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const Key('knowledge_import_parse'),
+          onPressed: _text.text.trim().isEmpty ? null : _parse,
+          child: const Text('解析预览'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPreview(BuildContext context) {
+    final outcome = _outcome!;
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('导入预览'),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 候选/丢弃对账计数：候选之外每一类静默丢弃都数出来
+              //（DocImportOutcome 的对账口径），照数告知「有 N 条没进来」。
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  _countChip(context, '候选 ${outcome.candidates.length} 条',
+                      Icons.content_cut_outlined),
+                  if (outcome.droppedShort > 0)
+                    _countChip(context, '短正文丢 ${outcome.droppedShort}',
+                        Icons.remove_circle_outline),
+                  if (outcome.droppedTitleOnly > 0)
+                    _countChip(context, '仅标题丢 ${outcome.droppedTitleOnly}',
+                        Icons.title_outlined),
+                  if (outcome.droppedDuplicates > 0)
+                    _countChip(context, '重复丢 ${outcome.droppedDuplicates}',
+                        Icons.content_copy_outlined),
+                  if (outcome.droppedOverflow > 0)
+                    _countChip(context, '超上限丢 ${outcome.droppedOverflow}',
+                        Icons.block_outlined),
+                ],
+              ),
+              if (outcome.lostAnything) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '丢弃项不会入库：低于最短正文、只有标题、同内容重复或超出单次上限。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 4),
+              for (final c in outcome.candidates)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.description_outlined, size: 18),
+                  title: Text(c.title,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(c.content,
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const Key('knowledge_import_back'),
+          onPressed: () => setState(() => _stage = _DocImportStage.input),
+          child: const Text('返回修改'),
+        ),
+        FilledButton(
+          key: const Key('knowledge_import_confirm'),
+          onPressed: outcome.candidates.isEmpty ? null : _confirm,
+          child: Text('确认入库（${outcome.candidates.length}）'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildResult(BuildContext context) {
+    final report = _report!;
+    final outcome = _outcome!;
+    final theme = Theme.of(context);
+    final imported = report.added.length + report.updated.length;
+    return AlertDialog(
+      title: const Text('导入结果'),
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  imported > 0
+                      ? Icons.check_circle_outline
+                      : Icons.info_outline,
+                  size: 20,
+                  color: imported > 0
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+                Text('入库 $imported 条（来源标签：文档）'),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // 结果对账：预览候选 ↔ 新增/更新/重复跳过，总数对得上才说得清。
+            Text(
+              '对账：预览候选 ${outcome.candidates.length} 条 = '
+              '新增 ${report.added.length} · 更新 ${report.updated.length} · '
+              '重复跳过 ${report.duplicates.length}（重复按已入库同内容跳过）。',
+              style: theme.textTheme.bodySmall,
+            ),
+            if (!report.persisted) ...[
+              const SizedBox(height: 8),
+              // KbStore 落盘失败不回滚内存：明说「内存已生效」，而不是静默。
+              Text(
+                '存档写盘失败：内存已生效，下次成功落盘会自动补上。',
+                style: TextStyle(fontSize: 12, color: theme.colorScheme.error),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton(
+          key: const Key('knowledge_import_done'),
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('完成'),
+        ),
+      ],
+    );
+  }
+
+  Widget _countChip(BuildContext context, String label, IconData icon) => Chip(
+        avatar: Icon(icon, size: 16),
+        label: Text(label, style: Theme.of(context).textTheme.labelMedium),
+        visualDensity: VisualDensity.compact,
+      );
+}
 
 /// 新建 / 编辑笔记对话框。返回值：新建成功时返回新笔记 id（页面据此决定
 /// 是否清筛选），编辑 / 取消 / 删除返回 null。
