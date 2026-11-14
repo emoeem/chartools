@@ -11,6 +11,7 @@
 // contact_store_test.dart 同一口径）——套用会真的落盘，所以每个测试前都重置。
 // 内置包：控制器构造期走 core 磁盘探测，读的是 packages/core 真文件。
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:chartools_app/application/experts_controller.dart';
 import 'package:chartools_core/chartools_core.dart' as kb;
@@ -73,6 +74,50 @@ ExpertsController _newController({
 
 int _usedCountOf(ExpertsController c, String id) =>
     c.shelfUnfiltered.firstWhere((i) => i.id == id).usedCount;
+
+/// 演示资产包 JSON（文件导入 / 远端下载共用同一份内容；改 id 可造不同包）。
+String _demoPackJson({String id = 'demo-pack', String version = '1.0.0'}) =>
+    jsonEncode({
+      'format': 'jev-expert-pack/1',
+      'pack': {'id': id, 'version': version, 'name': '演示包'},
+      'experts': [
+        {
+          'id': 'followup.0',
+          'name': '跟单0',
+          'promptText': '称呼：您\n主题：跟进',
+          'domain': '销售',
+          'tags': ['跟进'],
+        },
+      ],
+    });
+
+/// 起一个只回应 [handler] 的本地服务器（随机端口，127.0.0.1 回环）。
+Future<HttpServer> _startServer(
+  Future<void> Function(HttpRequest req) handler,
+) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((req) async {
+    try {
+      await handler(req);
+    } catch (_) {
+      // 客户端提前断开（超限 abort）时服务器的迟到失败不算数——
+      // 与 core http_json_test.dart 的 MockServer 同一口径。
+      try {
+        await req.response.close();
+      } catch (_) {}
+    }
+  });
+  return server;
+}
+
+/// 回一段 JSON 文本并收线。
+Future<void> _reply(HttpRequest req, String body, {int status = 200}) async {
+  req.response.statusCode = status;
+  req.response.headers.contentType =
+      ContentType('application', 'json', charset: 'utf-8');
+  req.response.write(body);
+  await req.response.close();
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -813,6 +858,379 @@ void main() {
       expect(c3.packs, hasLength(2)); // builtin + 旧包（重复份去重）
       expect(c3.loadProblems, hasLength(1));
       expect(c3.loadProblems.single, contains('同名同内容'));
+    });
+  });
+
+  group('mine 专家（自建条目：create/update/delete 往返与拒改）', () {
+    test('create：入库、货架 inLibrary、sourceRef=mine、持久化并入同一存档', () async {
+      final c = _newController();
+      await c.load();
+      final e = await c.createMineExpert(
+        name: '  我的写手  ',
+        promptText: '称呼：你\n语气：简练',
+        domain: ' 职场 ',
+        tags: [' 写作 ', '简练', '  '],
+      );
+      expect(e.id, startsWith('mine:'));
+      expect(e.name, '我的写手'); // trim 后保存
+      expect(e.domain, '职场'); // domain trim
+      expect(e.tags, ['写作', '简练']); // 空白标签剔除
+      expect(e.isBuiltin, isFalse);
+      final item = c.shelfUnfiltered.firstWhere((i) => i.id == e.id);
+      expect(item.inLibrary, isTrue);
+      expect(item.sourceRef, 'mine');
+      expect(c.installed.value.map((x) => x.id), contains(e.id));
+      // 搜索命中正文（唯一进提示词的东西）；领域分组能筛出。
+      expect(c.shelf(query: '简练').map((i) => i.id), contains(e.id));
+      expect(c.shelf(category: '职场').map((i) => i.id), contains(e.id));
+      // 连建两条：id 严格递增不撞车。
+      final e2 = await c.createMineExpert(name: '第二条', promptText: '称呼：我');
+      expect(e2.id, isNot(e.id));
+      // 持久化：并入 experts_v2 同一存档，新控制器 load 后名字与来源都在。
+      final c2 = _newController();
+      await c2.load();
+      final restored = c2.shelfUnfiltered.firstWhere((i) => i.id == e.id);
+      expect(restored.name, '我的写手');
+      expect(restored.sourceRef, 'mine');
+      expect(restored.body, '称呼：你\n语气：简练');
+    });
+
+    test('create 校验：空白名/空正文/超 64KiB 拒绝，库里不留半截', () async {
+      final c = _newController();
+      await c.load();
+      await expectLater(c.createMineExpert(name: '   ', promptText: '称呼：你'),
+          throwsArgumentError);
+      await expectLater(
+          c.createMineExpert(name: 'a', promptText: '   '), throwsArgumentError);
+      await expectLater(
+          c.createMineExpert(
+              name: 'a', promptText: 'x' * (kb.expertPromptTextMaxBytes + 1)),
+          throwsArgumentError);
+      expect(c.installed.value, isEmpty);
+    });
+
+    test('update：改名改正文、updatedAt 前进；未指定字段不动；seed/pack 来源拒改',
+        () async {
+      final c = _newController();
+      await c.load();
+      final mine = await c.createMineExpert(name: '旧名', promptText: '旧正文');
+      final stamp0 =
+          c.shelfUnfiltered.firstWhere((i) => i.id == mine.id).meta!.updatedAt;
+      final updated =
+          await c.updateMineExpert(mine.id, name: ' 新名 ', promptText: '新正文');
+      expect(updated.name, '新名');
+      expect(updated.promptText, '新正文');
+      expect(updated.id, mine.id); // id 与来源不动
+      final item = c.shelfUnfiltered.firstWhere((i) => i.id == mine.id);
+      expect(item.name, '新名');
+      expect(item.meta!.updatedAt, greaterThan(stamp0));
+      // 只改一个字段：另一个保持原样。
+      final bodyOnly = await c.updateMineExpert(mine.id, promptText: '只改正文');
+      expect(bodyOnly.name, '新名');
+      final nameOnly = await c.updateMineExpert(mine.id, name: '又新');
+      expect(nameOnly.promptText, '只改正文');
+      // 拒改 seed 来源（内置条目套用落库后 source.packId=builtin）。
+      final ghost =
+          c.shelfUnfiltered.firstWhere((i) => i.presetKey == 'daily.friend');
+      await c.applyAsGlobalStyle(ghost);
+      await expectLater(
+          c.updateMineExpert(ghost.id, name: 'x'), throwsArgumentError);
+      // 拒改 pack 来源（装一个演示包并套用落库）。
+      await c.installPackJson(_demoPackJson(id: 'pack-src'));
+      final packGhost =
+          c.shelfUnfiltered.firstWhere((i) => i.presetKey == 'followup.0');
+      await c.applyAsGlobalStyle(packGhost);
+      await expectLater(
+          c.updateMineExpert(packGhost.id, name: 'x'), throwsArgumentError);
+      // 拒改不影响 mine 条目本身。
+      expect(c.shelfUnfiltered.firstWhere((i) => i.id == mine.id).name, '又新');
+      // 缺条目 / 全空参数 / 空白字段。
+      await expectLater(
+          c.updateMineExpert('mine:nope', name: 'x'), throwsStateError);
+      await expectLater(c.updateMineExpert(mine.id), throwsArgumentError);
+      await expectLater(
+          c.updateMineExpert(mine.id, name: '  '), throwsArgumentError);
+      await expectLater(
+          c.updateMineExpert(mine.id, promptText: ' '), throwsArgumentError);
+    });
+
+    test('delete：返回被删条目、库存货架同步消失、持久化生效；seed/pack 来源拒删',
+        () async {
+      final c = _newController();
+      await c.load();
+      final mine = await c.createMineExpert(name: '待删', promptText: '正文');
+      final removed = await c.deleteMineExpert(mine.id);
+      expect(removed.id, mine.id);
+      expect(removed.name, '待删');
+      expect(c.shelfUnfiltered.any((i) => i.id == mine.id), isFalse);
+      expect(c.installed.value, isEmpty);
+      // 持久化生效：新控制器 load 后仍是空的。
+      final c2 = _newController();
+      await c2.load();
+      expect(c2.installed.value, isEmpty);
+      // 拒删 seed 来源。
+      final ghost =
+          c.shelfUnfiltered.firstWhere((i) => i.presetKey == 'daily.friend');
+      await c.applyAsGlobalStyle(ghost);
+      await expectLater(c.deleteMineExpert(ghost.id), throwsArgumentError);
+      // 拒删 pack 来源。
+      await c.installPackJson(_demoPackJson(id: 'pack-src'));
+      final packGhost =
+          c.shelfUnfiltered.firstWhere((i) => i.presetKey == 'followup.0');
+      await c.applyAsGlobalStyle(packGhost);
+      await expectLater(c.deleteMineExpert(packGhost.id), throwsArgumentError);
+      // 缺失条目。
+      await expectLater(c.deleteMineExpert('mine:nope'), throwsStateError);
+    });
+  });
+
+  group('installPackFromFile（文件导入：正常/不存在/坏 JSON/非 UTF-8）', () {
+    test('正常文件导入：汇入 installPackJson 同一条安装路径', () async {
+      final c = _newController();
+      await c.load();
+      final dir = await Directory.systemTemp.createTemp('pack_import');
+      final file = File('${dir.path}${Platform.pathSeparator}demo.json');
+      await file.writeAsString(_demoPackJson(), encoding: utf8);
+      try {
+        final r = await c.installPackFromFile(file.path);
+        expect(r.ok, isTrue);
+        expect(r.action, kb.InstallAction.installed);
+        expect(c.packs, hasLength(2));
+        expect(c.shelfUnfiltered.any((i) => i.presetKey == 'followup.0'),
+            isTrue);
+        // 持久化：新控制器还原（包原文进了 expert_packs_v2）。
+        final c2 = _newController();
+        await c2.load();
+        expect(c2.packs.where((p) => p.meta.id == 'demo-pack'), hasLength(1));
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test('文件不存在 / 坏 JSON / 非 UTF-8：可读错误，什么都不装', () async {
+      final c = _newController();
+      await c.load();
+      final dir = await Directory.systemTemp.createTemp('pack_import');
+      try {
+        // 不存在。
+        await expectLater(
+          c.installPackFromFile(
+              '${dir.path}${Platform.pathSeparator}nope.json'),
+          throwsA(isA<FormatException>()
+              .having((e) => e.message, 'message', contains('文件不存在'))),
+        );
+        // 坏 JSON（合法 UTF-8，但不是合法清单）。
+        final bad = File('${dir.path}${Platform.pathSeparator}bad.json');
+        await bad.writeAsString('{ 不是 JSON', encoding: utf8);
+        await expectLater(
+            c.installPackFromFile(bad.path), throwsFormatException);
+        // 非 UTF-8 字节（0xFF 起头的乱码）。
+        final bin = File('${dir.path}${Platform.pathSeparator}bin.json');
+        await bin.writeAsBytes(<int>[0xFF, 0xFE, 0x7B, 0x7D]);
+        await expectLater(
+          c.installPackFromFile(bin.path),
+          throwsA(isA<FormatException>()
+              .having((e) => e.message, 'message', contains('UTF-8'))),
+        );
+        expect(c.packs, hasLength(1)); // 只有内置包：什么都没装上
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    });
+  });
+
+  group('installFromRemote（本地 HttpServer 假清单 + 假包端到端）', () {
+    // flutter_test 的 TestWidgetsFlutterBinding.ensureInitialized() 会把
+    // HttpOverrides.global 换成 mock（所有 HttpClient 一律回 400，连
+    // 127.0.0.1 回环都到不了服务器；HttpOverrides.runZoned 的 scope 会先
+    // 委托 previous=当时 global 的 mock，压不过它——SDK overrides.dart
+    // _HttpOverridesScope.createHttpClient 的回退链如此）。本组全走真回环
+    // HTTP，组内恢复真 HttpClient；文件其余测试不做任何网络请求，互不影响。
+    setUp(() {
+      HttpOverrides.global = null;
+    });
+
+    // 组内小助手：把一段 manifest JSON 的包装固定下来（条目可整体替换）。
+    String manifest(String packUrl, {List<Map<String, Object?>>? packs}) =>
+        jsonEncode({
+          'format': 'jev-expert-remote-manifest/1',
+          'packs': packs ??
+              [
+                {
+                  'id': 'demo-pack',
+                  'version': '1.0.0',
+                  'url': packUrl,
+                  'name': '演示包',
+                },
+              ],
+        });
+
+    test('端到端：清单 → 选包 → 包体校验 → 安装，货架与存档全就位', () async {
+      final c = _newController();
+      await c.load();
+      late final HttpServer server;
+      server = await _startServer((req) async {
+        if (req.uri.path == '/manifest.json') {
+          await _reply(
+              req, manifest('http://127.0.0.1:${server.port}/pack.json'));
+        } else if (req.uri.path == '/pack.json') {
+          await _reply(req, _demoPackJson());
+        } else {
+          await _reply(req, 'not found', status: 404);
+        }
+      });
+      try {
+        final r = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json');
+        expect(r.ok, isTrue, reason: r.problem);
+        expect(r.problem, isEmpty);
+        expect(r.packId, 'demo-pack');
+        expect(r.version, '1.0.0');
+        expect(r.expertsInstalled, 1);
+        expect(c.packs, hasLength(2));
+        final item =
+            c.shelfUnfiltered.firstWhere((i) => i.presetKey == 'followup.0');
+        expect(item.sourceRef, 'pack:demo-pack');
+        // 幂等：同版本再装仍 ok（alreadyCurrent，货架不重复）。
+        final again = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json');
+        expect(again.ok, isTrue, reason: again.problem);
+        expect(again.packId, 'demo-pack');
+        expect(c.packs, hasLength(2));
+        // 重启还原：包原文进了 expert_packs_v2。
+        final c2 = _newController();
+        await c2.load();
+        expect(c2.packs.where((p) => p.meta.id == 'demo-pack'), hasLength(1));
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('缺省选包取版本最高；指定 packId 精确匹配', () async {
+      final c = _newController();
+      await c.load();
+      late final HttpServer server;
+      server = await _startServer((req) async {
+        if (req.uri.path == '/manifest.json') {
+          await _reply(req, manifest('', packs: [
+            {
+              'id': 'a-pack',
+              'version': '1.0.0',
+              'url': 'http://127.0.0.1:${server.port}/a.json',
+            },
+            {
+              'id': 'b-pack',
+              'version': '2.0.0',
+              'url': 'http://127.0.0.1:${server.port}/b.json',
+            },
+          ]));
+        } else if (req.uri.path == '/a.json') {
+          await _reply(req, _demoPackJson(id: 'a-pack', version: '1.0.0'));
+        } else if (req.uri.path == '/b.json') {
+          await _reply(req, _demoPackJson(id: 'b-pack', version: '2.0.0'));
+        } else {
+          await _reply(req, 'not found', status: 404);
+        }
+      });
+      try {
+        // 缺省：取版本最高的 b-pack（并列取清单顺序靠前的）。
+        final r = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json');
+        expect(r.ok, isTrue, reason: r.problem);
+        expect(r.packId, 'b-pack');
+        expect(r.version, '2.0.0');
+        // 指定 packId：精确装 a-pack。
+        final r2 = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json',
+            packId: 'a-pack');
+        expect(r2.ok, isTrue, reason: r2.problem);
+        expect(r2.packId, 'a-pack');
+        expect(r2.version, '1.0.0');
+        expect(c.packs.where((p) => p.meta.id == 'a-pack'), hasLength(1));
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('指定不存在的 packId：ok=false，problem 列出清单里有哪些包', () async {
+      final c = _newController();
+      await c.load();
+      late final HttpServer server;
+      server = await _startServer((req) async {
+        await _reply(req,
+            manifest('http://127.0.0.1:${server.port}/pack.json'));
+      });
+      try {
+        final r = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json',
+            packId: 'nope');
+        expect(r.ok, isFalse);
+        expect(r.problem, contains('清单里没有这个包'));
+        expect(r.problem, contains('demo-pack')); // 附上清单里现有的包
+        expect(c.packs, hasLength(1)); // 没装任何东西
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('包体校验失败不落盘：ok=false + problem 可读，包键与货架都不动', () async {
+      final c = _newController();
+      await c.load();
+      late final HttpServer server;
+      server = await _startServer((req) async {
+        if (req.uri.path == '/manifest.json') {
+          await _reply(
+              req, manifest('http://127.0.0.1:${server.port}/pack.json'));
+        } else if (req.uri.path == '/pack.json') {
+          // 缺 format：core PackCodec 清单级严格校验拒收。
+          await _reply(req, jsonEncode({
+            'pack': {'id': 'demo-pack', 'version': '1.0.0'},
+            'experts': [
+              {'id': 'x', 'promptText': '称呼：你'},
+            ],
+          }));
+        } else {
+          await _reply(req, 'not found', status: 404);
+        }
+      });
+      try {
+        final r = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json');
+        expect(r.ok, isFalse);
+        expect(r.problem, contains('校验失败')); // fetchPack 的「包体校验失败：…」
+        expect(r.problem, contains('format')); // core 的拒因照实进文案
+        expect(r.packId, 'demo-pack'); // 失败也知道是哪个包
+        expect(c.packs, hasLength(1)); // 只有内置包：没装上
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString('expert_packs_v2'), anyOf(isNull, isEmpty));
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('清单 404 / 清单格式不支持：ok=false，problem 可读', () async {
+      final c = _newController();
+      await c.load();
+      late final HttpServer server;
+      server = await _startServer((req) async {
+        if (req.uri.path == '/manifest.json') {
+          await _reply(req, jsonEncode({'format': 'whatever/9', 'packs': []}));
+        } else {
+          await _reply(req, 'not found', status: 404);
+        }
+      });
+      try {
+        final r404 = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/missing.json');
+        expect(r404.ok, isFalse);
+        expect(r404.problem, contains('HTTP 404'));
+        final rBad = await c.installFromRemote(
+            'http://127.0.0.1:${server.port}/manifest.json');
+        expect(rBad.ok, isFalse);
+        expect(rBad.problem, contains('清单格式不支持'));
+      } finally {
+        await server.close(force: true);
+      }
     });
   });
 }

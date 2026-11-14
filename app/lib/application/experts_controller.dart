@@ -35,7 +35,12 @@
 ///   排后 + tags 行」组合承接；旧数据迁移时 category 原样映射进 domain，
 ///   用户已有的分组 chip 一个都不会消失。
 /// - 我的库：改名 / 改正文走 [renameLibraryEntry] / [updateLibraryBody]
-///   （core Expert 不可变 → 造新实例，id 与来源不动）。
+///   （core Expert 不可变 → 造新实例，id 与来源不动）；自建（mine）条目的
+///   新建/编辑/删除走 [createMineExpert] / [updateMineExpert] /
+///   [deleteMineExpert]（id 形如 `mine:<时间戳>`，持久化并入我的库同一存档
+///   键）；远端清单导入走 [installFromRemote]、本地文件导入走
+///   [installPackFromFile]——两条导入最终都汇入 [installPackJson] 这一条
+///   安装路径（校验/版本仲裁/落盘事务只在那一处）。
 /// - 排序：综合/最热两档直接交给 core `ExpertCatalog.sort`（usage 由本层注入
 ///   ——core 不存使用计数，expert_catalog.dart:411 的评测钩子位）；**最新**
 ///   档是 app 展示层概念（货架条目没有编辑时间），按我的条目 updatedAt、
@@ -43,6 +48,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io' show File;
 
 import 'package:chartools_core/chartools_core.dart' as kb;
 import 'package:flutter/foundation.dart';
@@ -50,6 +56,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'contact_store.dart';
+import 'pack_fetch_service.dart';
 import 'settings_store.dart';
 
 // ---------------------------------------------------------------------------
@@ -279,6 +286,29 @@ class ExpertApplyResult {
   final String note;
 }
 
+/// 一次远端安装的结果（[ExpertsController.installFromRemote] 的返回）。
+/// ok=false 时 [problem] 给界面直接显示（用户可读中文，含失败在哪一步）；
+/// 成功时 packId / version / expertsInstalled 描述装到了什么
+/// （expertsInstalled 是该包在货架上的可用专家条数——幂等安装返回的是
+/// 已装那份的条数）。
+class RemoteInstallReport {
+  const RemoteInstallReport({
+    required this.ok,
+    this.packId = '',
+    this.version = '',
+    this.expertsInstalled = 0,
+    this.problem = '',
+  });
+
+  final bool ok;
+  final String packId;
+  final String version;
+  final int expertsInstalled;
+
+  /// 失败/拒绝原因，给界面直接显示。
+  final String problem;
+}
+
 // ---------------------------------------------------------------------------
 // 包持久化（PackStore 的 SharedPreferences 实现）
 // ---------------------------------------------------------------------------
@@ -361,9 +391,11 @@ class ExpertsController {
     StyleSinkPort? styleSink,
     ContactPersonaSink? contactSink,
     PrefsPackStore? packStore,
+    PackFetchService? fetchService,
   })  : _styleSink = styleSink,
         _contactSink = contactSink,
-        _packStore = packStore ?? PrefsPackStore() {
+        _packStore = packStore ?? PrefsPackStore(),
+        _fetchService = fetchService ?? const PackFetchService() {
     // 内置包：构造期先做一次**同步磁盘探测**（VM / 测试 / 桌面开发路径能直接
     // 找到 packages/core/assets/experts/catalog.json）——页面在 load() 之前也
     // 有货架可看；load() 会用 rootBundle/磁盘/内嵌镜像三层的最终结果重建。
@@ -390,6 +422,10 @@ class ExpertsController {
   final StyleSinkPort? _styleSink;
   final ContactPersonaSink? _contactSink;
   final PrefsPackStore _packStore;
+
+  /// 远端清单/包体拉取（HTTP 细节在 core HttpJson.get，解析校验在 core
+  /// 两个 Codec——本类只用它的结果，见 pack_fetch_service.dart）。
+  final PackFetchService _fetchService;
 
   late kb.ExpertPackManager _manager;
   late kb.ExpertApply _apply;
@@ -714,6 +750,154 @@ class ExpertsController {
 
   // ---------------------------------------------------------- 我的库管理
 
+  /// 自建（mine）专家入库：id 形如 `mine:<严格递增毫秒时间戳>`（[_nextStamp]，
+  /// 同一毫秒连续创建也能分先后），source 置 packId 空——货架的来源串现算
+  /// 就是 'mine'（[ExpertShelfItem._sourceRefOf] 的既定口径），origin 走
+  /// remote（core ExpertOrigin 只有 builtin/remote 两档，mine 的判定靠
+  /// packId 空，见 ExpertShelfItem.sourceRef）。持久化并入我的库同一存档键
+  /// （experts_v2），写盘事务与 [renameLibraryEntry] 同风格：内存先落、盘上
+  /// 失败回滚内存并上抛，不留半截。
+  ///
+  /// 校验：名字空白拒绝；正文空白/超 64KiB 拒绝（与包条目同一护栏
+  /// kb.expertPromptTextMaxBytes——空正文套用等于清空人设）。
+  Future<kb.Expert> createMineExpert({
+    required String name,
+    required String promptText,
+    String? domain,
+    List<String> tags = const [],
+  }) async {
+    final trimmedName = name.trim();
+    if (trimmedName.isEmpty) throw ArgumentError('专家名字不能为空');
+    if (promptText.trim().isEmpty) {
+      throw ArgumentError('正文不能为空（套用空正文等于清空人设）');
+    }
+    if (utf8.encode(promptText).length > kb.expertPromptTextMaxBytes) {
+      throw ArgumentError('正文超过 ${kb.expertPromptTextMaxBytes} 字节上限');
+    }
+    final stamp = _nextStamp();
+    final expert = kb.Expert(
+      id: 'mine:$stamp',
+      key: 'mine:$stamp',
+      name: trimmedName,
+      domain: domain?.trim() ?? '',
+      promptText: promptText, // 逐字保存，不 trim（与包条目同一口径）
+      tags: <String>[
+        for (final t in tags)
+          if (t.trim().isNotEmpty) t.trim(),
+      ],
+      description: '',
+      emoji: '🧩',
+      source: const kb.ExpertSource(packId: '', packVersion: ''),
+    );
+    final meta = ExpertEntryMeta(
+      usedCount: 0,
+      updatedAt: stamp,
+      sourceRef: ExpertShelfItem._sourceRefOf(expert), // 'mine'
+    );
+    _library.add(expert);
+    _meta[expert.id] = meta;
+    _notifyLibrary();
+    try {
+      await _persistLibrary();
+    } catch (_) {
+      _library.remove(expert);
+      _meta.remove(expert.id);
+      _notifyLibrary();
+      rethrow;
+    }
+    return expert;
+  }
+
+  /// 仅自建（mine）条目可改。seed:/pack: 来源的条目拒改并抛 ArgumentError
+  /// ——包条目是上游内容的镜像，逐条改了会跟上游漂移（mine 判定与来源串
+  /// 现算同一口径：source.packId 非空即包/内置，空即自建）。name/promptText
+  /// 同时缺省抛 ArgumentError（没有要改的字段不算一次编辑）；给出的字段按
+  /// [renameLibraryEntry] / [updateLibraryBody] 同一校验。写盘事务同风格：
+  /// 失败回滚内存并上抛。
+  Future<kb.Expert> updateMineExpert(
+    String id, {
+    String? name,
+    String? promptText,
+  }) async {
+    if (name == null && promptText == null) {
+      throw ArgumentError('没有要修改的字段（name/promptText 都未提供）');
+    }
+    final idx = _library.indexWhere((e) => e.id == id);
+    if (idx < 0) {
+      throw StateError('ExpertsController.updateMineExpert: 条目不存在（$id）');
+    }
+    final prev = _library[idx];
+    if (prev.source.packId.isNotEmpty) {
+      throw ArgumentError('「${prev.name}」来自包/内置（seed:/pack: 来源），'
+          '只能修改自建（mine）专家');
+    }
+    if (name != null && name.trim().isEmpty) {
+      throw ArgumentError('新名字不能为空');
+    }
+    if (promptText != null && promptText.trim().isEmpty) {
+      throw ArgumentError('正文不能为空（套用空正文等于清空人设）');
+    }
+    if (promptText != null &&
+        utf8.encode(promptText).length > kb.expertPromptTextMaxBytes) {
+      throw ArgumentError('正文超过 ${kb.expertPromptTextMaxBytes} 字节上限');
+    }
+    final prevMeta = _meta[id] ??
+        ExpertEntryMeta(sourceRef: ExpertShelfItem._sourceRefOf(prev));
+    final next = kb.Expert(
+      id: prev.id,
+      key: prev.key,
+      name: name != null ? name.trim() : prev.name,
+      domain: prev.domain,
+      promptText: promptText ?? prev.promptText,
+      tags: List.of(prev.tags),
+      description: prev.description,
+      emoji: prev.emoji,
+      source: prev.source,
+    );
+    final nextMeta = prevMeta.copyWith(updatedAt: _nextStamp());
+    _library[idx] = next;
+    _meta[id] = nextMeta;
+    _notifyLibrary();
+    try {
+      await _persistLibrary();
+    } catch (_) {
+      _library[idx] = prev;
+      _meta[id] = prevMeta;
+      _notifyLibrary();
+      rethrow;
+    }
+    return next;
+  }
+
+  /// 仅自建（mine）条目可删，成功返回被删的那条（界面要 toast 名字）。
+  /// seed:/pack: 来源拒删抛 ArgumentError——包条目整包管理走
+  /// [uninstallPack]，不逐条删；缺失条目抛 StateError（与 update/rename
+  /// 同口径）。写盘事务同风格：失败回滚内存并上抛。
+  Future<kb.Expert> deleteMineExpert(String id) async {
+    final idx = _library.indexWhere((e) => e.id == id);
+    if (idx < 0) {
+      throw StateError('ExpertsController.deleteMineExpert: 条目不存在（$id）');
+    }
+    final removed = _library[idx];
+    if (removed.source.packId.isNotEmpty) {
+      throw ArgumentError('「${removed.name}」来自包/内置（seed:/pack: 来源），'
+          '只能删除自建（mine）专家');
+    }
+    final prevMeta = _meta[id];
+    _library.removeAt(idx);
+    _meta.remove(id);
+    _notifyLibrary();
+    try {
+      await _persistLibrary();
+    } catch (_) {
+      _library.insert(idx, removed);
+      if (prevMeta != null) _meta[id] = prevMeta;
+      _notifyLibrary();
+      rethrow;
+    }
+    return removed;
+  }
+
   /// 我的库条目改名（core Expert 不可变 → 造新实例；id/key/正文/来源都不动，
   /// updatedAt 前进——「最新」档随之浮上来）。名字空白拒绝；条目不存在抛
   /// StateError。失败回滚内存（写盘失败不产生半截改名）。
@@ -915,6 +1099,129 @@ class ExpertsController {
     }
     _refreshPacks();
     return r;
+  }
+
+  /// 本地文件导入的单文件尺寸护栏——与远端下载同一护栏（core
+  /// HttpJson.maxDownloadBytes 的 2MB）：本地文件与远端包体同为「一份包
+  /// 清单」，超限一律拒绝导入，不假装读得动。
+  static const int packFileMaxBytes = kb.HttpJson.maxDownloadBytes;
+
+  /// 从本地文件安装资产包（file_selector 选出的路径）。读文件（utf8）→
+  /// 复用 [installPackJson]——归一化、core 严格校验、版本仲裁、落盘事务
+  /// 全在那条路径上，本方法只负责把文件变成字符串再交给它。返回的
+  /// PackInstallReport 即 installPackJson 的返回类型 kb.InstallResult
+  /// （沿用不重造）。文件不存在 / 不是 UTF-8 / 超过 2MB 都抛
+  /// FormatException（message 用户可读）。
+  Future<kb.InstallResult> installPackFromFile(String filePath) async {
+    final file = File(filePath);
+    if (!file.existsSync()) {
+      throw FormatException('文件不存在：$filePath');
+    }
+    final int bytesLen;
+    try {
+      bytesLen = file.lengthSync();
+    } catch (e) {
+      throw FormatException('文件读取失败：$e');
+    }
+    if (bytesLen > packFileMaxBytes) {
+      throw FormatException('文件超过 '
+          '${(packFileMaxBytes / 1024 / 1024).toStringAsFixed(0)}MB 上限'
+          '（$bytesLen 字节），没有导入');
+    }
+    final String raw;
+    try {
+      // 先读字节再显式 utf8.decode：readAsString 对解码失败抛的是
+      // FileSystemException（语义混淆，本机实测）；显式 decode 让「不是
+      // UTF-8」以 FormatException 出现，文案可读。
+      raw = utf8.decode(file.readAsBytesSync());
+    } on FormatException {
+      throw FormatException('文件不是合法 UTF-8 文本，没有导入');
+    } catch (e) {
+      throw FormatException('文件读取失败：$e');
+    }
+    return installPackJson(raw);
+  }
+
+  /// 从远端清单安装资产包：拉清单（core RemoteManifestCodec 解析，清单级
+  /// 校验失败即拒）→ 选包 → 拉包体（[PackFetchService.fetchPack]：先过
+  /// core PackCodec 严格校验，**校验不过不落盘**）→ 复用 [installPackJson]
+  /// 安装。任何一步失败都返回 ok=false 且 problem 用户可读——**不抛**
+  /// （与 [uninstallPack] 同风格，结果直接给界面展示）。
+  ///
+  /// 选包规则：[packId] 指定则精确匹配（清单里没有该 id 报可读错误，附上
+  /// 清单里现有哪些包）；缺省（null 或空白）取版本最高的条目（并列取清单
+  /// 顺序靠前的——清单作者通常把最新的写在最前面；版本比较是 core
+  /// PackCodec.compareVersions 的唯一口径）。
+  Future<RemoteInstallReport> installFromRemote(
+    String manifestUrl, {
+    String? packId,
+  }) async {
+    // 1) 清单。
+    List<kb.RemotePackEntry> entries;
+    try {
+      entries = await _fetchService.fetchRemoteManifest(manifestUrl);
+    } on FormatException catch (e) {
+      return RemoteInstallReport(ok: false, problem: e.message);
+    } catch (e) {
+      return RemoteInstallReport(ok: false, problem: '清单拉取失败：$e');
+    }
+    // 2) 选包。
+    final kb.RemotePackEntry chosen;
+    if (packId != null && packId.trim().isNotEmpty) {
+      final wanted = packId.trim();
+      final hit = entries.where((e) => e.id == wanted).toList();
+      if (hit.isEmpty) {
+        return RemoteInstallReport(
+          ok: false,
+          problem: '清单里没有这个包：$wanted'
+              '（清单共有 ${entries.length} 个包：${entries.map((e) => e.id).join('、')}）',
+        );
+      }
+      chosen = hit.first;
+    } else {
+      chosen = entries.reduce((a, b) =>
+          kb.PackCodec.compareVersions(b.version, a.version) > 0 ? b : a);
+    }
+    // 3) 包体：fetchPack 内已过 core 严格校验，到这里的一定是合法清单原文。
+    final String raw;
+    try {
+      raw = await _fetchService.fetchPack(chosen.url);
+    } on FormatException catch (e) {
+      return RemoteInstallReport(
+          ok: false,
+          packId: chosen.id,
+          version: chosen.version,
+          problem: e.message);
+    } catch (e) {
+      return RemoteInstallReport(
+          ok: false,
+          packId: chosen.id,
+          version: chosen.version,
+          problem: '包体下载失败：$e');
+    }
+    // 4) 安装（归一化 → core 校验/版本仲裁 → 落盘事务）。
+    try {
+      final r = await installPackJson(raw);
+      return RemoteInstallReport(
+        ok: true,
+        packId: r.pack?.meta.id ?? chosen.id,
+        version: r.pack?.meta.version ?? chosen.version,
+        expertsInstalled: r.pack?.expertCount ?? 0,
+        problem: r.problem,
+      );
+    } on FormatException catch (e) {
+      return RemoteInstallReport(
+          ok: false,
+          packId: chosen.id,
+          version: chosen.version,
+          problem: e.message);
+    } catch (e) {
+      return RemoteInstallReport(
+          ok: false,
+          packId: chosen.id,
+          version: chosen.version,
+          problem: '安装失败：$e');
+    }
   }
 
   /// 卸载一个资产包（走 core ExpertPackManager.uninstall：内置包不可卸载、

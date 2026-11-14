@@ -48,6 +48,14 @@ dependencies:
   # 升直依，零新增包；path_provider_android 由根 pubspec 钉在 2.2.23（无
   # jni/CMake 构建链，见根 pubspec dependency_overrides 注释）。
   path_provider: ^2.1.6
+  # 文件选择器（专家页「从文件导入资产包」选 .json 用）：flutter.dev 第一方
+  # 联邦插件，Windows/Android 等平台实现自带（本仓库不写平台代码）。约束写
+  # ^1.1.0 而不是 ^2：2026-11 查证 pub.dev（pub.flutter-io.cn 同步）当前
+  # stable 就是 1.1.0，不存在 2.x——1.1.0 要求 Dart ^3.9.0 / Flutter
+  # >=3.35.0，本机 Dart 3.13.7 / Flutter 3.47.9 满足。经 pub.flutter-io.cn
+  # 拉取，flutter pub get 由门禁统一跑。file_selector 只进 app，core 零第
+  # 三方依赖的边界不变。
+  file_selector: ^1.1.0
 
 dev_dependencies:
   flutter_test:

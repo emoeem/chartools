@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 
 import 'api_exception.dart';
 import 'http_scope.dart';
@@ -156,6 +157,71 @@ abstract final class HttpJson {
       if (_isAborted(scope)) throw RequestCancelledException(route);
       throw ApiException(route, null, describe(e));
     } finally {
+      scope?.detach(cancel);
+    }
+  }
+
+  /// GET 下载的响应体大小上限（字节）：远端清单与包体都是**不可信数据**，
+  /// 流式读取逐块计数，超限立即 abort 断开——Content-Length 说谎时也要兜得住，
+  /// 防止恶意/出错的服务器用一个超大响应打爆内存。正常量级：清单几 KB、
+  /// 331 位专家的完整目录包约 200 KB，2MB 已是十倍余量。
+  static const int maxDownloadBytes = 2 * 1024 * 1024;
+
+  /// GET 一段 UTF-8 文本（远端清单 / 包体下载的底层通道；app 层
+  /// PackFetchService 负责其上的解析与校验）。带读超时（与缓冲路径同一
+  /// [readTimeoutMs]，连接超时在 [_client] 上统一 15s）与 [maxBytes] 大小
+  /// 上限；每个 HTTP 或传输层失败都归一成 [ApiException]（与 [post] 同一
+  /// 口径），非 2xx 的响应体片段进 snippet。
+  ///
+  /// **不重试**：清单/包体是幂等读，失败由调用方把可读 problem 交给界面、
+  /// 用户重按一次即可——不像模型请求那样值得自动退避。
+  static Future<String> get(
+    String url,
+    String route, {
+    int maxBytes = maxDownloadBytes,
+    HttpScope? scope,
+  }) async {
+    HttpClientRequest? request;
+    final cancel = () => request?.abort(RequestCancelledException(route));
+    scope?.attach(cancel);
+    Timer? readTimer;
+    try {
+      final req = await _client.openUrl('GET', Uri.parse(url));
+      request = req;
+      readTimer = Timer(const Duration(milliseconds: readTimeoutMs), () {
+        req.abort(SocketException('Read timed out'));
+      });
+      final resp = await req.close();
+      final code = resp.statusCode;
+      if (code < 200 || code > 299) {
+        final text = await resp.transform(utf8.decoder).join();
+        throw ApiException(route, code, text.ifBlank('（响应体为空）'));
+      }
+      // 流式读取 + 大小护栏：超限先断开连接再抛，半截数据一个字节都不上交。
+      final builder = BytesBuilder(copy: false);
+      var total = 0;
+      await for (final chunk in resp) {
+        total += chunk.length;
+        if (total > maxBytes) {
+          req.abort(SocketException('Response too large'));
+          throw ApiException(route, code, '响应超过 ${(maxBytes / 1024 / 1024).toStringAsFixed(0)}MB 大小上限，已中止下载');
+        }
+        builder.add(chunk);
+      }
+      try {
+        return utf8.decode(builder.takeBytes());
+      } on FormatException {
+        throw ApiException(route, code, '响应不是合法 UTF-8 文本');
+      }
+    } on RequestCancelledException {
+      rethrow;
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      if (_isAborted(scope)) throw RequestCancelledException(route);
+      throw ApiException(route, null, describe(e));
+    } finally {
+      readTimer?.cancel();
       scope?.detach(cancel);
     }
   }
